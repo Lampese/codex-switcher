@@ -34,7 +34,7 @@ fn find_codex_processes() -> anyhow::Result<Vec<u32>> {
     {
         // Use pgrep to find codex processes (exact match for "codex" command)
         let output = Command::new("pgrep")
-            .args(["-x", "codex"])  // -x for exact match
+            .args(["-x", "codex"]) // -x for exact match
             .output();
 
         if let Ok(output) = output {
@@ -53,27 +53,26 @@ fn find_codex_processes() -> anyhow::Result<Vec<u32>> {
 
         // Use ps with custom format to get the actual command name
         // %c = command name only, %p = pid
-        let output = Command::new("ps")
-            .args(["-eo", "pid,comm"])
-            .output();
+        let output = Command::new("ps").args(["-eo", "pid,comm"]).output();
 
         if let Ok(output) = output {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines().skip(1) {  // Skip header
+            for line in stdout.lines().skip(1) {
+                // Skip header
                 let parts: Vec<&str> = line.trim().split_whitespace().collect();
                 if parts.len() >= 2 {
                     let command = parts[1..].join(" ");
-                    
+
                     // Only match if the actual command/binary name is "codex"
                     // This excludes "brew upgrade codex" because the command is "brew"
-                    let is_codex = command == "codex" 
+                    let is_codex = command == "codex"
                         || command.ends_with("/codex")
                         || command.starts_with("codex ");
-                    
+
                     // Skip our own app
-                    let is_switcher = command.contains("codex-switcher") 
-                        || command.contains("Codex Switcher");
-                    
+                    let is_switcher =
+                        command.contains("codex-switcher") || command.contains("Codex Switcher");
+
                     if is_codex && !is_switcher {
                         if let Ok(pid) = parts[0].parse::<u32>() {
                             if pid != std::process::id() && !pids.contains(&pid) {

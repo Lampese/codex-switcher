@@ -35,8 +35,8 @@ pub fn switch_to_account(account: &StoredAccount) -> Result<()> {
     let auth_json = create_auth_json(account)?;
 
     let auth_path = codex_home.join("auth.json");
-    let content = serde_json::to_string_pretty(&auth_json)
-        .context("Failed to serialize auth.json")?;
+    let content =
+        serde_json::to_string_pretty(&auth_json).context("Failed to serialize auth.json")?;
 
     fs::write(&auth_path, content)
         .with_context(|| format!("Failed to write auth.json: {}", auth_path.display()))?;
@@ -80,8 +80,8 @@ fn create_auth_json(account: &StoredAccount) -> Result<AuthDotJson> {
 
 /// Import an account from an existing auth.json file
 pub fn import_from_auth_json(path: &str, account_name: String) -> Result<StoredAccount> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read auth.json: {path}"))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read auth.json: {path}"))?;
 
     let auth: AuthDotJson = serde_json::from_str(&content)
         .with_context(|| format!("Failed to parse auth.json: {path}"))?;
@@ -115,13 +115,11 @@ fn parse_id_token_claims(id_token: &str) -> (Option<String>, Option<String>) {
     }
 
     // Decode the payload (second part)
-    let payload = match base64::Engine::decode(
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        parts[1],
-    ) {
-        Ok(bytes) => bytes,
-        Err(_) => return (None, None),
-    };
+    let payload =
+        match base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, parts[1]) {
+            Ok(bytes) => bytes,
+            Err(_) => return (None, None),
+        };
 
     let json: serde_json::Value = match serde_json::from_slice(&payload) {
         Ok(v) => v,

@@ -45,8 +45,8 @@ pub fn save_accounts(store: &AccountsStore) -> Result<()> {
             .with_context(|| format!("Failed to create config directory: {}", parent.display()))?;
     }
 
-    let content = serde_json::to_string_pretty(store)
-        .context("Failed to serialize accounts store")?;
+    let content =
+        serde_json::to_string_pretty(store).context("Failed to serialize accounts store")?;
 
     fs::write(&path, content)
         .with_context(|| format!("Failed to write accounts file: {}", path.display()))?;
@@ -156,7 +156,11 @@ pub fn update_account_metadata(
 
     // Check for duplicate names first (if renaming)
     if let Some(ref new_name) = name {
-        if store.accounts.iter().any(|a| a.id != account_id && a.name == *new_name) {
+        if store
+            .accounts
+            .iter()
+            .any(|a| a.id != account_id && a.name == *new_name)
+        {
             anyhow::bail!("An account with name '{new_name}' already exists");
         }
     }

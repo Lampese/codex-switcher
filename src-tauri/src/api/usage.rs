@@ -13,7 +13,7 @@ const CHATGPT_BACKEND_API: &str = "https://chatgpt.com/backend-api";
 /// Get usage information for an account
 pub async fn get_account_usage(account: &StoredAccount) -> Result<UsageInfo> {
     println!("[Usage] Fetching usage for account: {}", account.name);
-    
+
     match &account.auth_data {
         AuthData::ApiKey { .. } => {
             println!("[Usage] API key accounts don't support usage info");
@@ -36,7 +36,15 @@ pub async fn get_account_usage(account: &StoredAccount) -> Result<UsageInfo> {
             access_token,
             account_id,
             ..
-        } => get_usage_with_chatgpt_token(&account.id, &account.name, access_token, account_id.as_deref()).await,
+        } => {
+            get_usage_with_chatgpt_token(
+                &account.id,
+                &account.name,
+                access_token,
+                account_id.as_deref(),
+            )
+            .await
+        }
     }
 }
 
@@ -50,14 +58,10 @@ async fn get_usage_with_chatgpt_token(
     let client = reqwest::Client::new();
 
     let mut headers = HeaderMap::new();
-    headers.insert(
-        USER_AGENT,
-        HeaderValue::from_static("codex-cli/1.0.0"),
-    );
+    headers.insert(USER_AGENT, HeaderValue::from_static("codex-cli/1.0.0"));
     headers.insert(
         AUTHORIZATION,
-        HeaderValue::from_str(&format!("Bearer {access_token}"))
-            .context("Invalid access token")?,
+        HeaderValue::from_str(&format!("Bearer {access_token}")).context("Invalid access token")?,
     );
 
     if let Some(acc_id) = chatgpt_account_id {
@@ -92,21 +96,26 @@ async fn get_usage_with_chatgpt_token(
         ));
     }
 
-    let body_text = response.text().await.context("Failed to read response body")?;
-    println!("[Usage] Response body: {}", &body_text[..body_text.len().min(200)]);
+    let body_text = response
+        .text()
+        .await
+        .context("Failed to read response body")?;
+    println!(
+        "[Usage] Response body: {}",
+        &body_text[..body_text.len().min(200)]
+    );
 
-    let payload: RateLimitStatusPayload = serde_json::from_str(&body_text)
-        .context("Failed to parse usage response")?;
+    let payload: RateLimitStatusPayload =
+        serde_json::from_str(&body_text).context("Failed to parse usage response")?;
 
     println!("[Usage] Parsed plan_type: {}", payload.plan_type);
-    
+
     let usage = convert_payload_to_usage_info(account_id, payload);
-    println!("[Usage] {} - primary: {:?}%, plan: {:?}", 
-        account_name, 
-        usage.primary_used_percent, 
-        usage.plan_type
+    println!(
+        "[Usage] {} - primary: {:?}%, plan: {:?}",
+        account_name, usage.primary_used_percent, usage.plan_type
     );
-    
+
     Ok(usage)
 }
 
@@ -153,7 +162,7 @@ fn extract_credits(credits: Option<CreditStatusDetails>) -> Option<CreditStatusD
 /// Refresh all account usage in parallel
 pub async fn refresh_all_usage(accounts: &[StoredAccount]) -> Vec<UsageInfo> {
     println!("[Usage] Refreshing usage for {} accounts", accounts.len());
-    
+
     let futures: Vec<_> = accounts
         .iter()
         .map(|account| async move {

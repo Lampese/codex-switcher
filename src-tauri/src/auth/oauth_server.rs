@@ -64,7 +64,7 @@ fn build_authorize_url(
         ("id_token_add_organizations", "true"),
         ("codex_cli_simplified_flow", "true"),
         ("state", state),
-        ("originator", "codex_cli_rs"),  // Required by OpenAI OAuth
+        ("originator", "codex_cli_rs"), // Required by OpenAI OAuth
     ];
 
     let query_string = params
@@ -116,7 +116,10 @@ async fn exchange_code_for_tokens(
         anyhow::bail!("Token exchange failed: {status} - {body}");
     }
 
-    let tokens: TokenResponse = resp.json().await.context("Failed to parse token response")?;
+    let tokens: TokenResponse = resp
+        .json()
+        .await
+        .context("Failed to parse token response")?;
     Ok(tokens)
 }
 
@@ -160,7 +163,9 @@ pub struct OAuthLoginResult {
 }
 
 /// Start the OAuth login flow
-pub async fn start_oauth_login(account_name: String) -> Result<(OAuthLoginInfo, oneshot::Receiver<Result<OAuthLoginResult>>)> {
+pub async fn start_oauth_login(
+    account_name: String,
+) -> Result<(OAuthLoginInfo, oneshot::Receiver<Result<OAuthLoginResult>>)> {
     let pkce = generate_pkce();
     let state = generate_state();
 
@@ -289,14 +294,21 @@ async fn handle_oauth_request(
         let params: std::collections::HashMap<String, String> =
             parsed.query_pairs().into_owned().collect();
 
-        println!("[OAuth] Callback params: {:?}", params.keys().collect::<Vec<_>>());
+        println!(
+            "[OAuth] Callback params: {:?}",
+            params.keys().collect::<Vec<_>>()
+        );
 
         // Check for error response
         if let Some(error) = params.get("error") {
-            let error_desc = params.get("error_description").map(|s| s.as_str()).unwrap_or("Unknown error");
+            let error_desc = params
+                .get("error_description")
+                .map(|s| s.as_str())
+                .unwrap_or("Unknown error");
             println!("[OAuth] Error from provider: {error} - {error_desc}");
             let _ = request.respond(
-                Response::from_string(format!("OAuth Error: {error} - {error_desc}")).with_status_code(400),
+                Response::from_string(format!("OAuth Error: {error} - {error_desc}"))
+                    .with_status_code(400),
             );
             return HandleResult::Error(anyhow::anyhow!("OAuth error: {error} - {error_desc}"));
         }
@@ -365,11 +377,10 @@ async fn handle_oauth_request(
 </body>
 </html>"#;
 
-                let response = Response::from_string(success_html)
-                    .with_header(
-                        Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
-                            .unwrap(),
-                    );
+                let response = Response::from_string(success_html).with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
+                        .unwrap(),
+                );
                 let _ = request.respond(response);
 
                 return HandleResult::Success(account);
