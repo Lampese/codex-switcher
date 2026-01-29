@@ -2,6 +2,12 @@
 
 use std::process::Command;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 /// Information about running Codex processes
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CodexProcessInfo {
@@ -89,6 +95,8 @@ fn find_codex_processes() -> anyhow::Result<Vec<u32>> {
     {
         // Use tasklist on Windows - match exact "codex.exe"
         let output = Command::new("tasklist")
+            // Prevent a console window from flashing when this command is invoked from the GUI app.
+            .creation_flags(CREATE_NO_WINDOW)
             .args(["/FI", "IMAGENAME eq codex.exe", "/FO", "CSV", "/NH"])
             .output();
 
