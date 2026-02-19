@@ -27,6 +27,7 @@ export function AddAccountModal({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [oauthPending, setOauthPending] = useState(false);
+  const isPrimaryDisabled = loading || (activeTab === "oauth" && oauthPending);
 
   const resetForm = () => {
     setName("");
@@ -134,6 +135,13 @@ export function AddAccountModal({
             <button
               key={tab}
               onClick={() => {
+                if (tab === "import" && oauthPending) {
+                  void onCancelOAuth().catch((err) => {
+                    console.error("Failed to cancel login:", err);
+                  });
+                  setOauthPending(false);
+                  setLoading(false);
+                }
                 setActiveTab(tab);
                 setError(null);
               }}
@@ -224,7 +232,7 @@ export function AddAccountModal({
           </button>
           <button
             onClick={activeTab === "oauth" ? handleOAuthLogin : handleImportFile}
-            disabled={loading || oauthPending}
+            disabled={isPrimaryDisabled}
             className="flex-1 px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 text-white transition-colors disabled:opacity-50"
           >
             {loading

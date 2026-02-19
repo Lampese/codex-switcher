@@ -1,6 +1,7 @@
 //! OAuth login Tauri commands
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
 use crate::auth::oauth_server::{start_oauth_login, wait_for_oauth_login, OAuthLoginResult};
@@ -9,21 +10,33 @@ use crate::auth::{
 };
 use crate::types::{AccountInfo, OAuthLoginInfo};
 
+struct PendingOAuth {
+    rx: oneshot::Receiver<anyhow::Result<OAuthLoginResult>>,
+    cancelled: Arc<AtomicBool>,
+}
+
 // Global state for pending OAuth login
-static PENDING_OAUTH: Mutex<Option<oneshot::Receiver<anyhow::Result<OAuthLoginResult>>>> =
-    Mutex::new(None);
+static PENDING_OAUTH: Mutex<Option<PendingOAuth>> = Mutex::new(None);
 
 /// Start the OAuth login flow
 #[tauri::command]
 pub async fn start_login(account_name: String) -> Result<OAuthLoginInfo, String> {
-    let (info, rx) = start_oauth_login(account_name)
+    // Cancel any previous pending flow so it does not keep the callback port occupied.
+    if let Some(previous) = {
+        let mut pending = PENDING_OAUTH.lock().unwrap();
+        pending.take()
+    } {
+        previous.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    let (info, rx, cancelled) = start_oauth_login(account_name)
         .await
         .map_err(|e| e.to_string())?;
 
     // Store the receiver for later
     {
         let mut pending = PENDING_OAUTH.lock().unwrap();
-        *pending = Some(rx);
+        *pending = Some(PendingOAuth { rx, cancelled });
     }
 
     Ok(info)
@@ -32,14 +45,16 @@ pub async fn start_login(account_name: String) -> Result<OAuthLoginInfo, String>
 /// Wait for the OAuth login to complete and add the account
 #[tauri::command]
 pub async fn complete_login() -> Result<AccountInfo, String> {
-    let rx = {
+    let pending = {
         let mut pending = PENDING_OAUTH.lock().unwrap();
         pending
             .take()
             .ok_or_else(|| "No pending OAuth login".to_string())?
     };
 
-    let account = wait_for_oauth_login(rx).await.map_err(|e| e.to_string())?;
+    let account = wait_for_oauth_login(pending.rx)
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Add the account to storage
     let stored = add_account(account).map_err(|e| e.to_string())?;
@@ -59,6 +74,8 @@ pub async fn complete_login() -> Result<AccountInfo, String> {
 #[tauri::command]
 pub async fn cancel_login() -> Result<(), String> {
     let mut pending = PENDING_OAUTH.lock().unwrap();
-    *pending = None;
+    if let Some(pending_oauth) = pending.take() {
+        pending_oauth.cancelled.store(true, Ordering::Relaxed);
+    }
     Ok(())
 }

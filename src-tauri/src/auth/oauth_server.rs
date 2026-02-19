@@ -1,5 +1,6 @@
 //! Local OAuth server for handling ChatGPT login flow
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -165,16 +166,31 @@ pub struct OAuthLoginResult {
 /// Start the OAuth login flow
 pub async fn start_oauth_login(
     account_name: String,
-) -> Result<(OAuthLoginInfo, oneshot::Receiver<Result<OAuthLoginResult>>)> {
+) -> Result<(
+    OAuthLoginInfo,
+    oneshot::Receiver<Result<OAuthLoginResult>>,
+    Arc<AtomicBool>,
+)> {
     let pkce = generate_pkce();
     let state = generate_state();
 
     println!("[OAuth] Starting login for account: {account_name}");
     println!("[OAuth] PKCE challenge: {}", &pkce.code_challenge[..20]);
 
-    // Try to bind to the server
-    let server = Server::http(format!("127.0.0.1:{DEFAULT_PORT}"))
-        .map_err(|e| anyhow::anyhow!("Failed to start OAuth server: {e}"))?;
+    // Try official default port first; fall back to a random free port if it is busy.
+    let server = match Server::http(format!("127.0.0.1:{DEFAULT_PORT}")) {
+        Ok(server) => server,
+        Err(default_err) => {
+            println!(
+                "[OAuth] Default callback port {DEFAULT_PORT} unavailable ({default_err}), using a random local port"
+            );
+            Server::http("127.0.0.1:0").map_err(|fallback_err| {
+                anyhow::anyhow!(
+                    "Failed to start OAuth server: default port {DEFAULT_PORT} error: {default_err}; fallback error: {fallback_err}"
+                )
+            })?
+        }
+    };
 
     let actual_port = match server.server_addr().to_ip() {
         Some(addr) => addr.port(),
@@ -195,11 +211,13 @@ pub async fn start_oauth_login(
 
     // Create a channel for the result
     let (tx, rx) = oneshot::channel();
+    let cancelled = Arc::new(AtomicBool::new(false));
 
     // Spawn the server in a background thread
     let server = Arc::new(server);
     let pkce_clone = pkce.clone();
     let state_clone = state.clone();
+    let cancelled_clone = cancelled.clone();
 
     thread::spawn(move || {
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -209,6 +227,7 @@ pub async fn start_oauth_login(
             state_clone,
             redirect_uri,
             account_name,
+            cancelled_clone,
         ));
         let _ = tx.send(result);
     });
@@ -216,7 +235,7 @@ pub async fn start_oauth_login(
     // Open the browser
     let _ = webbrowser::open(&auth_url);
 
-    Ok((login_info, rx))
+    Ok((login_info, rx, cancelled))
 }
 
 /// Run the OAuth callback server
@@ -226,11 +245,16 @@ async fn run_oauth_server(
     expected_state: String,
     redirect_uri: String,
     account_name: String,
+    cancelled: Arc<AtomicBool>,
 ) -> Result<OAuthLoginResult> {
     let timeout = Duration::from_secs(300); // 5 minute timeout
     let start = std::time::Instant::now();
 
     loop {
+        if cancelled.load(Ordering::Relaxed) {
+            anyhow::bail!("OAuth login cancelled");
+        }
+
         if start.elapsed() > timeout {
             anyhow::bail!("OAuth login timed out");
         }
