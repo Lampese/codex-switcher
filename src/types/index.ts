@@ -40,6 +40,7 @@ export interface AccountWithUsage extends AccountInfo {
 
 export interface CodexProcessInfo {
   count: number;
+  background_count: number;
   can_switch: boolean;
   pids: number[];
 }

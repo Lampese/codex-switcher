@@ -70,6 +70,26 @@ pub async fn switch_account(account_id: String) -> Result<(), String> {
     // Update last_used_at
     touch_account(&account_id).map_err(|e| e.to_string())?;
 
+    // Restart Antigravity background process if it is running
+    // This allows it to pick up the new authorization file seamlessly
+    if let Ok(pids) = find_antigravity_processes() {
+        for pid in pids {
+            #[cfg(unix)]
+            {
+                let _ = std::process::Command::new("kill")
+                    .arg("-9")
+                    .arg(pid.to_string())
+                    .output();
+            }
+            #[cfg(windows)]
+            {
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/F", "/PID", &pid.to_string()])
+                    .output();
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -86,4 +106,65 @@ pub async fn rename_account(account_id: String, new_name: String) -> Result<(), 
     crate::auth::storage::update_account_metadata(&account_id, Some(new_name), None, None)
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Find all running Antigravity codex assistant processes
+fn find_antigravity_processes() -> anyhow::Result<Vec<u32>> {
+    let mut pids = Vec::new();
+
+    #[cfg(unix)]
+    {
+        // Use ps with custom format to get the pid and full command line
+        let output = std::process::Command::new("ps").args(["-eo", "pid,command"]).output()?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines().skip(1) {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            
+            if let Some((pid_str, command)) = line.split_once(' ') {
+                let pid_str = pid_str.trim();
+                let command = command.trim();
+                
+                // Antigravity processes have a specific path format
+                let is_antigravity = (command.contains(".antigravity/extensions/openai.chatgpt") || command.contains(".vscode/extensions/openai.chatgpt")) 
+                    && (command.ends_with("codex app-server --analytics-default-enabled") || command.contains("/codex app-server"));
+                
+                if is_antigravity {
+                    if let Ok(pid) = pid_str.parse::<u32>() {
+                        pids.push(pid);
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        // Use tasklist on Windows
+        // For Windows we might need a more precise WMI query to get command line args, 
+        // but for now we look for codex.exe PIDs and verify they're not ours
+        let output = std::process::Command::new("tasklist")
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .args(["/FI", "IMAGENAME eq codex.exe", "/FO", "CSV", "/NH"])
+            .output()?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split(',').collect();
+            if parts.len() > 1 {
+                let name = parts[0].trim_matches('"').to_lowercase();
+                if name == "codex.exe" {
+                    let pid_str = parts[1].trim_matches('"');
+                    if let Ok(pid) = pid_str.parse::<u32>() {
+                        pids.push(pid);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(pids)
 }

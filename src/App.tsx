@@ -128,20 +128,27 @@ function App() {
               {/* Process Status Indicator */}
               {processInfo && (
                 <div
-                  className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm ${
-                    hasRunningProcesses
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm h-10 ${hasRunningProcesses
                       ? "bg-amber-50 text-amber-700 border border-amber-200"
                       : "bg-green-50 text-green-700 border border-green-200"
-                  }`}
+                    }`}
                 >
                   <span
-                    className={`inline-block w-2 h-2 rounded-full ${
-                      hasRunningProcesses ? "bg-amber-500 animate-pulse" : "bg-green-500"
-                    }`}
+                    className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${hasRunningProcesses ? "bg-amber-500 animate-pulse" : "bg-green-500"
+                      }`}
                   ></span>
-                  {hasRunningProcesses
-                    ? `${processInfo.count} Codex running`
-                    : "No Codex running"}
+                  <div className="flex items-center gap-1.5 whitespace-nowrap">
+                    <span>
+                      {hasRunningProcesses
+                        ? `${processInfo.count} Codex running`
+                        : "No Codex running"}
+                    </span>
+                    {processInfo.background_count > 0 && (
+                      <span className="opacity-70 text-xs font-medium">
+                        (+{processInfo.background_count} in IDE)
+                      </span>
+                    )}
+                  </div>
                 </div>
               )}
               <button
@@ -208,7 +215,7 @@ function App() {
                 </h2>
                 <AccountCard
                   account={activeAccount}
-                  onSwitch={() => {}}
+                  onSwitch={() => { }}
                   onDelete={() => handleDelete(activeAccount.id)}
                   onRefresh={() => refreshSingleUsage(activeAccount.id)}
                   onRename={(newName) => renameAccount(activeAccount.id, newName)}
