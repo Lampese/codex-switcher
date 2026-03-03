@@ -232,9 +232,6 @@ pub async fn start_oauth_login(
         let _ = tx.send(result);
     });
 
-    // Open the browser
-    let _ = webbrowser::open(&auth_url);
-
     Ok((login_info, rx, cancelled))
 }
 

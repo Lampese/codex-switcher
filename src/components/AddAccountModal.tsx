@@ -27,6 +27,8 @@ export function AddAccountModal({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [oauthPending, setOauthPending] = useState(false);
+  const [authUrl, setAuthUrl] = useState<string>("");
+  const [copied, setCopied] = useState<boolean>(false);
   const isPrimaryDisabled = loading || (activeTab === "oauth" && oauthPending);
 
   const resetForm = () => {
@@ -35,6 +37,7 @@ export function AddAccountModal({
     setError(null);
     setLoading(false);
     setOauthPending(false);
+    setAuthUrl("");
   };
 
   const handleClose = () => {
@@ -55,11 +58,9 @@ export function AddAccountModal({
       setLoading(true);
       setError(null);
       const info = await onStartOAuth(name.trim());
+      setAuthUrl(info.auth_url);
       setOauthPending(true);
       setLoading(false);
-
-      // Open the auth URL in browser
-      await openUrl(info.auth_url);
 
       // Wait for completion
       await onCompleteOAuth();
@@ -145,11 +146,10 @@ export function AddAccountModal({
                 setActiveTab(tab);
                 setError(null);
               }}
-              className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
-                activeTab === tab
+              className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${activeTab === tab
                   ? "text-gray-900 border-b-2 border-gray-900 -mb-px"
                   : "text-gray-400 hover:text-gray-600"
-              }`}
+                }`}
             >
               {tab === "oauth" ? "ChatGPT Login" : "Import File"}
             </button>
@@ -178,15 +178,43 @@ export function AddAccountModal({
               {oauthPending ? (
                 <div className="text-center py-4">
                   <div className="animate-spin h-8 w-8 border-2 border-gray-900 border-t-transparent rounded-full mx-auto mb-3"></div>
-                  <p className="text-gray-700">Waiting for browser login...</p>
-                  <p className="text-xs text-gray-400 mt-1">
-                    Complete the login in your browser
+                  <p className="text-gray-700 font-medium mb-2">Waiting for browser login...</p>
+                  <p className="text-xs text-gray-500 mb-4">
+                    Please open the following link in your browser to proceed:
                   </p>
+                  <div className="flex items-center gap-2 mb-2 bg-gray-50 p-2 rounded-lg border border-gray-200">
+                    <input
+                      type="text"
+                      readOnly
+                      value={authUrl}
+                      className="flex-1 bg-transparent border-none text-xs text-gray-600 focus:outline-none focus:ring-0 truncate"
+                    />
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(authUrl);
+                        setCopied(true);
+                        setTimeout(() => setCopied(false), 2000);
+                      }}
+                      className={`px-3 py-1.5 border rounded text-xs font-medium transition-colors shrink-0 
+                        ${copied
+                          ? "bg-green-50 border-green-200 text-green-700"
+                          : "bg-white border-gray-200 text-gray-700 hover:bg-gray-50"
+                        }`}
+                    >
+                      {copied ? "Copied!" : "Copy"}
+                    </button>
+                    <button
+                      onClick={() => openUrl(authUrl)}
+                      className="px-3 py-1.5 bg-gray-900 border border-gray-900 rounded text-xs font-medium text-white hover:bg-gray-800 transition-colors shrink-0"
+                    >
+                      Open
+                    </button>
+                  </div>
                 </div>
               ) : (
                 <p>
-                  Click the button below to log in with your ChatGPT account.
-                  Your browser will open for authentication.
+                  Click the button below to generate a login link.
+                  You will need to open it in your browser to authenticate.
                 </p>
               )}
             </div>
@@ -238,7 +266,7 @@ export function AddAccountModal({
             {loading
               ? "Adding..."
               : activeTab === "oauth"
-                ? "Login with ChatGPT"
+                ? "Generate Login Link"
                 : "Import"}
           </button>
         </div>
