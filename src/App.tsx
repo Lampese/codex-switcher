@@ -366,8 +366,8 @@ function App() {
                         }
                         className="appearance-none font-sans text-xs sm:text-sm font-medium pl-3 pr-9 py-2 rounded-xl border border-gray-300 bg-gradient-to-b from-white to-gray-50 text-gray-700 shadow-sm hover:border-gray-400 hover:shadow focus:outline-none focus:ring-2 focus:ring-gray-300 focus:border-gray-400 transition-all"
                       >
-                        <option value="deadline_asc">Deadline: earliest to latest</option>
-                        <option value="deadline_desc">Deadline: latest to earliest</option>
+                        <option value="deadline_asc">Reset: earliest to latest</option>
+                        <option value="deadline_desc">Reset: latest to earliest</option>
                         <option value="remaining_desc">
                           % remaining: highest to lowest
                         </option>
