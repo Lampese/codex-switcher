@@ -3,8 +3,35 @@ import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { useAccounts } from "./hooks/useAccounts";
 import { AccountCard, AddAccountModal } from "./components";
-import type { CodexProcessInfo } from "./types";
+import type { AppSettings, CodexProcessInfo, ExportSecurityMode } from "./types";
 import "./App.css";
+
+const SECURITY_OPTIONS: Array<{
+  mode: ExportSecurityMode;
+  title: string;
+  description: string;
+  badge?: string;
+}> = [
+  {
+    mode: "keychain",
+    title: "OS Keychain",
+    description:
+      "Best for this device. Full backups use a secret stored in your operating system keychain.",
+    badge: "Recommended",
+  },
+  {
+    mode: "passphrase",
+    title: "Passphrase",
+    description:
+      "Portable encrypted backups. You will enter the passphrase when exporting and importing.",
+  },
+  {
+    mode: "less_secure",
+    title: "Less Secure",
+    description:
+      "Keeps the current built-in fallback secret for compatibility, but it is weaker than the other options.",
+  },
+];
 
 function App() {
   const {
@@ -26,6 +53,8 @@ function App() {
     startOAuthLogin,
     completeOAuthLogin,
     cancelOAuthLogin,
+    getAppSettings,
+    saveExportSecurityMode,
   } = useAccounts();
 
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -56,6 +85,8 @@ function App() {
     "deadline_asc" | "deadline_desc" | "remaining_desc" | "remaining_asc"
   >("deadline_asc");
   const [isActionsMenuOpen, setIsActionsMenuOpen] = useState(false);
+  const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
+  const [isSavingSecurityMode, setIsSavingSecurityMode] = useState(false);
   const actionsMenuRef = useRef<HTMLDivElement | null>(null);
 
   const toggleMask = (accountId: string) => {
@@ -98,6 +129,14 @@ function App() {
     const interval = setInterval(checkProcesses, 3000); // Check every 3 seconds
     return () => clearInterval(interval);
   }, [checkProcesses]);
+
+  useEffect(() => {
+    getAppSettings()
+      .then(setAppSettings)
+      .catch((err) => {
+        console.error("Failed to load app settings:", err);
+      });
+  }, [getAppSettings]);
 
   useEffect(() => {
     if (!isActionsMenuOpen) return;
@@ -275,7 +314,21 @@ function App() {
 
       if (!selected) return;
 
-      await exportAccountsFullEncryptedFile(selected);
+      let passphrase: string | undefined;
+      if (appSettings?.export_security_mode === "passphrase") {
+        const entered = window.prompt("Enter a passphrase for this backup file:");
+        if (!entered) return;
+
+        const confirmed = window.prompt("Re-enter the passphrase to confirm:");
+        if (entered !== confirmed) {
+          showWarmupToast("Passphrases did not match", true);
+          return;
+        }
+
+        passphrase = entered;
+      }
+
+      await exportAccountsFullEncryptedFile(selected, passphrase);
       showWarmupToast("Full encrypted file exported.");
     } catch (err) {
       console.error("Failed to export full encrypted file:", err);
@@ -301,7 +354,20 @@ function App() {
 
       if (!selected || Array.isArray(selected)) return;
 
-      const summary = await importAccountsFullEncryptedFile(selected);
+      let summary;
+      try {
+        summary = await importAccountsFullEncryptedFile(selected);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (!message.includes("requires the passphrase")) {
+          throw err;
+        }
+
+        const passphrase = window.prompt("Enter the passphrase used for this backup:");
+        if (!passphrase) return;
+        summary = await importAccountsFullEncryptedFile(selected, passphrase);
+      }
+
       setMaskedAccounts(new Set());
       showWarmupToast(
         `Imported ${summary.imported_count}, skipped ${summary.skipped_count} (total ${summary.total_in_payload})`
@@ -317,6 +383,22 @@ function App() {
   const activeAccount = accounts.find((a) => a.is_active);
   const otherAccounts = accounts.filter((a) => !a.is_active);
   const hasRunningProcesses = processInfo && processInfo.count > 0;
+  const needsSecurityOnboarding =
+    accounts.length === 0 && appSettings && !appSettings.export_security_mode;
+
+  const handleSelectSecurityMode = async (mode: ExportSecurityMode) => {
+    try {
+      setIsSavingSecurityMode(true);
+      const nextSettings = await saveExportSecurityMode(mode);
+      setAppSettings(nextSettings);
+      showWarmupToast(`Backup security mode set to ${mode.replace("_", " ")}`);
+    } catch (err) {
+      console.error("Failed to save export security mode:", err);
+      showWarmupToast("Failed to save backup security mode", true);
+    } finally {
+      setIsSavingSecurityMode(false);
+    }
+  };
 
   const sortedOtherAccounts = useMemo(() => {
     const getResetDeadline = (resetAt: number | null | undefined) =>
@@ -669,6 +751,43 @@ function App() {
       {deleteConfirmId && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-3 bg-red-600 text-white rounded-lg shadow-lg text-sm">
           Click delete again to confirm removal
+        </div>
+      )}
+
+      {needsSecurityOnboarding && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+          <div className="w-full max-w-3xl rounded-3xl bg-white shadow-2xl border border-gray-200 overflow-hidden">
+            <div className="border-b border-gray-100 px-6 py-5">
+              <h2 className="text-xl font-semibold text-gray-900">
+                Choose your backup security mode
+              </h2>
+              <p className="mt-2 text-sm text-gray-500">
+                New users should choose how full backup files are protected before getting started.
+              </p>
+            </div>
+            <div className="grid gap-4 p-6 md:grid-cols-3">
+              {SECURITY_OPTIONS.map((option) => (
+                <button
+                  key={option.mode}
+                  disabled={isSavingSecurityMode}
+                  onClick={() => {
+                    void handleSelectSecurityMode(option.mode);
+                  }}
+                  className="rounded-2xl border border-gray-200 p-5 text-left hover:border-gray-400 hover:shadow-md transition-all disabled:opacity-60"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <h3 className="text-base font-semibold text-gray-900">{option.title}</h3>
+                    {option.badge && (
+                      <span className="rounded-full bg-emerald-50 border border-emerald-200 px-2 py-0.5 text-xs font-medium text-emerald-700">
+                        {option.badge}
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-3 text-sm leading-6 text-gray-500">{option.description}</p>
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
       )}
 
