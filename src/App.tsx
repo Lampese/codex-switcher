@@ -1,10 +1,96 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { useAccounts } from "./hooks/useAccounts";
-import { AccountCard, AddAccountModal } from "./components";
-import type { CodexProcessInfo } from "./types";
+import {
+  AccountCard,
+  AddAccountModal,
+  MissedScheduledWarmupModal,
+  ScheduledWarmupsModal,
+} from "./components";
+import type {
+  AppSettings,
+  CodexProcessInfo,
+  ExportSecurityMode,
+  ScheduledWarmupEvent,
+  ScheduledWarmupSettings,
+  ScheduledWarmupStatus,
+  WarmupSummary,
+} from "./types";
 import "./App.css";
+
+const SECURITY_OPTIONS: Array<{
+  mode: ExportSecurityMode;
+  title: string;
+  description: string;
+  badge?: string;
+}> = [
+  {
+    mode: "keychain",
+    title: "OS Keychain",
+    description:
+      "Best for this device. Full backups use a secret stored in your operating system keychain.",
+    badge: "Recommended",
+  },
+  {
+    mode: "passphrase",
+    title: "Passphrase",
+    description:
+      "Portable encrypted backups. You will enter the passphrase when exporting and importing.",
+  },
+  {
+    mode: "less_secure",
+    title: "Less Secure",
+    description:
+      "Keeps the current built-in fallback secret for compatibility, but it is weaker than the other options.",
+  },
+];
+
+function formatScheduledTime(localTime: string | null | undefined) {
+  if (!localTime) return null;
+  const [hours, minutes] = localTime.split(":").map(Number);
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) return localTime;
+
+  const value = new Date();
+  value.setHours(hours, minutes, 0, 0);
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(value);
+}
+
+function formatNextRun(nextRunLocalIso: string | null | undefined) {
+  if (!nextRunLocalIso) return null;
+  const value = new Date(nextRunLocalIso);
+  if (Number.isNaN(value.getTime())) return null;
+
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(value);
+}
+
+function summarizeWarmup(summary: WarmupSummary) {
+  if (summary.total_accounts === 0) {
+    return { message: "No scheduled accounts were available to warm", isError: true };
+  }
+
+  if (summary.failed_account_ids.length === 0) {
+    return {
+      message: `Warm-up sent for ${summary.warmed_accounts} scheduled account${
+        summary.warmed_accounts === 1 ? "" : "s"
+      }`,
+      isError: false,
+    };
+  }
+
+  return {
+    message: `Warmed ${summary.warmed_accounts}/${summary.total_accounts}. Failed: ${summary.failed_account_ids.length}`,
+    isError: true,
+  };
+}
 
 function App() {
   const {
@@ -26,9 +112,17 @@ function App() {
     startOAuthLogin,
     completeOAuthLogin,
     cancelOAuthLogin,
+    getAppSettings,
+    saveExportSecurityMode,
+    saveScheduledWarmupSettings,
+    getScheduledWarmupStatus,
+    dismissMissedScheduledWarmup,
+    runScheduledWarmupNow,
   } = useAccounts();
 
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [isScheduledWarmupsModalOpen, setIsScheduledWarmupsModalOpen] = useState(false);
+  const [isMissedScheduledWarmupModalOpen, setIsMissedScheduledWarmupModalOpen] = useState(false);
   const [isConfigModalOpen, setIsConfigModalOpen] = useState(false);
   const [configModalMode, setConfigModalMode] = useState<"slim_export" | "slim_import">(
     "slim_export"
@@ -56,6 +150,11 @@ function App() {
     "deadline_asc" | "deadline_desc" | "remaining_desc" | "remaining_asc"
   >("deadline_asc");
   const [isActionsMenuOpen, setIsActionsMenuOpen] = useState(false);
+  const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
+  const [isSavingSecurityMode, setIsSavingSecurityMode] = useState(false);
+  const [scheduledWarmupStatus, setScheduledWarmupStatus] =
+    useState<ScheduledWarmupStatus | null>(null);
+  const [isRunningMissedWarmup, setIsRunningMissedWarmup] = useState(false);
   const actionsMenuRef = useRef<HTMLDivElement | null>(null);
 
   const toggleMask = (accountId: string) => {
@@ -100,6 +199,62 @@ function App() {
   }, [checkProcesses]);
 
   useEffect(() => {
+    getAppSettings()
+      .then(setAppSettings)
+      .catch((err) => {
+        console.error("Failed to load app settings:", err);
+      });
+  }, [getAppSettings]);
+
+  const loadScheduledWarmupStatus = useCallback(async () => {
+    try {
+      const status = await getScheduledWarmupStatus();
+      setScheduledWarmupStatus(status);
+      setIsMissedScheduledWarmupModalOpen(status.missed_run_today);
+      return status;
+    } catch (err) {
+      console.error("Failed to load scheduled warmup status:", err);
+      return null;
+    }
+  }, [getScheduledWarmupStatus]);
+
+  useEffect(() => {
+    void loadScheduledWarmupStatus();
+  }, [loadScheduledWarmupStatus]);
+
+  useEffect(() => {
+    if (!loading) {
+      void loadScheduledWarmupStatus();
+    }
+  }, [accounts, loading, loadScheduledWarmupStatus]);
+
+  useEffect(() => {
+    let unsubscribe: (() => void) | undefined;
+
+    const register = async () => {
+      unsubscribe = await listen<ScheduledWarmupEvent>(
+        "scheduled-warmup-result",
+        ({ payload }) => {
+          const toast = summarizeWarmup(payload.summary);
+          showWarmupToast(toast.message, toast.isError);
+          void loadScheduledWarmupStatus();
+          getAppSettings().then(setAppSettings).catch((err) => {
+            console.error("Failed to refresh app settings after scheduled warmup:", err);
+          });
+        }
+      );
+    };
+
+    void register();
+
+    return () => {
+      if (unsubscribe) {
+        unsubscribe();
+      }
+    };
+  }, [getAppSettings, loadScheduledWarmupStatus]);
+
+  useEffect(() => {
     if (!isActionsMenuOpen) return;
 
     const handleClickOutside = (event: MouseEvent) => {
@@ -114,15 +269,36 @@ function App() {
   }, [isActionsMenuOpen]);
 
   const handleSwitch = async (accountId: string) => {
-    // Check processes before switching
-    await checkProcesses();
-    if (processInfo && !processInfo.can_switch) {
-      return;
-    }
-
     try {
       setSwitchingId(accountId);
-      await switchAccount(accountId);
+      const latestProcessInfo = await invoke<CodexProcessInfo>("check_codex_processes").catch(
+        (err) => {
+          console.error("Failed to check processes before switching:", err);
+          return processInfo;
+        }
+      );
+
+      if (latestProcessInfo) {
+        setProcessInfo(latestProcessInfo);
+      }
+
+      const hasRunningCodex =
+        !!latestProcessInfo &&
+        (latestProcessInfo.count > 0 || latestProcessInfo.background_count > 0);
+
+      let restartRunningCodex = false;
+      if (hasRunningCodex) {
+        restartRunningCodex = window.confirm(
+          `Codex is running (${latestProcessInfo.count} foreground, ${latestProcessInfo.background_count} background). Do you want Codex Switcher to close and reopen it gracefully before switching accounts?`
+        );
+
+        if (!restartRunningCodex) {
+          return;
+        }
+      }
+
+      await switchAccount(accountId, restartRunningCodex);
+      await checkProcesses();
     } catch (err) {
       console.error("Failed to switch account:", err);
     } finally {
@@ -204,6 +380,56 @@ function App() {
     }
   };
 
+  const handleSaveScheduledWarmup = async (schedule: ScheduledWarmupSettings) => {
+    try {
+      const nextSettings = await saveScheduledWarmupSettings(schedule);
+      setAppSettings(nextSettings);
+      const status = await loadScheduledWarmupStatus();
+      const enabledSchedule = status?.schedule;
+      if (enabledSchedule?.enabled) {
+        showWarmupToast(
+          `Scheduled warmups saved for ${formatScheduledTime(enabledSchedule.local_time) ?? enabledSchedule.local_time}`
+        );
+      } else {
+        showWarmupToast("Scheduled warmups saved");
+      }
+    } catch (err) {
+      console.error("Failed to save scheduled warmup settings:", err);
+      throw err;
+    }
+  };
+
+  const handleSkipMissedScheduledWarmup = async () => {
+    try {
+      const nextSettings = await dismissMissedScheduledWarmup();
+      setAppSettings(nextSettings);
+      setIsMissedScheduledWarmupModalOpen(false);
+      await loadScheduledWarmupStatus();
+      showWarmupToast("Skipped today's missed scheduled warmup");
+    } catch (err) {
+      console.error("Failed to dismiss missed scheduled warmup:", err);
+      showWarmupToast("Failed to skip missed scheduled warmup", true);
+    }
+  };
+
+  const handleRunMissedScheduledWarmup = async () => {
+    try {
+      setIsRunningMissedWarmup(true);
+      const summary = await runScheduledWarmupNow();
+      setIsMissedScheduledWarmupModalOpen(false);
+      const nextSettings = await getAppSettings();
+      setAppSettings(nextSettings);
+      await loadScheduledWarmupStatus();
+      const toast = summarizeWarmup(summary);
+      showWarmupToast(toast.message, toast.isError);
+    } catch (err) {
+      console.error("Failed to run missed scheduled warmup:", err);
+      showWarmupToast("Failed to run missed scheduled warmup", true);
+    } finally {
+      setIsRunningMissedWarmup(false);
+    }
+  };
+
   const handleExportSlimText = async () => {
     setConfigModalMode("slim_export");
     setConfigModalError(null);
@@ -275,7 +501,21 @@ function App() {
 
       if (!selected) return;
 
-      await exportAccountsFullEncryptedFile(selected);
+      let passphrase: string | undefined;
+      if (appSettings?.export_security_mode === "passphrase") {
+        const entered = window.prompt("Enter a passphrase for this backup file:");
+        if (!entered) return;
+
+        const confirmed = window.prompt("Re-enter the passphrase to confirm:");
+        if (entered !== confirmed) {
+          showWarmupToast("Passphrases did not match", true);
+          return;
+        }
+
+        passphrase = entered;
+      }
+
+      await exportAccountsFullEncryptedFile(selected, passphrase);
       showWarmupToast("Full encrypted file exported.");
     } catch (err) {
       console.error("Failed to export full encrypted file:", err);
@@ -301,7 +541,20 @@ function App() {
 
       if (!selected || Array.isArray(selected)) return;
 
-      const summary = await importAccountsFullEncryptedFile(selected);
+      let summary;
+      try {
+        summary = await importAccountsFullEncryptedFile(selected);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (!message.includes("requires the passphrase")) {
+          throw err;
+        }
+
+        const passphrase = window.prompt("Enter the passphrase used for this backup:");
+        if (!passphrase) return;
+        summary = await importAccountsFullEncryptedFile(selected, passphrase);
+      }
+
       setMaskedAccounts(new Set());
       showWarmupToast(
         `Imported ${summary.imported_count}, skipped ${summary.skipped_count} (total ${summary.total_in_payload})`
@@ -317,6 +570,26 @@ function App() {
   const activeAccount = accounts.find((a) => a.is_active);
   const otherAccounts = accounts.filter((a) => !a.is_active);
   const hasRunningProcesses = processInfo && processInfo.count > 0;
+  const needsSecurityOnboarding =
+    accounts.length === 0 && appSettings && !appSettings.export_security_mode;
+  const scheduledWarmupTimeLabel = formatScheduledTime(
+    scheduledWarmupStatus?.schedule?.local_time ?? appSettings?.scheduled_warmup?.local_time
+  );
+  const nextScheduledRunLabel = formatNextRun(scheduledWarmupStatus?.next_run_local_iso);
+
+  const handleSelectSecurityMode = async (mode: ExportSecurityMode) => {
+    try {
+      setIsSavingSecurityMode(true);
+      const nextSettings = await saveExportSecurityMode(mode);
+      setAppSettings(nextSettings);
+      showWarmupToast(`Backup security mode set to ${mode.replace("_", " ")}`);
+    } catch (err) {
+      console.error("Failed to save export security mode:", err);
+      showWarmupToast("Failed to save backup security mode", true);
+    } finally {
+      setIsSavingSecurityMode(false);
+    }
+  };
 
   const sortedOtherAccounts = useMemo(() => {
     const getResetDeadline = (resetAt: number | null | undefined) =>
@@ -449,6 +722,14 @@ function App() {
                   </span>
                 )}
               </button>
+              <button
+                onClick={() => setIsScheduledWarmupsModalOpen(true)}
+                disabled={accounts.length === 0}
+                className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-white border border-gray-200 hover:bg-gray-50 text-gray-700 transition-colors disabled:opacity-50 shrink-0 whitespace-nowrap"
+                title="Configure daily scheduled warmups"
+              >
+                {appSettings?.scheduled_warmup?.enabled ? "🕒 Scheduled On" : "🕒 Schedule"}
+              </button>
 
               <div className="relative" ref={actionsMenuRef}>
                 <button
@@ -548,6 +829,34 @@ function App() {
           </div>
         ) : (
           <div className="space-y-8">
+            <section className="rounded-3xl border border-gray-200 bg-white px-6 py-5 shadow-sm">
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <p className="text-xs font-medium uppercase tracking-[0.2em] text-gray-500">
+                    Scheduled Warmups
+                  </p>
+                  <h2 className="mt-2 text-lg font-semibold text-gray-900">
+                    {appSettings?.scheduled_warmup?.enabled
+                      ? `Daily at ${scheduledWarmupTimeLabel ?? appSettings.scheduled_warmup.local_time}`
+                      : "Not enabled yet"}
+                  </h2>
+                  <p className="mt-1 text-sm text-gray-500">
+                    {appSettings?.scheduled_warmup?.enabled
+                      ? nextScheduledRunLabel
+                        ? `Next run: ${nextScheduledRunLabel}`
+                        : "Runs while Codex Switcher is open."
+                      : "Choose accounts and a local time to keep them warm automatically."}
+                  </p>
+                </div>
+                <button
+                  onClick={() => setIsScheduledWarmupsModalOpen(true)}
+                  className="rounded-xl bg-gray-900 px-4 py-2.5 text-sm font-medium text-white hover:bg-gray-800 transition-colors"
+                >
+                  {appSettings?.scheduled_warmup?.enabled ? "Edit Schedule" : "Set Schedule"}
+                </button>
+              </div>
+            </section>
+
             {/* Active Account */}
             {activeAccount && (
               <section>
@@ -564,7 +873,7 @@ function App() {
                   onRefresh={() => refreshSingleUsage(activeAccount.id)}
                   onRename={(newName) => renameAccount(activeAccount.id, newName)}
                   switching={switchingId === activeAccount.id}
-                  switchDisabled={hasRunningProcesses ?? false}
+                  switchDisabled={false}
                   warmingUp={isWarmingAll || warmingUpId === activeAccount.id}
                   masked={maskedAccounts.has(activeAccount.id)}
                   onToggleMask={() => toggleMask(activeAccount.id)}
@@ -632,7 +941,7 @@ function App() {
                       onRefresh={() => refreshSingleUsage(account.id)}
                       onRename={(newName) => renameAccount(account.id, newName)}
                       switching={switchingId === account.id}
-                      switchDisabled={hasRunningProcesses ?? false}
+                      switchDisabled={false}
                       warmingUp={isWarmingAll || warmingUpId === account.id}
                       masked={maskedAccounts.has(account.id)}
                       onToggleMask={() => toggleMask(account.id)}
@@ -672,6 +981,43 @@ function App() {
         </div>
       )}
 
+      {needsSecurityOnboarding && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+          <div className="w-full max-w-3xl rounded-3xl bg-white shadow-2xl border border-gray-200 overflow-hidden">
+            <div className="border-b border-gray-100 px-6 py-5">
+              <h2 className="text-xl font-semibold text-gray-900">
+                Choose your backup security mode
+              </h2>
+              <p className="mt-2 text-sm text-gray-500">
+                New users should choose how full backup files are protected before getting started.
+              </p>
+            </div>
+            <div className="grid gap-4 p-6 md:grid-cols-3">
+              {SECURITY_OPTIONS.map((option) => (
+                <button
+                  key={option.mode}
+                  disabled={isSavingSecurityMode}
+                  onClick={() => {
+                    void handleSelectSecurityMode(option.mode);
+                  }}
+                  className="rounded-2xl border border-gray-200 p-5 text-left hover:border-gray-400 hover:shadow-md transition-all disabled:opacity-60"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <h3 className="text-base font-semibold text-gray-900">{option.title}</h3>
+                    {option.badge && (
+                      <span className="rounded-full bg-emerald-50 border border-emerald-200 px-2 py-0.5 text-xs font-medium text-emerald-700">
+                        {option.badge}
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-3 text-sm leading-6 text-gray-500">{option.description}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Add Account Modal */}
       <AddAccountModal
         isOpen={isAddModalOpen}
@@ -680,6 +1026,24 @@ function App() {
         onStartOAuth={startOAuthLogin}
         onCompleteOAuth={completeOAuthLogin}
         onCancelOAuth={cancelOAuthLogin}
+      />
+
+      <ScheduledWarmupsModal
+        isOpen={isScheduledWarmupsModalOpen}
+        accounts={accounts}
+        initialValue={appSettings?.scheduled_warmup ?? null}
+        nextRunLabel={nextScheduledRunLabel}
+        onClose={() => setIsScheduledWarmupsModalOpen(false)}
+        onSave={handleSaveScheduledWarmup}
+      />
+
+      <MissedScheduledWarmupModal
+        isOpen={isMissedScheduledWarmupModalOpen}
+        timeLabel={scheduledWarmupTimeLabel}
+        accountCount={scheduledWarmupStatus?.valid_account_ids.length ?? 0}
+        running={isRunningMissedWarmup}
+        onRunNow={handleRunMissedScheduledWarmup}
+        onSkipToday={handleSkipMissedScheduledWarmup}
       />
 
       {/* Import/Export Config Modal */}

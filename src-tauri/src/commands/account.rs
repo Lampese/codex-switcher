@@ -1,11 +1,24 @@
 //! Account management Tauri commands
 
 use crate::auth::{
-    add_account, create_chatgpt_account_from_refresh_token, get_active_account,
-    import_from_auth_json, load_accounts, remove_account, save_accounts, set_active_account,
-    switch_to_account, touch_account,
+    add_account, clear_scheduled_warmup_prompt, create_chatgpt_account_from_refresh_token,
+    get_active_account, get_keychain_secret, get_or_create_keychain_secret, import_from_auth_json,
+    load_accounts, load_settings, remove_account, save_accounts, set_active_account,
+    set_export_security_mode, set_scheduled_warmup, switch_to_account, touch_account,
+    write_bytes_atomic,
+};
+use crate::commands::{
+    collect_running_codex_processes, gracefully_stop_codex_processes, restart_codex_processes,
+};
+use crate::scheduler::{
+    current_local_date_string, get_scheduled_warmup_status as compute_scheduled_warmup_status,
+    parse_local_time, run_scheduled_warmup_now as execute_scheduled_warmup_now,
+    ScheduledWarmupRuntimeState,
 };
 use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
+use crate::types::{
+    AppSettings, ExportSecurityMode, ScheduledWarmupSettings, ScheduledWarmupStatus,
+};
 
 use anyhow::Context;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -21,12 +34,7 @@ use sha2::Sha256;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
-
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
+use tauri::{AppHandle, State};
 
 const SLIM_EXPORT_PREFIX: &str = "css1.";
 const SLIM_FORMAT_VERSION: u8 = 1;
@@ -34,11 +42,14 @@ const SLIM_AUTH_API_KEY: u8 = 0;
 const SLIM_AUTH_CHATGPT: u8 = 1;
 
 const FULL_FILE_MAGIC: &[u8; 4] = b"CSWF";
-const FULL_FILE_VERSION: u8 = 1;
+const FULL_FILE_VERSION: u8 = 2;
 const FULL_SALT_LEN: usize = 16;
 const FULL_NONCE_LEN: usize = 24;
 const FULL_KDF_ITERATIONS: u32 = 210_000;
 const FULL_PRESET_PASSPHRASE: &str = "gT7kQ9mV2xN4pL8sR1dH6zW3cB5yF0uJ_aE7nK2tP9vM4rX1";
+const FULL_SECURITY_LESS_SECURE: u8 = 0;
+const FULL_SECURITY_PASSPHRASE: u8 = 1;
+const FULL_SECURITY_KEYCHAIN: u8 = 2;
 
 const MAX_IMPORT_JSON_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_IMPORT_FILE_BYTES: u64 = 8 * 1024 * 1024;
@@ -111,8 +122,12 @@ pub async fn add_account_from_file(path: String, name: String) -> Result<Account
 
 /// Switch to a different account
 #[tauri::command]
-pub async fn switch_account(account_id: String) -> Result<(), String> {
+pub async fn switch_account(
+    account_id: String,
+    restart_running_codex: Option<bool>,
+) -> Result<(), String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
+    let running_processes = collect_running_codex_processes().map_err(|e| e.to_string())?;
 
     // Find the account
     let account = store
@@ -121,36 +136,91 @@ pub async fn switch_account(account_id: String) -> Result<(), String> {
         .find(|a| a.id == account_id)
         .ok_or_else(|| format!("Account not found: {account_id}"))?;
 
-    // Write to ~/.codex/auth.json
+    let should_restart = restart_running_codex.unwrap_or(false);
+    if !running_processes.is_empty() && !should_restart {
+        return Err(String::from(
+            "Codex is currently running. Confirm a graceful restart before switching accounts.",
+        ));
+    }
+
+    if should_restart {
+        gracefully_stop_codex_processes(&running_processes).map_err(|e| e.to_string())?;
+    }
+
     switch_to_account(account).map_err(|e| e.to_string())?;
-
-    // Update the active account in our store
     set_active_account(&account_id).map_err(|e| e.to_string())?;
-
-    // Update last_used_at
     touch_account(&account_id).map_err(|e| e.to_string())?;
 
-    // Restart Antigravity background process if it is running
-    // This allows it to pick up the new authorization file seamlessly
-    if let Ok(pids) = find_antigravity_processes() {
-        for pid in pids {
-            #[cfg(unix)]
-            {
-                let _ = std::process::Command::new("kill")
-                    .arg("-9")
-                    .arg(pid.to_string())
-                    .output();
-            }
-            #[cfg(windows)]
-            {
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/F", "/PID", &pid.to_string()])
-                    .output();
-            }
-        }
+    if should_restart {
+        restart_codex_processes(&running_processes).map_err(|e| e.to_string())?;
     }
 
     Ok(())
+}
+
+#[tauri::command]
+pub async fn get_app_settings() -> Result<AppSettings, String> {
+    load_settings().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn save_export_security_mode(mode: ExportSecurityMode) -> Result<AppSettings, String> {
+    set_export_security_mode(mode).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn save_scheduled_warmup_settings(
+    schedule: ScheduledWarmupSettings,
+) -> Result<AppSettings, String> {
+    if parse_local_time(&schedule.local_time).is_none() {
+        return Err(String::from("Time must use HH:MM in local time"));
+    }
+
+    let store = load_accounts().map_err(|e| e.to_string())?;
+    let valid_ids: HashSet<String> = store
+        .accounts
+        .iter()
+        .map(|account| account.id.clone())
+        .collect();
+    let mut seen = HashSet::new();
+    let mut sanitized_ids = Vec::new();
+
+    for account_id in schedule.account_ids {
+        if valid_ids.contains(&account_id) && seen.insert(account_id.clone()) {
+            sanitized_ids.push(account_id);
+        }
+    }
+
+    if schedule.enabled && sanitized_ids.is_empty() {
+        return Err(String::from(
+            "Select at least one account for scheduled warmups",
+        ));
+    }
+
+    set_scheduled_warmup(ScheduledWarmupSettings {
+        account_ids: sanitized_ids,
+        ..schedule
+    })
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_scheduled_warmup_status(
+    runtime: State<'_, ScheduledWarmupRuntimeState>,
+) -> Result<ScheduledWarmupStatus, String> {
+    compute_scheduled_warmup_status(runtime.session_started_at())
+}
+
+#[tauri::command]
+pub async fn dismiss_missed_scheduled_warmup() -> Result<AppSettings, String> {
+    clear_scheduled_warmup_prompt(&current_local_date_string()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn run_scheduled_warmup_now(
+    app: AppHandle,
+) -> Result<crate::types::WarmupSummary, String> {
+    execute_scheduled_warmup_now(&app).await
 }
 
 /// Remove an account
@@ -205,10 +275,18 @@ pub async fn import_accounts_slim_text(payload: String) -> Result<ImportAccounts
 
 /// Export full account config as an encrypted file.
 #[tauri::command]
-pub async fn export_accounts_full_encrypted_file(path: String) -> Result<(), String> {
+pub async fn export_accounts_full_encrypted_file(
+    path: String,
+    passphrase: Option<String>,
+) -> Result<(), String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
+    let settings = load_settings().map_err(|e| e.to_string())?;
+    let mode = settings
+        .export_security_mode
+        .unwrap_or(ExportSecurityMode::LessSecure);
+    let secret = resolve_export_secret(mode, passphrase).map_err(|e| e.to_string())?;
     let encrypted =
-        encode_full_encrypted_store(&store, FULL_PRESET_PASSPHRASE).map_err(|e| e.to_string())?;
+        encode_full_encrypted_store(&store, mode, &secret).map_err(|e| e.to_string())?;
     write_encrypted_file(&path, &encrypted).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -217,10 +295,11 @@ pub async fn export_accounts_full_encrypted_file(path: String) -> Result<(), Str
 #[tauri::command]
 pub async fn import_accounts_full_encrypted_file(
     path: String,
+    passphrase: Option<String>,
 ) -> Result<ImportAccountsSummary, String> {
     let encrypted = read_encrypted_file(&path).map_err(|e| e.to_string())?;
-    let imported = decode_full_encrypted_store(&encrypted, FULL_PRESET_PASSPHRASE)
-        .map_err(|e| e.to_string())?;
+    let imported =
+        decode_full_encrypted_store(&encrypted, passphrase).map_err(|e| e.to_string())?;
     validate_imported_store(&imported).map_err(|e| e.to_string())?;
 
     let current = load_accounts().map_err(|e| e.to_string())?;
@@ -229,69 +308,22 @@ pub async fn import_accounts_full_encrypted_file(
     Ok(summary)
 }
 
-/// Find all running Antigravity codex assistant processes
-fn find_antigravity_processes() -> anyhow::Result<Vec<u32>> {
-    let mut pids = Vec::new();
-
-    #[cfg(unix)]
-    {
-        // Use ps with custom format to get the pid and full command line
-        let output = std::process::Command::new("ps")
-            .args(["-eo", "pid,command"])
-            .output()?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines().skip(1) {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
+fn resolve_export_secret(
+    mode: ExportSecurityMode,
+    passphrase: Option<String>,
+) -> anyhow::Result<String> {
+    match mode {
+        ExportSecurityMode::LessSecure => Ok(String::from(FULL_PRESET_PASSPHRASE)),
+        ExportSecurityMode::Passphrase => {
+            let passphrase =
+                passphrase.context("A passphrase is required for passphrase-protected backups")?;
+            if passphrase.trim().is_empty() {
+                anyhow::bail!("Passphrase cannot be empty");
             }
-
-            if let Some((pid_str, command)) = line.split_once(' ') {
-                let pid_str = pid_str.trim();
-                let command = command.trim();
-
-                // Antigravity processes have a specific path format
-                let is_antigravity = (command.contains(".antigravity/extensions/openai.chatgpt")
-                    || command.contains(".vscode/extensions/openai.chatgpt"))
-                    && (command.ends_with("codex app-server --analytics-default-enabled")
-                        || command.contains("/codex app-server"));
-
-                if is_antigravity {
-                    if let Ok(pid) = pid_str.parse::<u32>() {
-                        pids.push(pid);
-                    }
-                }
-            }
+            Ok(passphrase)
         }
+        ExportSecurityMode::Keychain => get_or_create_keychain_secret(),
     }
-
-    #[cfg(windows)]
-    {
-        // Use tasklist on Windows
-        // For Windows we might need a more precise WMI query to get command line args,
-        // but for now we look for codex.exe PIDs and verify they're not ours
-        let output = std::process::Command::new("tasklist")
-            .creation_flags(CREATE_NO_WINDOW)
-            .args(["/FI", "IMAGENAME eq codex.exe", "/FO", "CSV", "/NH"])
-            .output()?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let parts: Vec<&str> = line.split(',').collect();
-            if parts.len() > 1 {
-                let name = parts[0].trim_matches('"').to_lowercase();
-                if name == "codex.exe" {
-                    let pid_str = parts[1].trim_matches('"');
-                    if let Ok(pid) = pid_str.parse::<u32>() {
-                        pids.push(pid);
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(pids)
 }
 
 fn encode_slim_payload_from_store(store: &AccountsStore) -> anyhow::Result<String> {
@@ -490,7 +522,11 @@ async fn restore_slim_accounts(
     Ok(restored)
 }
 
-fn encode_full_encrypted_store(store: &AccountsStore, passphrase: &str) -> anyhow::Result<Vec<u8>> {
+fn encode_full_encrypted_store(
+    store: &AccountsStore,
+    mode: ExportSecurityMode,
+    passphrase: &str,
+) -> anyhow::Result<Vec<u8>> {
     let json = serde_json::to_vec(store).context("Failed to serialize account store")?;
     let compressed = compress_bytes(&json).context("Failed to compress account store")?;
 
@@ -506,9 +542,14 @@ fn encode_full_encrypted_store(store: &AccountsStore, passphrase: &str) -> anyho
         .encrypt(XNonce::from_slice(&nonce), compressed.as_slice())
         .map_err(|_| anyhow::anyhow!("Failed to encrypt account store"))?;
 
-    let mut out = Vec::with_capacity(4 + 1 + FULL_SALT_LEN + FULL_NONCE_LEN + ciphertext.len());
+    let mut out = Vec::with_capacity(4 + 1 + 1 + FULL_SALT_LEN + FULL_NONCE_LEN + ciphertext.len());
     out.extend_from_slice(FULL_FILE_MAGIC);
     out.push(FULL_FILE_VERSION);
+    out.push(match mode {
+        ExportSecurityMode::LessSecure => FULL_SECURITY_LESS_SECURE,
+        ExportSecurityMode::Passphrase => FULL_SECURITY_PASSPHRASE,
+        ExportSecurityMode::Keychain => FULL_SECURITY_KEYCHAIN,
+    });
     out.extend_from_slice(&salt);
     out.extend_from_slice(&nonce);
     out.extend_from_slice(&ciphertext);
@@ -518,14 +559,15 @@ fn encode_full_encrypted_store(store: &AccountsStore, passphrase: &str) -> anyho
 
 fn decode_full_encrypted_store(
     file_bytes: &[u8],
-    passphrase: &str,
+    passphrase: Option<String>,
 ) -> anyhow::Result<AccountsStore> {
     if file_bytes.len() as u64 > MAX_IMPORT_FILE_BYTES {
         anyhow::bail!("Encrypted file is too large");
     }
 
-    let header_len = 4 + 1 + FULL_SALT_LEN + FULL_NONCE_LEN;
-    if file_bytes.len() <= header_len {
+    let header_len_v1 = 4 + 1 + FULL_SALT_LEN + FULL_NONCE_LEN;
+    let header_len_v2 = 4 + 1 + 1 + FULL_SALT_LEN + FULL_NONCE_LEN;
+    if file_bytes.len() <= header_len_v1 {
         anyhow::bail!("Encrypted file is invalid or truncated");
     }
 
@@ -534,11 +576,24 @@ fn decode_full_encrypted_store(
     }
 
     let version = file_bytes[4];
-    if version != FULL_FILE_VERSION {
-        anyhow::bail!("Unsupported encrypted file version: {version}");
-    }
+    let (mode, salt_start) = match version {
+        1 => (ExportSecurityMode::LessSecure, 5),
+        FULL_FILE_VERSION => {
+            if file_bytes.len() <= header_len_v2 {
+                anyhow::bail!("Encrypted file is invalid or truncated");
+            }
 
-    let salt_start = 5;
+            let mode = match file_bytes[5] {
+                FULL_SECURITY_LESS_SECURE => ExportSecurityMode::LessSecure,
+                FULL_SECURITY_PASSPHRASE => ExportSecurityMode::Passphrase,
+                FULL_SECURITY_KEYCHAIN => ExportSecurityMode::Keychain,
+                other => anyhow::bail!("Unsupported encrypted file security mode: {other}"),
+            };
+            (mode, 6)
+        }
+        _ => anyhow::bail!("Unsupported encrypted file version: {version}"),
+    };
+
     let nonce_start = salt_start + FULL_SALT_LEN;
     let ciphertext_start = nonce_start + FULL_NONCE_LEN;
 
@@ -546,7 +601,20 @@ fn decode_full_encrypted_store(
     let nonce = &file_bytes[nonce_start..ciphertext_start];
     let ciphertext = &file_bytes[ciphertext_start..];
 
-    let key = derive_encryption_key(passphrase, salt);
+    let secret = match mode {
+        ExportSecurityMode::LessSecure => String::from(FULL_PRESET_PASSPHRASE),
+        ExportSecurityMode::Passphrase => {
+            let passphrase = passphrase
+                .context("This backup requires the passphrase that was used to export it")?;
+            if passphrase.trim().is_empty() {
+                anyhow::bail!("Passphrase cannot be empty");
+            }
+            passphrase
+        }
+        ExportSecurityMode::Keychain => get_keychain_secret()?,
+    };
+
+    let key = derive_encryption_key(&secret, salt);
     let cipher = XChaCha20Poly1305::new((&key).into());
     let compressed = cipher
         .decrypt(XNonce::from_slice(nonce), ciphertext)
@@ -589,13 +657,15 @@ fn decompress_bytes_with_limit(input: &[u8], max_bytes: u64) -> anyhow::Result<V
 }
 
 fn write_encrypted_file(path: &str, bytes: &[u8]) -> anyhow::Result<()> {
-    fs::write(path, bytes).with_context(|| format!("Failed to write file: {path}"))?;
+    let path = std::path::Path::new(path);
+    write_bytes_atomic(path, bytes, true)
+        .with_context(|| format!("Failed to write file: {}", path.display()))?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("Failed to set file permissions: {path}"))?;
+            .with_context(|| format!("Failed to set file permissions: {}", path.display()))?;
     }
 
     Ok(())

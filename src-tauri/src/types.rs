@@ -4,6 +4,49 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+fn default_app_settings_version() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportSecurityMode {
+    LessSecure,
+    Passphrase,
+    Keychain,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ScheduledWarmupSettings {
+    pub enabled: bool,
+    pub local_time: String,
+    pub account_ids: Vec<String>,
+    pub last_run_local_date: Option<String>,
+    pub last_missed_prompt_local_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppSettings {
+    #[serde(default = "default_app_settings_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub export_security_mode: Option<ExportSecurityMode>,
+    #[serde(default)]
+    pub scheduled_warmup: Option<ScheduledWarmupSettings>,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            export_security_mode: None,
+            scheduled_warmup: None,
+        }
+    }
+}
+
 /// The main storage structure for all accounts
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountsStore {
@@ -242,6 +285,20 @@ pub struct WarmupSummary {
     pub warmed_accounts: usize,
     /// Account IDs whose warm-up request failed
     pub failed_account_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledWarmupStatus {
+    pub schedule: Option<ScheduledWarmupSettings>,
+    pub valid_account_ids: Vec<String>,
+    pub missed_run_today: bool,
+    pub next_run_local_iso: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledWarmupEvent {
+    pub summary: WarmupSummary,
+    pub trigger: String,
 }
 
 /// Import summary for account config import operations.

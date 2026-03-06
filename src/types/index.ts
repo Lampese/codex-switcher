@@ -51,8 +51,36 @@ export interface WarmupSummary {
   failed_account_ids: string[];
 }
 
+export interface ScheduledWarmupSettings {
+  enabled: boolean;
+  local_time: string;
+  account_ids: string[];
+  last_run_local_date: string | null;
+  last_missed_prompt_local_date: string | null;
+}
+
+export interface ScheduledWarmupStatus {
+  schedule: ScheduledWarmupSettings | null;
+  valid_account_ids: string[];
+  missed_run_today: boolean;
+  next_run_local_iso: string | null;
+}
+
+export interface ScheduledWarmupEvent {
+  summary: WarmupSummary;
+  trigger: string;
+}
+
 export interface ImportAccountsSummary {
   total_in_payload: number;
   imported_count: number;
   skipped_count: number;
+}
+
+export type ExportSecurityMode = "less_secure" | "passphrase" | "keychain";
+
+export interface AppSettings {
+  version: number;
+  export_security_mode: ExportSecurityMode | null;
+  scheduled_warmup: ScheduledWarmupSettings | null;
 }
