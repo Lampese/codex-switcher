@@ -4,6 +4,29 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportSecurityMode {
+    LessSecure,
+    Passphrase,
+    Keychain,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppSettings {
+    pub version: u32,
+    pub export_security_mode: Option<ExportSecurityMode>,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            export_security_mode: None,
+        }
+    }
+}
+
 /// The main storage structure for all accounts
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountsStore {

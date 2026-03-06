@@ -56,3 +56,10 @@ export interface ImportAccountsSummary {
   imported_count: number;
   skipped_count: number;
 }
+
+export type ExportSecurityMode = "less_secure" | "passphrase" | "keychain";
+
+export interface AppSettings {
+  version: number;
+  export_security_mode: ExportSecurityMode | null;
+}

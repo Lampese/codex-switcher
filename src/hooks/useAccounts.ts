@@ -6,6 +6,7 @@ import type {
   AccountWithUsage,
   WarmupSummary,
   ImportAccountsSummary,
+  ExportSecurityMode,
 } from "../types";
 
 export function useAccounts() {
@@ -192,9 +193,9 @@ export function useAccounts() {
   );
 
   const exportAccountsFullEncryptedFile = useCallback(
-    async (path: string) => {
+    async (path: string, passphrase?: string) => {
       try {
-        await invoke("export_accounts_full_encrypted_file", { path });
+        await invoke("export_accounts_full_encrypted_file", { path, passphrase });
       } catch (err) {
         throw err;
       }
@@ -203,11 +204,11 @@ export function useAccounts() {
   );
 
   const importAccountsFullEncryptedFile = useCallback(
-    async (path: string) => {
+    async (path: string, passphrase?: string) => {
       try {
         const summary = await invoke<ImportAccountsSummary>(
           "import_accounts_full_encrypted_file",
-          { path }
+          { path, passphrase }
         );
         await loadAccounts();
         await refreshUsage();
@@ -225,6 +226,20 @@ export function useAccounts() {
     } catch (err) {
       console.error("Failed to cancel login:", err);
     }
+  }, []);
+
+  const getAppSettings = useCallback(async () => {
+    return await invoke<{
+      version: number;
+      export_security_mode: ExportSecurityMode | null;
+    }>("get_app_settings");
+  }, []);
+
+  const saveExportSecurityMode = useCallback(async (mode: ExportSecurityMode) => {
+    return await invoke<{
+      version: number;
+      export_security_mode: ExportSecurityMode | null;
+    }>("save_export_security_mode", { mode });
   }, []);
 
   useEffect(() => {
@@ -258,5 +273,7 @@ export function useAccounts() {
     startOAuthLogin,
     completeOAuthLogin,
     cancelOAuthLogin,
+    getAppSettings,
+    saveExportSecurityMode,
   };
 }
