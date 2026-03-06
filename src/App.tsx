@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { open, save, ask } from "@tauri-apps/plugin-dialog";
 import { useAccounts } from "./hooks/useAccounts";
 import { AccountCard, AddAccountModal } from "./components";
 import type { CodexProcessInfo } from "./types";
@@ -114,15 +114,38 @@ function App() {
   }, [isActionsMenuOpen]);
 
   const handleSwitch = async (accountId: string) => {
-    // Check processes before switching
-    await checkProcesses();
-    if (processInfo && !processInfo.can_switch) {
-      return;
-    }
-
     try {
       setSwitchingId(accountId);
-      await switchAccount(accountId);
+      const latestProcessInfo = await invoke<CodexProcessInfo>("check_codex_processes").catch(
+        (err) => {
+          console.error("Failed to check processes before switching:", err);
+          return processInfo;
+        }
+      );
+
+      if (latestProcessInfo) {
+        setProcessInfo(latestProcessInfo);
+      }
+
+      // Only foreground Codex processes (desktop app, CLI) require a restart.
+      // Background processes (IDE extensions) are ignored — they pick up the new
+      // auth.json automatically and must never be stopped.
+      const hasRunningCodex = !!latestProcessInfo && latestProcessInfo.count > 0;
+
+      let restartRunningCodex = false;
+      if (hasRunningCodex) {
+        restartRunningCodex = await ask(
+          "Codex is running. Codex Switcher will close and reopen it to apply the new account. Continue?",
+          { title: "Codex Switcher", kind: "warning" }
+        );
+
+        if (!restartRunningCodex) {
+          return;
+        }
+      }
+
+      await switchAccount(accountId, restartRunningCodex);
+      await checkProcesses();
     } catch (err) {
       console.error("Failed to switch account:", err);
     } finally {
@@ -564,7 +587,7 @@ function App() {
                   onRefresh={() => refreshSingleUsage(activeAccount.id)}
                   onRename={(newName) => renameAccount(activeAccount.id, newName)}
                   switching={switchingId === activeAccount.id}
-                  switchDisabled={hasRunningProcesses ?? false}
+                  switchDisabled={false}
                   warmingUp={isWarmingAll || warmingUpId === activeAccount.id}
                   masked={maskedAccounts.has(activeAccount.id)}
                   onToggleMask={() => toggleMask(activeAccount.id)}
@@ -632,7 +655,7 @@ function App() {
                       onRefresh={() => refreshSingleUsage(account.id)}
                       onRename={(newName) => renameAccount(account.id, newName)}
                       switching={switchingId === account.id}
-                      switchDisabled={hasRunningProcesses ?? false}
+                      switchDisabled={false}
                       warmingUp={isWarmingAll || warmingUpId === account.id}
                       masked={maskedAccounts.has(account.id)}
                       onToggleMask={() => toggleMask(account.id)}
