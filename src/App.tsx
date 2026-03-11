@@ -8,6 +8,7 @@ import {
   AddAccountModal,
   MissedScheduledWarmupModal,
   ScheduledWarmupsModal,
+  SwitchConfirmationModal,
 } from "./components";
 import type {
   AppSettings,
@@ -16,8 +17,13 @@ import type {
   ScheduledWarmupEvent,
   ScheduledWarmupSettings,
   ScheduledWarmupStatus,
+  SwitchAccountMode,
   WarmupSummary,
 } from "./types";
+import {
+  getSwitchErrorMessage,
+  hasRunningCodexProcesses,
+} from "./utils/switching";
 import "./App.css";
 
 const SECURITY_OPTIONS: Array<{
@@ -155,6 +161,10 @@ function App() {
   const [scheduledWarmupStatus, setScheduledWarmupStatus] =
     useState<ScheduledWarmupStatus | null>(null);
   const [isRunningMissedWarmup, setIsRunningMissedWarmup] = useState(false);
+  const [pendingSwitch, setPendingSwitch] = useState<{
+    accountId: string;
+    processInfo: CodexProcessInfo;
+  } | null>(null);
   const actionsMenuRef = useRef<HTMLDivElement | null>(null);
 
   const toggleMask = (accountId: string) => {
@@ -268,9 +278,24 @@ function App() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [isActionsMenuOpen]);
 
+  const performSwitch = useCallback(
+    async (accountId: string, switchMode?: SwitchAccountMode) => {
+      try {
+        setSwitchingId(accountId);
+        await switchAccount(accountId, switchMode);
+        await checkProcesses();
+      } catch (err) {
+        console.error("Failed to switch account:", err);
+        showWarmupToast(`Failed to switch account: ${getSwitchErrorMessage(err)}`, true);
+      } finally {
+        setSwitchingId(null);
+      }
+    },
+    [checkProcesses, switchAccount]
+  );
+
   const handleSwitch = async (accountId: string) => {
     try {
-      setSwitchingId(accountId);
       const latestProcessInfo = await invoke<CodexProcessInfo>("check_codex_processes").catch(
         (err) => {
           console.error("Failed to check processes before switching:", err);
@@ -282,28 +307,35 @@ function App() {
         setProcessInfo(latestProcessInfo);
       }
 
-      const hasRunningCodex =
-        !!latestProcessInfo &&
-        (latestProcessInfo.count > 0 || latestProcessInfo.background_count > 0);
-
-      let restartRunningCodex = false;
-      if (hasRunningCodex) {
-        restartRunningCodex = window.confirm(
-          `Codex is running (${latestProcessInfo.count} foreground, ${latestProcessInfo.background_count} background). Do you want Codex Switcher to close and reopen it gracefully before switching accounts?`
-        );
-
-        if (!restartRunningCodex) {
-          return;
-        }
+      if (latestProcessInfo && hasRunningCodexProcesses(latestProcessInfo)) {
+        setPendingSwitch({ accountId, processInfo: latestProcessInfo });
+        return;
       }
-
-      await switchAccount(accountId, restartRunningCodex);
-      await checkProcesses();
+      await performSwitch(accountId);
     } catch (err) {
-      console.error("Failed to switch account:", err);
-    } finally {
-      setSwitchingId(null);
+      console.error("Failed to prepare account switch:", err);
+      showWarmupToast(`Failed to switch account: ${getSwitchErrorMessage(err)}`, true);
     }
+  };
+
+  const handleCancelPendingSwitch = () => {
+    setPendingSwitch(null);
+  };
+
+  const handleKeepRunningPendingSwitch = async () => {
+    if (!pendingSwitch) return;
+
+    const { accountId } = pendingSwitch;
+    setPendingSwitch(null);
+    await performSwitch(accountId, "keep_running");
+  };
+
+  const handleRestartPendingSwitch = async () => {
+    if (!pendingSwitch) return;
+
+    const { accountId } = pendingSwitch;
+    setPendingSwitch(null);
+    await performSwitch(accountId, "restart_running");
   };
 
   const handleDelete = async (accountId: string) => {
@@ -1044,6 +1076,18 @@ function App() {
         running={isRunningMissedWarmup}
         onRunNow={handleRunMissedScheduledWarmup}
         onSkipToday={handleSkipMissedScheduledWarmup}
+      />
+
+      <SwitchConfirmationModal
+        isOpen={pendingSwitch !== null}
+        processInfo={pendingSwitch?.processInfo ?? null}
+        onCancel={handleCancelPendingSwitch}
+        onKeepRunning={() => {
+          void handleKeepRunningPendingSwitch();
+        }}
+        onRestartRunning={() => {
+          void handleRestartPendingSwitch();
+        }}
       />
 
       {/* Import/Export Config Modal */}
