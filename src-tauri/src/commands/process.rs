@@ -107,7 +107,7 @@ pub fn gracefully_stop_codex_processes(processes: &[RunningCodexProcess]) -> any
         return Ok(());
     }
 
-    anyhow::bail!("Timed out waiting for Codex processes to close gracefully");
+    anyhow::bail!(format_graceful_shutdown_timeout(processes));
 }
 
 pub fn restart_codex_processes(processes: &[RunningCodexProcess]) -> anyhow::Result<()> {
@@ -157,38 +157,65 @@ fn collect_running_codex_processes_unix() -> anyhow::Result<Vec<RunningCodexProc
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     for line in stdout.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        if let Some((pid_str, command)) = line.split_once(' ') {
-            let command = command.trim();
-            let executable = command.split_whitespace().next().unwrap_or("");
-            let is_codex = executable == "codex" || executable.ends_with("/codex");
-            let is_background = command.contains(".antigravity")
-                || command.contains("openai.chatgpt")
-                || command.contains(".vscode");
-            let is_switcher =
-                command.contains("codex-switcher") || command.contains("Codex Switcher");
-
-            if is_codex && !is_switcher {
-                if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                    if pid != std::process::id()
-                        && !processes.iter().any(|p: &RunningCodexProcess| p.pid == pid)
-                    {
-                        processes.push(RunningCodexProcess {
-                            pid,
-                            command: command.to_string(),
-                            is_background,
-                        });
-                    }
-                }
+        if let Some(process) = parse_unix_process_line(line) {
+            if process.pid != std::process::id()
+                && !processes.iter().any(|p: &RunningCodexProcess| p.pid == process.pid)
+            {
+                processes.push(process);
             }
         }
     }
 
     Ok(processes)
+}
+
+#[cfg(unix)]
+fn parse_unix_process_line(line: &str) -> Option<RunningCodexProcess> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+
+    let (pid_str, command) = line.split_once(' ')?;
+    let command = command.trim();
+    let executable = command.split_whitespace().next().unwrap_or("");
+    let is_codex = executable == "codex" || executable.ends_with("/codex");
+    let is_background =
+        command.contains(".antigravity") || command.contains("openai.chatgpt") || command.contains(".vscode");
+    let is_switcher = command.contains("codex-switcher") || command.contains("Codex Switcher");
+    let is_codex_app_server =
+        command.contains("/Codex.app/Contents/Resources/codex app-server")
+            || command.contains("/Applications/Codex.app/Contents/Resources/codex app-server");
+
+    if !is_codex || is_switcher || is_codex_app_server {
+        return None;
+    }
+
+    let pid = pid_str.trim().parse::<u32>().ok()?;
+    Some(RunningCodexProcess {
+        pid,
+        command: command.to_string(),
+        is_background,
+    })
+}
+
+fn format_graceful_shutdown_timeout(processes: &[RunningCodexProcess]) -> String {
+    let details = processes
+        .iter()
+        .map(|process| format!("pid {} ({})", process.pid, summarize_command(&process.command)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Timed out waiting for Codex processes to close gracefully: {details}")
+}
+
+fn summarize_command(command: &str) -> String {
+    const MAX_LEN: usize = 80;
+    if command.chars().count() <= MAX_LEN {
+        return command.to_string();
+    }
+
+    let summary = command.chars().take(MAX_LEN - 3).collect::<String>();
+    format!("{summary}...")
 }
 
 #[cfg(windows)]
@@ -220,4 +247,43 @@ fn collect_running_codex_processes_windows() -> anyhow::Result<Vec<RunningCodexP
     }
 
     Ok(processes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ignores_codex_app_server_processes() {
+        let line = "5989 /Applications/Codex.app/Contents/Resources/codex app-server --analytics-default-enabled";
+
+        let process = parse_unix_process_line(line);
+
+        assert!(process.is_none());
+    }
+
+    #[test]
+    fn timeout_error_lists_remaining_processes() {
+        let processes = vec![
+            RunningCodexProcess {
+                pid: 100,
+                command: String::from(
+                    "/opt/homebrew/lib/node_modules/@openai/codex/vendor/codex/codex resume 123",
+                ),
+                is_background: false,
+            },
+            RunningCodexProcess {
+                pid: 200,
+                command: String::from("/Applications/Codex.app/Contents/Resources/codex app-server"),
+                is_background: true,
+            },
+        ];
+
+        let message = format_graceful_shutdown_timeout(&processes);
+
+        assert!(message.contains("100"));
+        assert!(message.contains("resume 123"));
+        assert!(message.contains("200"));
+        assert!(message.contains("app-server"));
+    }
 }

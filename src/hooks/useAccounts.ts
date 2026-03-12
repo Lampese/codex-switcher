@@ -10,6 +10,7 @@ import type {
   ScheduledWarmupSettings,
   ScheduledWarmupStatus,
   AppSettings,
+  SwitchAccountMode,
 } from "../types";
 
 export function useAccounts() {
@@ -100,9 +101,9 @@ export function useAccounts() {
   }, []);
 
   const switchAccount = useCallback(
-    async (accountId: string, restartRunningCodex?: boolean) => {
+    async (accountId: string, switchMode?: SwitchAccountMode) => {
       try {
-        await invoke("switch_account", { accountId, restartRunningCodex });
+        await invoke("switch_account", { accountId, switchMode });
         await loadAccounts(true); // Preserve usage data
       } catch (err) {
         throw err;

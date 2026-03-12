@@ -55,6 +55,15 @@ const MAX_IMPORT_JSON_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_IMPORT_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const SLIM_IMPORT_CONCURRENCY: usize = 6;
 
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchAccountMode {
+    #[default]
+    RequireRestart,
+    KeepRunning,
+    RestartRunning,
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct SlimPayload {
     #[serde(rename = "v")]
@@ -124,7 +133,7 @@ pub async fn add_account_from_file(path: String, name: String) -> Result<Account
 #[tauri::command]
 pub async fn switch_account(
     account_id: String,
-    restart_running_codex: Option<bool>,
+    switch_mode: Option<SwitchAccountMode>,
 ) -> Result<(), String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
     let running_processes = collect_running_codex_processes().map_err(|e| e.to_string())?;
@@ -136,12 +145,8 @@ pub async fn switch_account(
         .find(|a| a.id == account_id)
         .ok_or_else(|| format!("Account not found: {account_id}"))?;
 
-    let should_restart = restart_running_codex.unwrap_or(false);
-    if !running_processes.is_empty() && !should_restart {
-        return Err(String::from(
-            "Codex is currently running. Confirm a graceful restart before switching accounts.",
-        ));
-    }
+    let should_restart =
+        resolve_switch_behavior(!running_processes.is_empty(), switch_mode.unwrap_or_default())?;
 
     if should_restart {
         gracefully_stop_codex_processes(&running_processes).map_err(|e| e.to_string())?;
@@ -156,6 +161,50 @@ pub async fn switch_account(
     }
 
     Ok(())
+}
+
+fn resolve_switch_behavior(
+    has_running_processes: bool,
+    switch_mode: SwitchAccountMode,
+) -> Result<bool, String> {
+    if !has_running_processes {
+        return Ok(false);
+    }
+
+    match switch_mode {
+        SwitchAccountMode::RequireRestart => Err(String::from(
+            "Codex is currently running. Choose whether to keep current sessions running or restart them before switching accounts.",
+        )),
+        SwitchAccountMode::KeepRunning => Ok(false),
+        SwitchAccountMode::RestartRunning => Ok(true),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keep_running_mode_allows_switch_with_running_processes() {
+        let should_restart = resolve_switch_behavior(true, SwitchAccountMode::KeepRunning).unwrap();
+
+        assert!(!should_restart);
+    }
+
+    #[test]
+    fn restart_running_mode_requests_restart_when_processes_are_running() {
+        let should_restart =
+            resolve_switch_behavior(true, SwitchAccountMode::RestartRunning).unwrap();
+
+        assert!(should_restart);
+    }
+
+    #[test]
+    fn missing_mode_requires_explicit_choice_when_processes_are_running() {
+        let error = resolve_switch_behavior(true, SwitchAccountMode::RequireRestart).unwrap_err();
+
+        assert!(error.contains("Choose whether to keep current sessions running"));
+    }
 }
 
 #[tauri::command]

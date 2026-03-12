@@ -45,6 +45,8 @@ export interface CodexProcessInfo {
   pids: number[];
 }
 
+export type SwitchAccountMode = "keep_running" | "restart_running";
+
 export interface WarmupSummary {
   total_accounts: number;
   warmed_accounts: number;
