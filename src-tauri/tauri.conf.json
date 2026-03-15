@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Codex Switcher",
+  "productName": "Codex 多账号切换",
   "version": "0.1.1",
   "identifier": "com.lampese.codex-switcher",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Codex Switcher",
+        "title": "Codex 多账号切换",
         "width": 900,
         "height": 700,
         "minWidth": 600,
