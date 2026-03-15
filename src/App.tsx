@@ -163,13 +163,13 @@ function App() {
   };
 
   const formatWarmupError = (err: unknown) => {
-    if (!err) return "Unknown error";
+    if (!err) return "未知错误";
     if (err instanceof Error && err.message) return err.message;
     if (typeof err === "string") return err;
     try {
       return JSON.stringify(err);
     } catch {
-      return "Unknown error";
+      return "未知错误";
     }
   };
 
@@ -177,11 +177,11 @@ function App() {
     try {
       setWarmingUpId(accountId);
       await warmupAccount(accountId);
-      showWarmupToast(`Warm-up sent for ${accountName}`);
+      showWarmupToast(`已向 ${accountName} 发送保活请求`);
     } catch (err) {
       console.error("Failed to warm up account:", err);
       showWarmupToast(
-        `Warm-up failed for ${accountName}: ${formatWarmupError(err)}`,
+        `${accountName} 保活失败：${formatWarmupError(err)}`,
         true
       );
     } finally {
@@ -194,25 +194,21 @@ function App() {
       setIsWarmingAll(true);
       const summary = await warmupAllAccounts();
       if (summary.total_accounts === 0) {
-        showWarmupToast("No accounts available for warm-up", true);
+        showWarmupToast("当前没有可保活的账号", true);
         return;
       }
 
       if (summary.failed_account_ids.length === 0) {
-        showWarmupToast(
-          `Warm-up sent for all ${summary.warmed_accounts} account${
-            summary.warmed_accounts === 1 ? "" : "s"
-          }`
-        );
+        showWarmupToast(`已向全部 ${summary.warmed_accounts} 个账号发送保活请求`);
       } else {
         showWarmupToast(
-          `Warmed ${summary.warmed_accounts}/${summary.total_accounts}. Failed: ${summary.failed_account_ids.length}`,
+          `保活完成 ${summary.warmed_accounts}/${summary.total_accounts}，失败 ${summary.failed_account_ids.length} 个`,
           true
         );
       }
     } catch (err) {
       console.error("Failed to warm up all accounts:", err);
-      showWarmupToast(`Warm-up all failed: ${formatWarmupError(err)}`, true);
+      showWarmupToast(`全部保活失败：${formatWarmupError(err)}`, true);
     } finally {
       setIsWarmingAll(false);
     }
@@ -229,12 +225,12 @@ function App() {
       setIsExportingSlim(true);
       const payload = await exportAccountsSlimText();
       setConfigPayload(payload);
-      showWarmupToast(`Slim text exported (${accounts.length} accounts).`);
+      showWarmupToast(`已导出精简配置（共 ${accounts.length} 个账号）`);
     } catch (err) {
       console.error("Failed to export slim text:", err);
       const message = err instanceof Error ? err.message : String(err);
       setConfigModalError(message);
-      showWarmupToast("Slim export failed", true);
+      showWarmupToast("精简配置导出失败", true);
     } finally {
       setIsExportingSlim(false);
     }
@@ -250,7 +246,7 @@ function App() {
 
   const handleImportSlimText = async () => {
     if (!configPayload.trim()) {
-      setConfigModalError("Please paste the slim text string first.");
+      setConfigModalError("请先粘贴精简配置。");
       return;
     }
 
@@ -261,13 +257,13 @@ function App() {
       setMaskedAccounts(new Set());
       setIsConfigModalOpen(false);
       showWarmupToast(
-        `Imported ${summary.imported_count}, skipped ${summary.skipped_count} (total ${summary.total_in_payload})`
+        `已导入 ${summary.imported_count} 个，跳过 ${summary.skipped_count} 个（共 ${summary.total_in_payload} 个）`
       );
     } catch (err) {
       console.error("Failed to import slim text:", err);
       const message = err instanceof Error ? err.message : String(err);
       setConfigModalError(message);
-      showWarmupToast("Slim import failed", true);
+      showWarmupToast("精简配置导入失败", true);
     } finally {
       setIsImportingSlim(false);
     }
@@ -277,11 +273,11 @@ function App() {
     try {
       setIsExportingFull(true);
       const selected = await save({
-        title: "Export Full Encrypted Account Config",
+        title: "导出完整加密备份",
         defaultPath: "codex-switcher-full.cswf",
         filters: [
           {
-            name: "Codex Switcher Full Backup",
+            name: "Codex 完整加密备份",
             extensions: ["cswf"],
           },
         ],
@@ -290,10 +286,10 @@ function App() {
       if (!selected) return;
 
       await exportAccountsFullEncryptedFile(selected);
-      showWarmupToast("Full encrypted file exported.");
+      showWarmupToast("完整加密备份已导出。");
     } catch (err) {
       console.error("Failed to export full encrypted file:", err);
-      showWarmupToast("Full export failed", true);
+      showWarmupToast("完整加密备份导出失败", true);
     } finally {
       setIsExportingFull(false);
     }
@@ -304,10 +300,10 @@ function App() {
       setIsImportingFull(true);
       const selected = await open({
         multiple: false,
-        title: "Import Full Encrypted Account Config",
+        title: "导入完整加密备份",
         filters: [
           {
-            name: "Codex Switcher Full Backup",
+            name: "Codex 完整加密备份",
             extensions: ["cswf"],
           },
         ],
@@ -318,11 +314,11 @@ function App() {
       const summary = await importAccountsFullEncryptedFile(selected);
       setMaskedAccounts(new Set());
       showWarmupToast(
-        `Imported ${summary.imported_count}, skipped ${summary.skipped_count} (total ${summary.total_in_payload})`
+        `已导入 ${summary.imported_count} 个，跳过 ${summary.skipped_count} 个（共 ${summary.total_in_payload} 个）`
       );
     } catch (err) {
       console.error("Failed to import full encrypted file:", err);
-      showWarmupToast("Full import failed", true);
+      showWarmupToast("完整加密备份导入失败", true);
     } finally {
       setIsImportingFull(false);
     }
@@ -388,7 +384,7 @@ function App() {
               <div className="min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
                   <h1 className="text-xl font-bold text-gray-900 tracking-tight">
-                    Codex Switcher
+                    Codex 多账号切换
                   </h1>
                   {processInfo && (
                     <span
@@ -403,14 +399,14 @@ function App() {
                       ></span>
                       <span>
                         {hasRunningProcesses
-                          ? `${processInfo.count} Codex running`
-                          : "0 Codex running"}
+                          ? `检测到 ${processInfo.count} 个 Codex 进程`
+                          : "未检测到 Codex 进程"}
                       </span>
                     </span>
                   )}
                 </div>
                 <p className="text-xs text-gray-500">
-                  Multi-account manager for Codex CLI
+                  Codex CLI 多账号与配额管理
                 </p>
               </div>
             </div>
@@ -419,7 +415,7 @@ function App() {
               <button
                 onClick={toggleMaskAll}
                 className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors shrink-0 whitespace-nowrap"
-                title={allMasked ? "Show all account names and emails" : "Hide all account names and emails"}
+                title={allMasked ? "显示所有敏感信息" : "隐藏所有敏感信息"}
               >
                 <span className="flex items-center gap-2">
                   {allMasked ? (
@@ -437,7 +433,7 @@ function App() {
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
                     </svg>
                   )}
-                  {allMasked ? "Show All" : "Hide All"}
+                  {allMasked ? "显示信息" : "隐藏信息"}
                 </span>
               </button>
               <button
@@ -445,21 +441,21 @@ function App() {
                 disabled={isRefreshing}
                 className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors disabled:opacity-50 shrink-0 whitespace-nowrap"
               >
-                {isRefreshing ? "↻ Refreshing..." : "↻ Refresh All"}
+                {isRefreshing ? "↻ 刷新中..." : "↻ 刷新全部配额"}
               </button>
               <button
                 onClick={handleWarmupAll}
                 disabled={isWarmingAll || accounts.length === 0}
                 className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors disabled:opacity-50 shrink-0 whitespace-nowrap"
-                title="Send minimal traffic using all accounts"
+                title="对全部账号发送最小请求以保持活跃"
               >
                 {isWarmingAll ? (
                   <span className="flex items-center gap-2">
-                    <span className="animate-pulse">⚡</span> Warming...
+                    <span className="animate-pulse">⚡</span> 保活中...
                   </span>
                 ) : (
                   <span className="flex items-center gap-2">
-                    <span>⚡</span> Warm-up All
+                    <span>⚡</span> 全部保活
                   </span>
                 )}
               </button>
@@ -469,7 +465,7 @@ function App() {
                   onClick={() => setIsActionsMenuOpen((prev) => !prev)}
                   className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 text-white transition-colors shrink-0 whitespace-nowrap"
                 >
-                  Account ▾
+                  账号操作 ▾
                 </button>
                 {isActionsMenuOpen && (
                   <div className="absolute right-0 mt-2 w-56 rounded-xl border border-gray-200 bg-white shadow-xl p-2 z-50">
@@ -480,7 +476,7 @@ function App() {
                       }}
                       className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-gray-100 text-gray-700"
                     >
-                      + Add Account
+                      + 添加账号
                     </button>
                     <button
                       onClick={() => {
@@ -490,7 +486,7 @@ function App() {
                       disabled={isExportingSlim}
                       className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-gray-100 text-gray-700 disabled:opacity-50"
                     >
-                      {isExportingSlim ? "Exporting..." : "Export Slim Text"}
+                      {isExportingSlim ? "导出中..." : "导出精简配置"}
                     </button>
                     <button
                       onClick={() => {
@@ -500,7 +496,7 @@ function App() {
                       disabled={isImportingSlim}
                       className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-gray-100 text-gray-700 disabled:opacity-50"
                     >
-                      {isImportingSlim ? "Importing..." : "Import Slim Text"}
+                      {isImportingSlim ? "导入中..." : "导入精简配置"}
                     </button>
                     <button
                       onClick={() => {
@@ -510,7 +506,7 @@ function App() {
                       disabled={isExportingFull}
                       className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-gray-100 text-gray-700 disabled:opacity-50"
                     >
-                      {isExportingFull ? "Exporting..." : "Export Full Encrypted File"}
+                      {isExportingFull ? "导出中..." : "导出完整加密备份"}
                     </button>
                     <button
                       onClick={() => {
@@ -520,7 +516,7 @@ function App() {
                       disabled={isImportingFull}
                       className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-gray-100 text-gray-700 disabled:opacity-50"
                     >
-                      {isImportingFull ? "Importing..." : "Import Full Encrypted File"}
+                      {isImportingFull ? "导入中..." : "导入完整加密备份"}
                     </button>
                   </div>
                 )}
@@ -535,11 +531,11 @@ function App() {
         {loading && accounts.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20">
             <div className="animate-spin h-10 w-10 border-2 border-gray-900 border-t-transparent rounded-full mb-4"></div>
-            <p className="text-gray-500">Loading accounts...</p>
+            <p className="text-gray-500">正在加载账号列表...</p>
           </div>
         ) : error ? (
           <div className="text-center py-20">
-            <div className="text-red-600 mb-2">Failed to load accounts</div>
+            <div className="text-red-600 mb-2">加载账号失败</div>
             <p className="text-sm text-gray-500">{error}</p>
           </div>
         ) : accounts.length === 0 ? (
@@ -548,16 +544,16 @@ function App() {
               <span className="text-3xl">👤</span>
             </div>
             <h2 className="text-xl font-semibold text-gray-900 mb-2">
-              No accounts yet
+              还没有账号
             </h2>
             <p className="text-gray-500 mb-6">
-              Add your first Codex account to get started
+              添加第一个 Codex 账号后即可开始使用
             </p>
             <button
               onClick={() => setIsAddModalOpen(true)}
               className="px-6 py-3 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 text-white transition-colors"
             >
-              Add Account
+              添加账号
             </button>
           </div>
         ) : (
@@ -566,7 +562,7 @@ function App() {
             {activeAccount && (
               <section>
                 <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">
-                  Active Account
+                  当前账号
                 </h2>
                 <AccountCard
                   account={activeAccount}
@@ -591,11 +587,11 @@ function App() {
               <section>
                 <div className="flex items-center justify-between gap-3 mb-4">
                   <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider">
-                    Other Accounts ({otherAccounts.length})
+                    其他账号（{otherAccounts.length}）
                   </h2>
                   <div className="flex items-center gap-2">
                     <label htmlFor="other-accounts-sort" className="text-xs text-gray-500">
-                      Sort
+                      排序方式
                     </label>
                     <div className="relative">
                       <select
@@ -612,13 +608,13 @@ function App() {
                         }
                         className="appearance-none font-sans text-xs sm:text-sm font-medium pl-3 pr-9 py-2 rounded-xl border border-gray-300 bg-gradient-to-b from-white to-gray-50 text-gray-700 shadow-sm hover:border-gray-400 hover:shadow focus:outline-none focus:ring-2 focus:ring-gray-300 focus:border-gray-400 transition-all"
                       >
-                        <option value="deadline_asc">Reset: earliest to latest</option>
-                        <option value="deadline_desc">Reset: latest to earliest</option>
+                        <option value="deadline_asc">按重置时间升序</option>
+                        <option value="deadline_desc">按重置时间降序</option>
                         <option value="remaining_desc">
-                          % remaining: highest to lowest
+                          按剩余额度降序
                         </option>
                         <option value="remaining_asc">
-                          % remaining: lowest to highest
+                          按剩余额度升序
                         </option>
                       </select>
                       <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-gray-500">
@@ -662,7 +658,7 @@ function App() {
       {/* Refresh Success Toast */}
       {refreshSuccess && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-3 bg-green-600 text-white rounded-lg shadow-lg text-sm flex items-center gap-2">
-          <span>✓</span> Usage refreshed successfully
+          <span>✓</span> 配额已刷新
         </div>
       )}
 
@@ -682,7 +678,7 @@ function App() {
       {/* Delete Confirmation Toast */}
       {deleteConfirmId && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-3 bg-red-600 text-white rounded-lg shadow-lg text-sm">
-          Click delete again to confirm removal
+          再次点击删除以确认
         </div>
       )}
 
@@ -702,7 +698,7 @@ function App() {
           <div className="bg-white border border-gray-200 rounded-2xl w-full max-w-2xl mx-4 shadow-xl">
             <div className="flex items-center justify-between p-5 border-b border-gray-100">
               <h2 className="text-lg font-semibold text-gray-900">
-                {configModalMode === "slim_export" ? "Export Slim Text" : "Import Slim Text"}
+                {configModalMode === "slim_export" ? "导出精简配置" : "导入精简配置"}
               </h2>
               <button
                 onClick={() => setIsConfigModalOpen(false)}
@@ -714,11 +710,11 @@ function App() {
             <div className="p-5 space-y-4">
               {configModalMode === "slim_import" ? (
                 <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                  Existing accounts are kept. Only missing accounts are imported.
+                  保留现有账号，仅导入缺失项。
                 </p>
               ) : (
                 <p className="text-sm text-gray-500">
-                  This slim string contains account secrets. Keep it private.
+                  该配置串包含敏感凭据，请妥善保管。
                 </p>
               )}
               <textarea
@@ -728,9 +724,9 @@ function App() {
                 placeholder={
                   configModalMode === "slim_export"
                     ? isExportingSlim
-                      ? "Generating..."
-                      : "Export string will appear here"
-                    : "Paste config string here"
+                      ? "正在生成配置串..."
+                      : "导出的配置串将显示在这里"
+                    : "请在此粘贴配置串"
                 }
                 className="w-full h-48 px-4 py-3 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:border-gray-400 focus:ring-1 focus:ring-gray-400 font-mono"
               />
@@ -745,7 +741,7 @@ function App() {
                 onClick={() => setIsConfigModalOpen(false)}
                 className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors"
               >
-                Close
+                关闭
               </button>
               {configModalMode === "slim_export" ? (
                 <button
@@ -756,13 +752,13 @@ function App() {
                       setConfigCopied(true);
                       setTimeout(() => setConfigCopied(false), 1500);
                     } catch {
-                      setConfigModalError("Clipboard unavailable. Please copy manually.");
+                      setConfigModalError("无法访问剪贴板，请手动复制。");
                     }
                   }}
                   disabled={!configPayload || isExportingSlim}
                   className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 text-white transition-colors disabled:opacity-50"
                 >
-                  {configCopied ? "Copied" : "Copy String"}
+                  {configCopied ? "已复制" : "复制配置串"}
                 </button>
               ) : (
                 <button
@@ -770,7 +766,7 @@ function App() {
                   disabled={isImportingSlim}
                   className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 text-white transition-colors disabled:opacity-50"
                 >
-                  {isImportingSlim ? "Importing..." : "Import Missing Accounts"}
+                  {isImportingSlim ? "导入中..." : "导入缺失项"}
                 </button>
               )}
             </div>

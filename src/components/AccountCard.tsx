@@ -17,13 +17,13 @@ interface AccountCardProps {
 }
 
 function formatLastRefresh(date: Date | null): string {
-  if (!date) return "Never";
+  if (!date) return "从未";
   const now = new Date();
   const diff = Math.floor((now.getTime() - date.getTime()) / 1000);
-  if (diff < 5) return "Just now";
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 5) return "刚刚";
+  if (diff < 60) return `${diff} 秒前`;
+  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
   return date.toLocaleDateString();
 }
 
@@ -99,11 +99,20 @@ export function AccountCard({
     }
   };
 
+  const planDisplayMap: Record<string, string> = {
+    pro: "Pro",
+    plus: "Plus",
+    team: "团队版",
+    enterprise: "企业版",
+    free: "免费版",
+  };
+
   const planDisplay = account.plan_type
-    ? account.plan_type.charAt(0).toUpperCase() + account.plan_type.slice(1)
+    ? planDisplayMap[account.plan_type.toLowerCase()] ??
+      account.plan_type.charAt(0).toUpperCase() + account.plan_type.slice(1)
     : account.auth_mode === "api_key"
-      ? "API Key"
-      : "Unknown";
+      ? "API 密钥"
+      : "未知";
 
   const planColors: Record<string, string> = {
     pro: "bg-indigo-50 text-indigo-700 border-indigo-200",
@@ -154,7 +163,7 @@ export function AccountCard({
                   setEditName(account.name);
                   setIsEditing(true);
                 }}
-                title={masked ? undefined : "Click to rename"}
+                title={masked ? undefined : "点击修改名称"}
               >
                 <BlurredText blur={masked}>{account.name}</BlurredText>
               </h3>
@@ -173,7 +182,7 @@ export function AccountCard({
             <button
               onClick={onToggleMask}
               className="p-1 text-gray-400 hover:text-gray-600 transition-colors"
-              title={masked ? "Show info" : "Hide info"}
+              title={masked ? "显示敏感信息" : "隐藏敏感信息"}
             >
               {masked ? (
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -203,7 +212,7 @@ export function AccountCard({
 
       {/* Last refresh time */}
       <div className="text-xs text-gray-400 mb-3">
-        Last updated: {formatLastRefresh(lastRefresh)}
+        上次刷新：{formatLastRefresh(lastRefresh)}
       </div>
 
       {/* Actions */}
@@ -213,7 +222,7 @@ export function AccountCard({
             disabled
             className="flex-1 px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 text-gray-500 border border-gray-200 cursor-default"
           >
-            ✓ Active
+            ✓ 当前账号
           </button>
         ) : (
           <button
@@ -224,9 +233,9 @@ export function AccountCard({
                 ? "bg-gray-200 text-gray-400 cursor-not-allowed"
                 : "bg-gray-900 hover:bg-gray-800 text-white"
             }`}
-            title={switchDisabled ? "Close all Codex processes first" : undefined}
+            title={switchDisabled ? "请先关闭所有 Codex 进程" : undefined}
           >
-            {switching ? "Switching..." : switchDisabled ? "Codex Running" : "Switch"}
+            {switching ? "切换中..." : switchDisabled ? "有运行中的 Codex" : "切换"}
           </button>
         )}
         <button
@@ -239,7 +248,7 @@ export function AccountCard({
               ? "bg-amber-100 text-amber-500"
               : "bg-amber-50 hover:bg-amber-100 text-amber-700"
           }`}
-          title={warmingUp ? "Sending warm-up request..." : "Send minimal warm-up request"}
+          title={warmingUp ? "正在发送保活请求..." : "发送保活请求"}
         >
           ⚡
         </button>
@@ -251,14 +260,14 @@ export function AccountCard({
               ? "bg-gray-200 text-gray-400"
               : "bg-gray-100 hover:bg-gray-200 text-gray-600"
           }`}
-          title="Refresh usage"
+          title="刷新配额"
         >
           <span className={isRefreshing ? "animate-spin inline-block" : ""}>↻</span>
         </button>
         <button
           onClick={onDelete}
           className="px-3 py-2 text-sm rounded-lg bg-red-50 hover:bg-red-100 text-red-600 transition-colors"
-          title="Remove account"
+          title="删除账号"
         >
           ✕
         </button>

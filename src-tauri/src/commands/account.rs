@@ -3,7 +3,7 @@
 use crate::auth::{
     add_account, create_chatgpt_account_from_refresh_token, get_active_account,
     import_from_auth_json, load_accounts, remove_account, save_accounts, set_active_account,
-    switch_to_account, touch_account,
+    switch_to_account, touch_account, get_codex_auth_file,
 };
 use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
 
@@ -107,6 +107,15 @@ pub async fn add_account_from_file(path: String, name: String) -> Result<Account
     let active_id = store.active_account_id.as_deref();
 
     Ok(AccountInfo::from_stored(&stored, active_id))
+}
+
+/// Get the default Codex auth.json path for the current user
+#[tauri::command]
+pub async fn get_default_auth_json_path() -> Result<String, String> {
+    let path = get_codex_auth_file().map_err(|e| e.to_string())?;
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "Failed to resolve auth.json path".to_string())
 }
 
 /// Switch to a different account
