@@ -5,6 +5,9 @@ use crate::auth::{
     import_from_auth_json, load_accounts, remove_account, save_accounts, set_active_account,
     switch_to_account, touch_account,
 };
+use crate::commands::{
+    collect_running_codex_processes, gracefully_stop_codex_processes, restart_codex_processes,
+};
 use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
 
 use anyhow::Context;
@@ -22,12 +25,6 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
-
 const SLIM_EXPORT_PREFIX: &str = "css1.";
 const SLIM_FORMAT_VERSION: u8 = 1;
 const SLIM_AUTH_API_KEY: u8 = 0;
@@ -39,7 +36,6 @@ const FULL_SALT_LEN: usize = 16;
 const FULL_NONCE_LEN: usize = 24;
 const FULL_KDF_ITERATIONS: u32 = 210_000;
 const FULL_PRESET_PASSPHRASE: &str = "gT7kQ9mV2xN4pL8sR1dH6zW3cB5yF0uJ_aE7nK2tP9vM4rX1";
-
 const MAX_IMPORT_JSON_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_IMPORT_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const SLIM_IMPORT_CONCURRENCY: usize = 6;
@@ -111,8 +107,12 @@ pub async fn add_account_from_file(path: String, name: String) -> Result<Account
 
 /// Switch to a different account
 #[tauri::command]
-pub async fn switch_account(account_id: String) -> Result<(), String> {
+pub async fn switch_account(
+    account_id: String,
+    restart_running_codex: Option<bool>,
+) -> Result<(), String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
+    let running_processes = collect_running_codex_processes().map_err(|e| e.to_string())?;
 
     // Find the account
     let account = store
@@ -121,33 +121,32 @@ pub async fn switch_account(account_id: String) -> Result<(), String> {
         .find(|a| a.id == account_id)
         .ok_or_else(|| format!("Account not found: {account_id}"))?;
 
-    // Write to ~/.codex/auth.json
+    // Only foreground processes (desktop app, CLI) require a restart confirmation.
+    // Background processes (IDE extensions) are never stopped — they pick up the
+    // new auth.json on their own.
+    let foreground_processes: Vec<_> = running_processes
+        .iter()
+        .filter(|p| !p.is_background())
+        .cloned()
+        .collect();
+
+    let should_restart = restart_running_codex.unwrap_or(false);
+    if !foreground_processes.is_empty() && !should_restart {
+        return Err(String::from(
+            "Codex is currently running. Confirm a graceful restart before switching accounts.",
+        ));
+    }
+
+    if should_restart {
+        gracefully_stop_codex_processes(&foreground_processes).map_err(|e| e.to_string())?;
+    }
+
     switch_to_account(account).map_err(|e| e.to_string())?;
-
-    // Update the active account in our store
     set_active_account(&account_id).map_err(|e| e.to_string())?;
-
-    // Update last_used_at
     touch_account(&account_id).map_err(|e| e.to_string())?;
 
-    // Restart Antigravity background process if it is running
-    // This allows it to pick up the new authorization file seamlessly
-    if let Ok(pids) = find_antigravity_processes() {
-        for pid in pids {
-            #[cfg(unix)]
-            {
-                let _ = std::process::Command::new("kill")
-                    .arg("-9")
-                    .arg(pid.to_string())
-                    .output();
-            }
-            #[cfg(windows)]
-            {
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/F", "/PID", &pid.to_string()])
-                    .output();
-            }
-        }
+    if should_restart {
+        restart_codex_processes(&foreground_processes).map_err(|e| e.to_string())?;
     }
 
     Ok(())
@@ -205,7 +204,9 @@ pub async fn import_accounts_slim_text(payload: String) -> Result<ImportAccounts
 
 /// Export full account config as an encrypted file.
 #[tauri::command]
-pub async fn export_accounts_full_encrypted_file(path: String) -> Result<(), String> {
+pub async fn export_accounts_full_encrypted_file(
+    path: String,
+) -> Result<(), String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
     let encrypted =
         encode_full_encrypted_store(&store, FULL_PRESET_PASSPHRASE).map_err(|e| e.to_string())?;
@@ -227,71 +228,6 @@ pub async fn import_accounts_full_encrypted_file(
     let (merged, summary) = merge_accounts_store(current, imported);
     save_accounts(&merged).map_err(|e| e.to_string())?;
     Ok(summary)
-}
-
-/// Find all running Antigravity codex assistant processes
-fn find_antigravity_processes() -> anyhow::Result<Vec<u32>> {
-    let mut pids = Vec::new();
-
-    #[cfg(unix)]
-    {
-        // Use ps with custom format to get the pid and full command line
-        let output = std::process::Command::new("ps")
-            .args(["-eo", "pid,command"])
-            .output()?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines().skip(1) {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-
-            if let Some((pid_str, command)) = line.split_once(' ') {
-                let pid_str = pid_str.trim();
-                let command = command.trim();
-
-                // Antigravity processes have a specific path format
-                let is_antigravity = (command.contains(".antigravity/extensions/openai.chatgpt")
-                    || command.contains(".vscode/extensions/openai.chatgpt"))
-                    && (command.ends_with("codex app-server --analytics-default-enabled")
-                        || command.contains("/codex app-server"));
-
-                if is_antigravity {
-                    if let Ok(pid) = pid_str.parse::<u32>() {
-                        pids.push(pid);
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        // Use tasklist on Windows
-        // For Windows we might need a more precise WMI query to get command line args,
-        // but for now we look for codex.exe PIDs and verify they're not ours
-        let output = std::process::Command::new("tasklist")
-            .creation_flags(CREATE_NO_WINDOW)
-            .args(["/FI", "IMAGENAME eq codex.exe", "/FO", "CSV", "/NH"])
-            .output()?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let parts: Vec<&str> = line.split(',').collect();
-            if parts.len() > 1 {
-                let name = parts[0].trim_matches('"').to_lowercase();
-                if name == "codex.exe" {
-                    let pid_str = parts[1].trim_matches('"');
-                    if let Ok(pid) = pid_str.parse::<u32>() {
-                        pids.push(pid);
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(pids)
 }
 
 fn encode_slim_payload_from_store(store: &AccountsStore) -> anyhow::Result<String> {
