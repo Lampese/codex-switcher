@@ -1,7 +1,7 @@
 {
   "name": "codex-switcher",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "A multi-account manager for Codex CLI",
   "type": "module",
   "scripts": {
@@ -11,10 +11,10 @@
     "tauri": "sh ./scripts/tauri.sh"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-dialog": "^2.5.0",
+    "@tauri-apps/api": "^2.10.0",
+    "@tauri-apps/plugin-dialog": "^2.6.0",
     "@tauri-apps/plugin-opener": "^2",
-    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-process": "^2",
     "@tauri-apps/plugin-updater": "^2.10.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
