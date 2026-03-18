@@ -27,8 +27,8 @@ export function AddAccountModal({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [oauthPending, setOauthPending] = useState(false);
-  const [authUrl, setAuthUrl] = useState<string>("");
-  const [copied, setCopied] = useState<boolean>(false);
+  const [authUrl, setAuthUrl] = useState("");
+  const [copied, setCopied] = useState(false);
   const isPrimaryDisabled = loading || (activeTab === "oauth" && oauthPending);
 
   const resetForm = () => {
@@ -42,7 +42,7 @@ export function AddAccountModal({
 
   const handleClose = () => {
     if (oauthPending) {
-      onCancelOAuth();
+      void onCancelOAuth();
     }
     resetForm();
     onClose();
@@ -62,7 +62,6 @@ export function AddAccountModal({
       setOauthPending(true);
       setLoading(false);
 
-      // Wait for completion
       await onCompleteOAuth();
       handleClose();
     } catch (err) {
@@ -76,12 +75,7 @@ export function AddAccountModal({
     try {
       const selected = await open({
         multiple: false,
-        filters: [
-          {
-            name: "JSON",
-            extensions: ["json"],
-          },
-        ],
+        filters: [{ name: "JSON", extensions: ["json"] }],
         title: "Select auth.json file",
       });
 
@@ -117,21 +111,27 @@ export function AddAccountModal({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-      <div className="bg-white border border-gray-200 rounded-2xl w-full max-w-md mx-4 shadow-xl">
-        {/* Header */}
-        <div className="flex items-center justify-between p-5 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-gray-900">Add Account</h2>
+    <div className="theme-scrim fixed inset-0 z-50 flex items-center justify-center px-4">
+      <div
+        className="theme-panel w-full max-w-md rounded-2xl shadow-xl shadow-slate-900/15 dark:shadow-slate-950/60"
+        style={{ backgroundColor: "var(--theme-surface)" }}
+      >
+        <div
+          className="flex items-center justify-between border-b p-5"
+          style={{ borderColor: "var(--theme-border-subtle)" }}
+        >
+          <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-50">
+            Add Account
+          </h2>
           <button
             onClick={handleClose}
-            className="text-gray-400 hover:text-gray-600 transition-colors"
+            className="text-slate-400 transition-colors hover:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300"
           >
-            ✕
+            Close
           </button>
         </div>
 
-        {/* Tabs */}
-        <div className="flex border-b border-gray-100">
+        <div className="flex border-b" style={{ borderColor: "var(--theme-border-subtle)" }}>
           {(["oauth", "import"] as Tab[]).map((tab) => (
             <button
               key={tab}
@@ -146,21 +146,25 @@ export function AddAccountModal({
                 setActiveTab(tab);
                 setError(null);
               }}
-              className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${activeTab === tab
-                  ? "text-gray-900 border-b-2 border-gray-900 -mb-px"
-                  : "text-gray-400 hover:text-gray-600"
-                }`}
+              className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
+                activeTab === tab
+                  ? "border-b-2 text-slate-900 dark:text-[var(--theme-text-primary)]"
+                  : "text-slate-400 hover:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300"
+              }`}
+              style={
+                activeTab === tab
+                  ? { borderColor: "var(--theme-primary-bg)" }
+                  : undefined
+              }
             >
               {tab === "oauth" ? "ChatGPT Login" : "Import File"}
             </button>
           ))}
         </div>
 
-        {/* Content */}
-        <div className="p-5 space-y-4">
-          {/* Account Name (always shown) */}
+        <div className="space-y-4 p-5">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
+            <label className="mb-2 block text-sm font-medium text-slate-700 dark:text-slate-300">
               Account Name
             </label>
             <input
@@ -168,44 +172,45 @@ export function AddAccountModal({
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="e.g., Work Account"
-              className="w-full px-4 py-2.5 bg-white border border-gray-200 rounded-lg text-gray-900 placeholder-gray-400 focus:outline-none focus:border-gray-400 focus:ring-1 focus:ring-gray-400 transition-colors"
+              className="theme-field w-full rounded-lg px-4 py-2.5"
             />
           </div>
 
-          {/* Tab-specific content */}
           {activeTab === "oauth" && (
-            <div className="text-sm text-gray-500">
+            <div className="text-sm text-slate-500 dark:text-slate-400">
               {oauthPending ? (
-                <div className="text-center py-4">
-                  <div className="animate-spin h-8 w-8 border-2 border-gray-900 border-t-transparent rounded-full mx-auto mb-3"></div>
-                  <p className="text-gray-700 font-medium mb-2">Waiting for browser login...</p>
-                  <p className="text-xs text-gray-500 mb-4">
-                    Please open the following link in your browser to proceed:
+                <div className="py-4 text-center">
+                  <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-2 border-slate-900 border-t-transparent dark:border-slate-100" />
+                  <p className="mb-2 font-medium text-slate-700 dark:text-slate-200">
+                    Waiting for browser login...
                   </p>
-                  <div className="flex items-center gap-2 mb-2 bg-gray-50 p-2 rounded-lg border border-gray-200">
+                  <p className="mb-4 text-xs text-slate-500 dark:text-slate-400">
+                    Open the following link in your browser to continue:
+                  </p>
+                  <div className="theme-panel-elevated mb-2 flex items-center gap-2 rounded-lg p-2">
                     <input
                       type="text"
                       readOnly
                       value={authUrl}
-                      className="flex-1 bg-transparent border-none text-xs text-gray-600 focus:outline-none focus:ring-0 truncate"
+                      className="flex-1 truncate bg-transparent text-xs text-slate-600 focus:outline-none dark:text-slate-300"
                     />
                     <button
                       onClick={() => {
-                        navigator.clipboard.writeText(authUrl);
+                        void navigator.clipboard.writeText(authUrl);
                         setCopied(true);
                         setTimeout(() => setCopied(false), 2000);
                       }}
-                      className={`px-3 py-1.5 border rounded text-xs font-medium transition-colors shrink-0 
-                        ${copied
-                          ? "bg-green-50 border-green-200 text-green-700"
-                          : "bg-white border-gray-200 text-gray-700 hover:bg-gray-50"
-                        }`}
+                      className={`shrink-0 rounded px-3 py-1.5 text-xs font-medium ${
+                        copied
+                          ? "theme-toast-success"
+                          : "theme-button-secondary"
+                      }`}
                     >
                       {copied ? "Copied!" : "Copy"}
                     </button>
                     <button
                       onClick={() => openUrl(authUrl)}
-                      className="px-3 py-1.5 bg-gray-900 border border-gray-900 rounded text-xs font-medium text-white hover:bg-gray-800 transition-colors shrink-0"
+                      className="theme-button-primary shrink-0 rounded px-3 py-1.5 text-xs font-medium"
                     >
                       Open
                     </button>
@@ -213,8 +218,8 @@ export function AddAccountModal({
                 </div>
               ) : (
                 <p>
-                  Click the button below to generate a login link.
-                  You will need to open it in your browser to authenticate.
+                  Click the button below to generate a login link. You will need to
+                  open it in your browser to authenticate.
                 </p>
               )}
             </div>
@@ -222,46 +227,44 @@ export function AddAccountModal({
 
           {activeTab === "import" && (
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
+              <label className="mb-2 block text-sm font-medium text-slate-700 dark:text-slate-300">
                 Select auth.json file
               </label>
               <div className="flex gap-2">
-                <div className="flex-1 px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-600 truncate">
+                <div className="theme-panel-elevated flex-1 truncate rounded-lg px-4 py-2.5 text-sm text-slate-600 dark:text-slate-300">
                   {filePath || "No file selected"}
                 </div>
                 <button
                   onClick={handleSelectFile}
-                  className="px-4 py-2.5 bg-gray-100 hover:bg-gray-200 border border-gray-200 rounded-lg text-sm font-medium text-gray-700 transition-colors whitespace-nowrap"
+                  className="theme-button-secondary whitespace-nowrap rounded-lg px-4 py-2.5 text-sm font-medium"
                 >
                   Browse...
                 </button>
               </div>
-              <p className="text-xs text-gray-400 mt-2">
+              <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">
                 Import credentials from an existing Codex auth.json file
               </p>
             </div>
           )}
 
-          {/* Error */}
           {error && (
-            <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-600 text-sm">
+            <div className="theme-toast-danger rounded-lg p-3 text-sm">
               {error}
             </div>
           )}
         </div>
 
-        {/* Footer */}
-        <div className="flex gap-3 p-5 border-t border-gray-100">
+        <div className="flex gap-3 border-t p-5" style={{ borderColor: "var(--theme-border-subtle)" }}>
           <button
             onClick={handleClose}
-            className="flex-1 px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors"
+            className="theme-button-secondary flex-1 rounded-lg px-4 py-2.5 text-sm font-medium"
           >
             Cancel
           </button>
           <button
             onClick={activeTab === "oauth" ? handleOAuthLogin : handleImportFile}
             disabled={isPrimaryDisabled}
-            className="flex-1 px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 text-white transition-colors disabled:opacity-50"
+            className="theme-button-primary flex-1 rounded-lg px-4 py-2.5 text-sm font-medium disabled:opacity-50"
           >
             {loading
               ? "Adding..."

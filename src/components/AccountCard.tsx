@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, type KeyboardEvent, type ReactNode } from "react";
 import type { AccountWithUsage } from "../types";
 import { UsageBar } from "./UsageBar";
 
@@ -27,10 +27,16 @@ function formatLastRefresh(date: Date | null): string {
   return date.toLocaleDateString();
 }
 
-function BlurredText({ children, blur }: { children: React.ReactNode; blur: boolean }) {
+function BlurredText({
+  children,
+  blur,
+}: {
+  children: ReactNode;
+  blur: boolean;
+}) {
   return (
     <span
-      className={`transition-all duration-200 select-none ${blur ? "blur-sm" : ""}`}
+      className={`select-none transition-all duration-200 ${blur ? "blur-sm" : ""}`}
       style={blur ? { userSelect: "none" } : undefined}
     >
       {children}
@@ -90,9 +96,9 @@ export function AccountCard({
     setIsEditing(false);
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
+  const handleKeyDown = (e: KeyboardEvent) => {
     if (e.key === "Enter") {
-      handleRename();
+      void handleRename();
     } else if (e.key === "Escape") {
       setEditName(account.name);
       setIsEditing(false);
@@ -106,34 +112,38 @@ export function AccountCard({
       : "Unknown";
 
   const planColors: Record<string, string> = {
-    pro: "bg-indigo-50 text-indigo-700 border-indigo-200",
-    plus: "bg-emerald-50 text-emerald-700 border-emerald-200",
-    team: "bg-blue-50 text-blue-700 border-blue-200",
-    enterprise: "bg-amber-50 text-amber-700 border-amber-200",
-    free: "bg-gray-50 text-gray-600 border-gray-200",
-    api_key: "bg-orange-50 text-orange-700 border-orange-200",
+    pro: "theme-plan-badge",
+    plus: "theme-plan-badge theme-plan-badge--success",
+    team: "theme-plan-badge",
+    enterprise: "theme-plan-badge theme-plan-badge--warning",
+    free: "theme-plan-badge",
+    api_key: "theme-plan-badge theme-plan-badge--warning",
   };
 
   const planKey = account.plan_type?.toLowerCase() || "api_key";
   const planColorClass = planColors[planKey] || planColors.free;
 
-
   return (
     <div
-      className={`relative rounded-xl border p-5 transition-all duration-200 ${
+      className={`theme-card relative rounded-xl p-5 transition-all duration-200 ${
         account.is_active
-          ? "bg-white border-emerald-400 shadow-sm"
-          : "bg-white border-gray-200 hover:border-gray-300"
+          ? "theme-card--active"
+          : "theme-card--inactive"
       }`}
     >
-      {/* Header */}
-      <div className="flex items-start justify-between mb-3">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1">
+      <div className="mb-3 flex items-start justify-between">
+        <div className="min-w-0 flex-1">
+          <div className="mb-1 flex items-center gap-2">
             {account.is_active && (
               <span className="flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-2 w-2 rounded-full bg-green-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+                <span
+                  className="absolute inline-flex h-2 w-2 animate-ping rounded-full opacity-50"
+                  style={{ backgroundColor: "var(--theme-text-secondary)" }}
+                />
+                <span
+                  className="relative inline-flex h-2 w-2 rounded-full"
+                  style={{ backgroundColor: "var(--theme-primary-bg)" }}
+                />
               </span>
             )}
             {isEditing ? (
@@ -142,13 +152,13 @@ export function AccountCard({
                 type="text"
                 value={editName}
                 onChange={(e) => setEditName(e.target.value)}
-                onBlur={handleRename}
+                onBlur={() => void handleRename()}
                 onKeyDown={handleKeyDown}
-                className="font-semibold text-gray-900 bg-gray-100 px-2 py-0.5 rounded border border-gray-300 focus:outline-none focus:border-gray-500 w-full"
+                className="theme-field w-full rounded px-2 py-0.5 font-semibold"
               />
             ) : (
               <h3
-                className="font-semibold text-gray-900 truncate cursor-pointer hover:text-gray-600"
+                className="cursor-pointer truncate font-semibold text-gray-900 hover:text-gray-600 dark:text-slate-100 dark:hover:text-slate-300"
                 onClick={() => {
                   if (masked) return;
                   setEditName(account.name);
@@ -161,68 +171,76 @@ export function AccountCard({
             )}
           </div>
           {account.email && (
-            <p className="text-sm text-gray-500 truncate">
+            <p className="truncate text-sm text-gray-500 dark:text-slate-400">
               <BlurredText blur={masked}>{account.email}</BlurredText>
             </p>
           )}
         </div>
 
         <div className="flex items-center gap-2">
-          {/* Eye toggle */}
           {onToggleMask && (
             <button
               onClick={onToggleMask}
-              className="p-1 text-gray-400 hover:text-gray-600 transition-colors"
+              className="p-1 text-gray-400 transition-colors hover:text-gray-600 dark:text-slate-500 dark:hover:text-slate-300"
               title={masked ? "Show info" : "Hide info"}
             >
               {masked ? (
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"
+                  />
                 </svg>
               ) : (
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                  />
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
+                  />
                 </svg>
               )}
             </button>
           )}
-          {/* Plan badge */}
-          <span
-            className={`px-2.5 py-1 text-xs font-medium rounded-full border ${planColorClass}`}
-          >
+          <span className={`rounded-full border px-2.5 py-1 text-xs font-medium ${planColorClass}`}>
             {planDisplay}
           </span>
         </div>
       </div>
 
-      {/* Usage */}
       <div className="mb-3">
         <UsageBar usage={account.usage} loading={isRefreshing || account.usageLoading} />
       </div>
 
-      {/* Last refresh time */}
-      <div className="text-xs text-gray-400 mb-3">
+      <div className="mb-3 text-xs text-gray-400 dark:text-slate-500">
         Last updated: {formatLastRefresh(lastRefresh)}
       </div>
 
-      {/* Actions */}
       <div className="flex gap-2">
         {account.is_active ? (
           <button
             disabled
-            className="flex-1 px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 text-gray-500 border border-gray-200 cursor-default"
+            className="theme-button-disabled flex-1 cursor-default rounded-lg px-4 py-2 text-sm font-medium"
           >
-            ✓ Active
+            Active
           </button>
         ) : (
           <button
             onClick={onSwitch}
             disabled={switching || switchDisabled}
-            className={`flex-1 px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50 ${
+            className={`flex-1 rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50 ${
               switchDisabled
-                ? "bg-gray-200 text-gray-400 cursor-not-allowed"
-                : "bg-gray-900 hover:bg-gray-800 text-white"
+                ? "theme-button-disabled"
+                : "theme-button-primary"
             }`}
             title={switchDisabled ? "Close all Codex processes first" : undefined}
           >
@@ -234,33 +252,25 @@ export function AccountCard({
             void onWarmup();
           }}
           disabled={warmingUp}
-          className={`px-3 py-2 text-sm rounded-lg transition-colors ${
-            warmingUp
-              ? "bg-amber-100 text-amber-500"
-              : "bg-amber-50 hover:bg-amber-100 text-amber-700"
-          }`}
+          className="theme-button-warning rounded-lg px-3 py-2 text-sm"
           title={warmingUp ? "Sending warm-up request..." : "Send minimal warm-up request"}
         >
-          ⚡
+          Warm
         </button>
         <button
           onClick={handleRefresh}
           disabled={isRefreshing}
-          className={`px-3 py-2 text-sm rounded-lg transition-colors ${
-            isRefreshing
-              ? "bg-gray-200 text-gray-400"
-              : "bg-gray-100 hover:bg-gray-200 text-gray-600"
-          }`}
+          className={`rounded-lg px-3 py-2 text-sm ${isRefreshing ? "theme-button-disabled" : "theme-button-secondary"}`}
           title="Refresh usage"
         >
-          <span className={isRefreshing ? "animate-spin inline-block" : ""}>↻</span>
+          <span className={isRefreshing ? "inline-block animate-spin" : ""}>Sync</span>
         </button>
         <button
           onClick={onDelete}
-          className="px-3 py-2 text-sm rounded-lg bg-red-50 hover:bg-red-100 text-red-600 transition-colors"
+          className="theme-button-danger rounded-lg px-3 py-2 text-sm"
           title="Remove account"
         >
-          ✕
+          Delete
         </button>
       </div>
     </div>

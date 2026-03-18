@@ -6,6 +6,49 @@ import { AccountCard, AddAccountModal, UpdateChecker } from "./components";
 import type { CodexProcessInfo } from "./types";
 import "./App.css";
 
+type Theme = "light" | "dark";
+type OtherAccountsSort =
+  | "deadline_asc"
+  | "deadline_desc"
+  | "remaining_desc"
+  | "remaining_asc";
+
+const THEME_STORAGE_KEY = "codex-switcher-theme";
+const OTHER_ACCOUNTS_SORT_OPTIONS: Array<{ value: OtherAccountsSort; label: string }> = [
+  { value: "deadline_asc", label: "Reset: earliest to latest" },
+  { value: "deadline_desc", label: "Reset: latest to earliest" },
+  { value: "remaining_desc", label: "% remaining: highest to lowest" },
+  { value: "remaining_asc", label: "% remaining: lowest to highest" },
+];
+
+const shellClass = "theme-shell min-h-screen transition-colors";
+const panelClass = "theme-panel";
+const softButtonClass =
+  "theme-button-secondary whitespace-nowrap rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50";
+const primaryButtonClass =
+  "theme-button-primary whitespace-nowrap rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50";
+const warningButtonClass =
+  "theme-button-warning whitespace-nowrap rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50";
+const menuItemClass =
+  "theme-menu-item w-full rounded-xl px-3 py-2 text-left text-sm disabled:opacity-50";
+
+function getInitialTheme(): Theme {
+  if (typeof window === "undefined") return "light";
+
+  try {
+    const savedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (savedTheme === "light" || savedTheme === "dark") {
+      return savedTheme;
+    }
+  } catch (error) {
+    console.error("Failed to read theme preference:", error);
+  }
+
+  return window.matchMedia?.("(prefers-color-scheme: dark)")?.matches
+    ? "dark"
+    : "light";
+}
+
 function App() {
   const {
     accounts,
@@ -30,6 +73,7 @@ function App() {
     saveMaskedAccountIds,
   } = useAccounts();
 
+  const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isConfigModalOpen, setIsConfigModalOpen] = useState(false);
   const [configModalMode, setConfigModalMode] = useState<"slim_export" | "slim_import">(
@@ -54,20 +98,16 @@ function App() {
     isError: boolean;
   } | null>(null);
   const [maskedAccounts, setMaskedAccounts] = useState<Set<string>>(new Set());
-  const [otherAccountsSort, setOtherAccountsSort] = useState<
-    "deadline_asc" | "deadline_desc" | "remaining_desc" | "remaining_asc"
-  >("deadline_asc");
+  const [otherAccountsSort, setOtherAccountsSort] = useState<OtherAccountsSort>("deadline_asc");
   const [isActionsMenuOpen, setIsActionsMenuOpen] = useState(false);
+  const [isSortMenuOpen, setIsSortMenuOpen] = useState(false);
   const actionsMenuRef = useRef<HTMLDivElement | null>(null);
+  const sortMenuRef = useRef<HTMLDivElement | null>(null);
 
   const toggleMask = (accountId: string) => {
     setMaskedAccounts((prev) => {
       const next = new Set(prev);
-      if (next.has(accountId)) {
-        next.delete(accountId);
-      } else {
-        next.add(accountId);
-      }
+      next.has(accountId) ? next.delete(accountId) : next.add(accountId);
       void saveMaskedAccountIds(Array.from(next));
       return next;
     });
@@ -79,7 +119,9 @@ function App() {
   const toggleMaskAll = () => {
     setMaskedAccounts((prev) => {
       const shouldMaskAll = !accounts.every((account) => prev.has(account.id));
-      const next = shouldMaskAll ? new Set(accounts.map((account) => account.id)) : new Set<string>();
+      const next = shouldMaskAll
+        ? new Set(accounts.map((account) => account.id))
+        : new Set<string>();
       void saveMaskedAccountIds(Array.from(next));
       return next;
     });
@@ -89,47 +131,68 @@ function App() {
     try {
       const info = await invoke<CodexProcessInfo>("check_codex_processes");
       setProcessInfo(info);
+      return info;
     } catch (err) {
       console.error("Failed to check processes:", err);
+      return null;
     }
   }, []);
 
-  // Check processes on mount and periodically
   useEffect(() => {
-    checkProcesses();
-    const interval = setInterval(checkProcesses, 3000); // Check every 3 seconds
+    const root = document.documentElement;
+    root.classList.toggle("dark", theme === "dark");
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch (error) {
+      console.error("Failed to save theme preference:", error);
+    }
+  }, [theme]);
+
+  useEffect(() => {
+    void checkProcesses();
+    const interval = setInterval(() => void checkProcesses(), 3000);
     return () => clearInterval(interval);
   }, [checkProcesses]);
 
-  // Load masked accounts from storage on mount
   useEffect(() => {
     loadMaskedAccountIds().then((ids) => {
-      if (ids.length > 0) {
-        setMaskedAccounts(new Set(ids));
-      }
+      if (ids.length > 0) setMaskedAccounts(new Set(ids));
     });
   }, [loadMaskedAccountIds]);
 
   useEffect(() => {
-    if (!isActionsMenuOpen) return;
+    if (!isActionsMenuOpen && !isSortMenuOpen) return;
 
     const handleClickOutside = (event: MouseEvent) => {
-      if (!actionsMenuRef.current) return;
-      if (!actionsMenuRef.current.contains(event.target as Node)) {
+      const target = event.target as Node;
+
+      if (actionsMenuRef.current && !actionsMenuRef.current.contains(target)) {
         setIsActionsMenuOpen(false);
+      }
+
+      if (sortMenuRef.current && !sortMenuRef.current.contains(target)) {
+        setIsSortMenuOpen(false);
+      }
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsActionsMenuOpen(false);
+        setIsSortMenuOpen(false);
       }
     };
 
     document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [isActionsMenuOpen]);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [isActionsMenuOpen, isSortMenuOpen]);
 
   const handleSwitch = async (accountId: string) => {
-    // Check processes before switching
-    await checkProcesses();
-    if (processInfo && !processInfo.can_switch) {
-      return;
-    }
+    const info = await checkProcesses();
+    if (info && !info.can_switch) return;
 
     try {
       setSwitchingId(accountId);
@@ -243,8 +306,7 @@ function App() {
       showWarmupToast(`Slim text exported (${accounts.length} accounts).`);
     } catch (err) {
       console.error("Failed to export slim text:", err);
-      const message = err instanceof Error ? err.message : String(err);
-      setConfigModalError(message);
+      setConfigModalError(err instanceof Error ? err.message : String(err));
       showWarmupToast("Slim export failed", true);
     } finally {
       setIsExportingSlim(false);
@@ -276,8 +338,7 @@ function App() {
       );
     } catch (err) {
       console.error("Failed to import slim text:", err);
-      const message = err instanceof Error ? err.message : String(err);
-      setConfigModalError(message);
+      setConfigModalError(err instanceof Error ? err.message : String(err));
       showWarmupToast("Slim import failed", true);
     } finally {
       setIsImportingSlim(false);
@@ -290,16 +351,10 @@ function App() {
       const selected = await save({
         title: "Export Full Encrypted Account Config",
         defaultPath: "codex-switcher-full.cswf",
-        filters: [
-          {
-            name: "Codex Switcher Full Backup",
-            extensions: ["cswf"],
-          },
-        ],
+        filters: [{ name: "Codex Switcher Full Backup", extensions: ["cswf"] }],
       });
 
       if (!selected) return;
-
       await exportAccountsFullEncryptedFile(selected);
       showWarmupToast("Full encrypted file exported.");
     } catch (err) {
@@ -316,16 +371,10 @@ function App() {
       const selected = await open({
         multiple: false,
         title: "Import Full Encrypted Account Config",
-        filters: [
-          {
-            name: "Codex Switcher Full Backup",
-            extensions: ["cswf"],
-          },
-        ],
+        filters: [{ name: "Codex Switcher Full Backup", extensions: ["cswf"] }],
       });
 
       if (!selected || Array.isArray(selected)) return;
-
       const summary = await importAccountsFullEncryptedFile(selected);
       setMaskedAccounts(new Set());
       showWarmupToast(
@@ -339,29 +388,32 @@ function App() {
     }
   };
 
-  const activeAccount = accounts.find((a) => a.is_active);
-  const otherAccounts = accounts.filter((a) => !a.is_active);
+  const activeAccount = accounts.find((account) => account.is_active);
+  const otherAccounts = accounts.filter((account) => !account.is_active);
   const hasRunningProcesses = processInfo && processInfo.count > 0;
 
   const sortedOtherAccounts = useMemo(() => {
     const getResetDeadline = (resetAt: number | null | undefined) =>
       resetAt ?? Number.POSITIVE_INFINITY;
-
-    const getRemainingPercent = (usedPercent: number | null | undefined) => {
-      if (usedPercent === null || usedPercent === undefined) {
-        return Number.NEGATIVE_INFINITY;
-      }
-      return Math.max(0, 100 - usedPercent);
-    };
+    const getRemainingPercent = (usedPercent: number | null | undefined) =>
+      usedPercent === null || usedPercent === undefined
+        ? Number.NEGATIVE_INFINITY
+        : Math.max(0, 100 - usedPercent);
 
     return [...otherAccounts].sort((a, b) => {
-      if (otherAccountsSort === "deadline_asc" || otherAccountsSort === "deadline_desc") {
+      if (
+        otherAccountsSort === "deadline_asc" ||
+        otherAccountsSort === "deadline_desc"
+      ) {
         const deadlineDiff =
           getResetDeadline(a.usage?.primary_resets_at) -
           getResetDeadline(b.usage?.primary_resets_at);
         if (deadlineDiff !== 0) {
-          return otherAccountsSort === "deadline_asc" ? deadlineDiff : -deadlineDiff;
+          return otherAccountsSort === "deadline_asc"
+            ? deadlineDiff
+            : -deadlineDiff;
         }
+
         const remainingDiff =
           getRemainingPercent(b.usage?.primary_used_percent) -
           getRemainingPercent(a.usage?.primary_used_percent);
@@ -378,6 +430,7 @@ function App() {
       if (otherAccountsSort === "remaining_asc" && remainingDiff !== 0) {
         return -remainingDiff;
       }
+
       const deadlineDiff =
         getResetDeadline(a.usage?.primary_resets_at) -
         getResetDeadline(b.usage?.primary_resets_at);
@@ -386,32 +439,53 @@ function App() {
     });
   }, [otherAccounts, otherAccountsSort]);
 
+  const selectedSortLabel =
+    OTHER_ACCOUNTS_SORT_OPTIONS.find((option) => option.value === otherAccountsSort)?.label ??
+    OTHER_ACCOUNTS_SORT_OPTIONS[0].label;
+
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Header */}
-      <header className="sticky top-0 z-40 bg-white border-b border-gray-200">
-        <div className="max-w-5xl mx-auto px-6 py-4">
+    <div className={shellClass}>
+      <header
+        className="sticky top-0 z-40 border-b backdrop-blur"
+        style={{
+          borderColor: "var(--theme-border-subtle)",
+          backgroundColor:
+            theme === "dark" ? "rgba(21, 26, 34, 0.9)" : "rgba(255, 255, 255, 0.9)",
+        }}
+      >
+        <div className="mx-auto max-w-5xl px-6 py-4">
           <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_max-content] md:items-center md:gap-4">
-            <div className="flex items-center gap-3 min-w-0 flex-1">
-              <div className="h-10 w-10 rounded-xl bg-gray-900 flex items-center justify-center text-white font-bold text-lg">
+            <div className="flex min-w-0 items-center gap-3">
+              <div
+                className="flex h-10 w-10 items-center justify-center rounded-xl text-lg font-bold"
+                style={{
+                  backgroundColor: "var(--theme-primary-bg)",
+                  color: "var(--theme-primary-text)",
+                }}
+              >
                 C
               </div>
               <div className="min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <h1 className="text-xl font-bold text-gray-900 tracking-tight">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h1 className="text-xl font-bold tracking-tight text-slate-900 dark:text-[var(--theme-text-primary)]">
                     Codex Switcher
                   </h1>
                   {processInfo && (
                     <span
-                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs border ${hasRunningProcesses
-                          ? "bg-amber-50 text-amber-700 border-amber-200"
-                          : "bg-green-50 text-green-700 border-green-200"
-                        }`}
+                      className={`theme-status-chip inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs ${
+                        hasRunningProcesses
+                          ? "theme-status-chip--warning"
+                          : "theme-status-chip--success"
+                      }`}
                     >
                       <span
-                        className={`inline-block w-1.5 h-1.5 rounded-full ${hasRunningProcesses ? "bg-amber-500" : "bg-green-500"
-                          }`}
-                      ></span>
+                        className="h-1.5 w-1.5 rounded-full"
+                        style={{
+                          backgroundColor: hasRunningProcesses
+                            ? "var(--theme-warning-text)"
+                            : "var(--theme-success-text)",
+                        }}
+                      />
                       <span>
                         {hasRunningProcesses
                           ? `${processInfo.count} Codex running`
@@ -420,86 +494,123 @@ function App() {
                     </span>
                   )}
                 </div>
-                <p className="text-xs text-gray-500">
+                <p className="text-xs text-slate-500 dark:text-slate-400">
                   Multi-account manager for Codex CLI
                 </p>
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2 shrink-0 md:ml-4 md:w-max md:flex-nowrap md:justify-end">
+            <div className="flex flex-wrap items-center gap-2 md:ml-4 md:w-max md:flex-nowrap md:justify-end">
               <button
                 onClick={toggleMaskAll}
-                className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors shrink-0 whitespace-nowrap"
-                title={allMasked ? "Show all account names and emails" : "Hide all account names and emails"}
+                className={softButtonClass}
+                title={
+                  allMasked
+                    ? "Show all account names and emails"
+                    : "Hide all account names and emails"
+                }
               >
-                <span className="flex items-center gap-2">
-                  {allMasked ? (
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"
-                      />
-                    </svg>
-                  ) : (
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                    </svg>
-                  )}
-                  {allMasked ? "Show All" : "Hide All"}
-                </span>
+                {allMasked ? "Show All" : "Hide All"}
               </button>
               <button
                 onClick={handleRefresh}
                 disabled={isRefreshing}
-                className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors disabled:opacity-50 shrink-0 whitespace-nowrap"
+                className={softButtonClass}
               >
-                {isRefreshing ? "↻ Refreshing..." : "↻ Refresh All"}
+                {isRefreshing ? "Refreshing..." : "Refresh All"}
               </button>
               <button
                 onClick={handleWarmupAll}
                 disabled={isWarmingAll || accounts.length === 0}
-                className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors disabled:opacity-50 shrink-0 whitespace-nowrap"
+                className={warningButtonClass}
                 title="Send minimal traffic using all accounts"
               >
-                {isWarmingAll ? (
-                  <span className="flex items-center gap-2">
-                    <span className="animate-pulse">⚡</span> Warming...
-                  </span>
-                ) : (
-                  <span className="flex items-center gap-2">
-                    <span>⚡</span> Warm-up All
-                  </span>
-                )}
+                {isWarmingAll ? "Warming..." : "Warm-up All"}
               </button>
-
               <div className="relative" ref={actionsMenuRef}>
                 <button
-                  onClick={() => setIsActionsMenuOpen((prev) => !prev)}
-                  className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 text-white transition-colors shrink-0 whitespace-nowrap"
+                  onClick={() => {
+                    setIsSortMenuOpen(false);
+                    setIsActionsMenuOpen((prev) => !prev);
+                  }}
+                  className={primaryButtonClass}
                 >
-                  Account ▾
+                  Account
                 </button>
                 {isActionsMenuOpen && (
-                  <div className="absolute right-0 mt-2 w-56 rounded-xl border border-gray-200 bg-white shadow-xl p-2 z-50">
+                  <div
+                    className={`absolute right-0 z-50 mt-2 w-72 rounded-2xl p-2 ${panelClass}`}
+                    style={{ backgroundColor: "var(--theme-surface-elevated)" }}
+                  >
                     <button
                       onClick={() => {
                         setIsActionsMenuOpen(false);
                         setIsAddModalOpen(true);
                       }}
-                      className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-gray-100 text-gray-700"
+                      className={menuItemClass}
                     >
                       + Add Account
                     </button>
+                    <div
+                      className="my-2 h-px"
+                      style={{ backgroundColor: "var(--theme-border-subtle)" }}
+                    />
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={theme === "dark"}
+                      onClick={() =>
+                        setTheme((current) => (current === "dark" ? "light" : "dark"))
+                      }
+                      className="theme-menu-item flex w-full items-center justify-between rounded-xl px-3 py-2 text-left"
+                    >
+                      <span>
+                        <span className="block text-sm font-medium text-slate-800 dark:text-[var(--theme-text-primary)]">
+                          Dark theme
+                        </span>
+                        <span className="block text-xs text-slate-500 dark:text-[var(--theme-text-secondary)]">
+                          Toggle the interface palette
+                        </span>
+                      </span>
+                      <span
+                        className="relative inline-flex h-6 w-11 items-center rounded-full border transition-colors"
+                        style={{
+                          backgroundColor:
+                            theme === "dark"
+                              ? "var(--theme-primary-bg)"
+                              : "var(--theme-secondary-border)",
+                          borderColor:
+                            theme === "dark"
+                              ? "var(--theme-primary-bg)"
+                              : "var(--theme-border-strong)",
+                        }}
+                      >
+                        <span
+                          className={`inline-block h-5 w-5 rounded-full shadow-sm transition-transform ${
+                            theme === "dark"
+                              ? "translate-x-5"
+                              : "translate-x-1"
+                          }`}
+                          style={{
+                            backgroundColor:
+                              theme === "dark"
+                                ? "var(--theme-text-on-light)"
+                                : "var(--theme-surface)",
+                          }}
+                        />
+                      </span>
+                    </button>
+                    <div
+                      className="my-2 h-px"
+                      style={{ backgroundColor: "var(--theme-border-subtle)" }}
+                    />
                     <button
                       onClick={() => {
                         setIsActionsMenuOpen(false);
                         void handleExportSlimText();
                       }}
                       disabled={isExportingSlim}
-                      className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-gray-100 text-gray-700 disabled:opacity-50"
+                      className={menuItemClass}
                     >
                       {isExportingSlim ? "Exporting..." : "Export Slim Text"}
                     </button>
@@ -509,7 +620,7 @@ function App() {
                         openImportSlimTextModal();
                       }}
                       disabled={isImportingSlim}
-                      className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-gray-100 text-gray-700 disabled:opacity-50"
+                      className={menuItemClass}
                     >
                       {isImportingSlim ? "Importing..." : "Import Slim Text"}
                     </button>
@@ -519,9 +630,11 @@ function App() {
                         void handleExportFullFile();
                       }}
                       disabled={isExportingFull}
-                      className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-gray-100 text-gray-700 disabled:opacity-50"
+                      className={menuItemClass}
                     >
-                      {isExportingFull ? "Exporting..." : "Export Full Encrypted File"}
+                      {isExportingFull
+                        ? "Exporting..."
+                        : "Export Full Encrypted File"}
                     </button>
                     <button
                       onClick={() => {
@@ -529,9 +642,11 @@ function App() {
                         void handleImportFullFile();
                       }}
                       disabled={isImportingFull}
-                      className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-gray-100 text-gray-700 disabled:opacity-50"
+                      className={menuItemClass}
                     >
-                      {isImportingFull ? "Importing..." : "Import Full Encrypted File"}
+                      {isImportingFull
+                        ? "Importing..."
+                        : "Import Full Encrypted File"}
                     </button>
                   </div>
                 )}
@@ -541,50 +656,51 @@ function App() {
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="max-w-5xl mx-auto px-6 py-8">
+      <main className="mx-auto max-w-5xl px-6 py-8">
         {loading && accounts.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20">
-            <div className="animate-spin h-10 w-10 border-2 border-gray-900 border-t-transparent rounded-full mb-4"></div>
-            <p className="text-gray-500">Loading accounts...</p>
+            <div className="mb-4 h-10 w-10 animate-spin rounded-full border-2 border-slate-900 border-t-transparent dark:border-slate-100" />
+            <p className="text-slate-500 dark:text-slate-400">Loading accounts...</p>
           </div>
         ) : error ? (
-          <div className="text-center py-20">
-            <div className="text-red-600 mb-2">Failed to load accounts</div>
-            <p className="text-sm text-gray-500">{error}</p>
+          <div className="py-20 text-center">
+            <div className="mb-2 text-red-600 dark:text-red-400">
+              Failed to load accounts
+            </div>
+            <p className="text-sm text-slate-500 dark:text-slate-400">{error}</p>
           </div>
         ) : accounts.length === 0 ? (
-          <div className="text-center py-20">
-            <div className="h-16 w-16 rounded-2xl bg-gray-100 flex items-center justify-center mx-auto mb-4">
-              <span className="text-3xl">👤</span>
+          <div className="py-20 text-center">
+            <div
+              className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl text-2xl"
+              style={{
+                backgroundColor: "var(--theme-surface-elevated)",
+                color: "var(--theme-text-secondary)",
+              }}
+            >
+              A
             </div>
-            <h2 className="text-xl font-semibold text-gray-900 mb-2">
+            <h2 className="mb-2 text-xl font-semibold text-slate-900 dark:text-slate-50">
               No accounts yet
             </h2>
-            <p className="text-gray-500 mb-6">
+            <p className="mb-6 text-slate-500 dark:text-slate-400">
               Add your first Codex account to get started
             </p>
-            <button
-              onClick={() => setIsAddModalOpen(true)}
-              className="px-6 py-3 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 text-white transition-colors"
-            >
+            <button onClick={() => setIsAddModalOpen(true)} className={primaryButtonClass}>
               Add Account
             </button>
           </div>
         ) : (
           <div className="space-y-8">
-            {/* Active Account */}
             {activeAccount && (
               <section>
-                <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">
+                <h2 className="mb-4 text-sm font-medium uppercase tracking-wider text-slate-500 dark:text-slate-400">
                   Active Account
                 </h2>
                 <AccountCard
                   account={activeAccount}
-                  onSwitch={() => { }}
-                  onWarmup={() =>
-                    handleWarmupAccount(activeAccount.id, activeAccount.name)
-                  }
+                  onSwitch={() => {}}
+                  onWarmup={() => handleWarmupAccount(activeAccount.id, activeAccount.name)}
                   onDelete={() => handleDelete(activeAccount.id)}
                   onRefresh={() => refreshSingleUsage(activeAccount.id)}
                   onRename={(newName) => renameAccount(activeAccount.id, newName)}
@@ -596,45 +712,34 @@ function App() {
                 />
               </section>
             )}
-
-            {/* Other Accounts */}
             {otherAccounts.length > 0 && (
               <section>
-                <div className="flex items-center justify-between gap-3 mb-4">
-                  <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <h2 className="text-sm font-medium uppercase tracking-wider text-slate-500 dark:text-slate-400">
                     Other Accounts ({otherAccounts.length})
                   </h2>
                   <div className="flex items-center gap-2">
-                    <label htmlFor="other-accounts-sort" className="text-xs text-gray-500">
+                    <label
+                      htmlFor="other-accounts-sort"
+                      className="text-xs text-slate-500 dark:text-slate-400"
+                    >
                       Sort
                     </label>
-                    <div className="relative">
-                      <select
+                    <div className="relative" ref={sortMenuRef}>
+                      <button
                         id="other-accounts-sort"
-                        value={otherAccountsSort}
-                        onChange={(e) =>
-                          setOtherAccountsSort(
-                            e.target.value as
-                              | "deadline_asc"
-                              | "deadline_desc"
-                              | "remaining_desc"
-                              | "remaining_asc"
-                          )
-                        }
-                        className="appearance-none font-sans text-xs sm:text-sm font-medium pl-3 pr-9 py-2 rounded-xl border border-gray-300 bg-gradient-to-b from-white to-gray-50 text-gray-700 shadow-sm hover:border-gray-400 hover:shadow focus:outline-none focus:ring-2 focus:ring-gray-300 focus:border-gray-400 transition-all"
+                        type="button"
+                        aria-haspopup="listbox"
+                        aria-expanded={isSortMenuOpen}
+                        onClick={() => {
+                          setIsActionsMenuOpen(false);
+                          setIsSortMenuOpen((prev) => !prev);
+                        }}
+                        className="theme-select-button flex min-w-[16rem] items-center justify-between rounded-xl px-3 py-2 text-left text-xs font-medium sm:text-sm"
                       >
-                        <option value="deadline_asc">Reset: earliest to latest</option>
-                        <option value="deadline_desc">Reset: latest to earliest</option>
-                        <option value="remaining_desc">
-                          % remaining: highest to lowest
-                        </option>
-                        <option value="remaining_asc">
-                          % remaining: lowest to highest
-                        </option>
-                      </select>
-                      <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-gray-500">
+                        <span>{selectedSortLabel}</span>
                         <svg
-                          className="h-4 w-4"
+                          className={`h-4 w-4 transition-transform ${isSortMenuOpen ? "rotate-180" : ""}`}
                           viewBox="0 0 20 20"
                           fill="none"
                           stroke="currentColor"
@@ -642,13 +747,54 @@ function App() {
                         >
                           <path d="M6 8l4 4 4-4" strokeLinecap="round" strokeLinejoin="round" />
                         </svg>
-                      </span>
-      <UpdateChecker />
-
-    </div>
+                      </button>
+                      {isSortMenuOpen && (
+                        <div
+                          role="listbox"
+                          aria-labelledby="other-accounts-sort"
+                          className="theme-select-menu absolute right-0 z-30 mt-2 w-72 rounded-2xl p-1"
+                        >
+                          {OTHER_ACCOUNTS_SORT_OPTIONS.map((option) => {
+                            const selected = option.value === otherAccountsSort;
+                            return (
+                              <button
+                                key={option.value}
+                                type="button"
+                                role="option"
+                                aria-selected={selected}
+                                onClick={() => {
+                                  setOtherAccountsSort(option.value);
+                                  setIsSortMenuOpen(false);
+                                }}
+                                className={`theme-select-option flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm ${
+                                  selected ? "theme-select-option--active" : ""
+                                }`}
+                              >
+                                <span>{option.label}</span>
+                                {selected && (
+                                  <svg
+                                    className="h-4 w-4"
+                                    viewBox="0 0 20 20"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                  >
+                                    <path
+                                      d="M5 10.5l3 3 7-7"
+                                      strokeLinecap="round"
+                                      strokeLinejoin="round"
+                                    />
+                                  </svg>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                   {sortedOtherAccounts.map((account) => (
                     <AccountCard
                       key={account.id}
@@ -671,35 +817,28 @@ function App() {
           </div>
         )}
       </main>
-
-      {/* Refresh Success Toast */}
       {refreshSuccess && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-3 bg-green-600 text-white rounded-lg shadow-lg text-sm flex items-center gap-2">
-          <span>✓</span> Usage refreshed successfully
+        <div className="theme-toast-success fixed bottom-6 left-1/2 -translate-x-1/2 rounded-lg px-4 py-3 text-sm shadow-lg">
+          Usage refreshed successfully
         </div>
       )}
-
-      {/* Warm-up Toast */}
       {warmupToast && (
         <div
-          className={`fixed bottom-20 left-1/2 -translate-x-1/2 px-4 py-3 rounded-lg shadow-lg text-sm ${
+          className={`fixed bottom-20 left-1/2 -translate-x-1/2 rounded-lg px-4 py-3 text-sm shadow-lg ${
             warmupToast.isError
-              ? "bg-red-600 text-white"
-              : "bg-amber-100 text-amber-900 border border-amber-300"
+              ? "theme-toast-danger"
+              : "theme-toast-warning"
           }`}
         >
           {warmupToast.message}
         </div>
       )}
-
-      {/* Delete Confirmation Toast */}
       {deleteConfirmId && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-3 bg-red-600 text-white rounded-lg shadow-lg text-sm">
+        <div className="theme-toast-danger fixed bottom-6 left-1/2 -translate-x-1/2 rounded-lg px-4 py-3 text-sm shadow-lg">
           Click delete again to confirm removal
         </div>
       )}
 
-      {/* Add Account Modal */}
       <AddAccountModal
         isOpen={isAddModalOpen}
         onClose={() => setIsAddModalOpen(false)}
@@ -709,28 +848,33 @@ function App() {
         onCancelOAuth={cancelOAuthLogin}
       />
 
-      {/* Import/Export Config Modal */}
       {isConfigModalOpen && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-          <div className="bg-white border border-gray-200 rounded-2xl w-full max-w-2xl mx-4 shadow-xl">
-            <div className="flex items-center justify-between p-5 border-b border-gray-100">
-              <h2 className="text-lg font-semibold text-gray-900">
+        <div className="theme-scrim fixed inset-0 z-50 flex items-center justify-center px-4">
+          <div
+            className={`w-full max-w-2xl rounded-2xl shadow-xl shadow-slate-900/15 dark:shadow-slate-950/60 ${panelClass}`}
+            style={{ backgroundColor: "var(--theme-surface)" }}
+          >
+            <div
+              className="flex items-center justify-between border-b p-5"
+              style={{ borderColor: "var(--theme-border-subtle)" }}
+            >
+              <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-50">
                 {configModalMode === "slim_export" ? "Export Slim Text" : "Import Slim Text"}
               </h2>
               <button
                 onClick={() => setIsConfigModalOpen(false)}
-                className="text-gray-400 hover:text-gray-600 transition-colors"
+                className="text-slate-400 transition-colors hover:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300"
               >
-                ✕
+                Close
               </button>
             </div>
-            <div className="p-5 space-y-4">
+            <div className="space-y-4 p-5">
               {configModalMode === "slim_import" ? (
-                <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                <p className="theme-toast-warning rounded-lg px-3 py-2 text-sm">
                   Existing accounts are kept. Only missing accounts are imported.
                 </p>
               ) : (
-                <p className="text-sm text-gray-500">
+                <p className="text-sm text-slate-500 dark:text-slate-400">
                   This slim string contains account secrets. Keep it private.
                 </p>
               )}
@@ -745,18 +889,21 @@ function App() {
                       : "Export string will appear here"
                     : "Paste config string here"
                 }
-                className="w-full h-48 px-4 py-3 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:border-gray-400 focus:ring-1 focus:ring-gray-400 font-mono"
+                className="theme-field h-48 w-full rounded-lg px-4 py-3 font-mono text-sm"
               />
               {configModalError && (
-                <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-600 text-sm">
+                <div className="theme-toast-danger rounded-lg p-3 text-sm">
                   {configModalError}
                 </div>
               )}
             </div>
-            <div className="flex gap-3 p-5 border-t border-gray-100">
+            <div
+              className="flex gap-3 border-t p-5"
+              style={{ borderColor: "var(--theme-border-subtle)" }}
+            >
               <button
                 onClick={() => setIsConfigModalOpen(false)}
-                className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors"
+                className={softButtonClass}
               >
                 Close
               </button>
@@ -773,7 +920,7 @@ function App() {
                     }
                   }}
                   disabled={!configPayload || isExportingSlim}
-                  className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 text-white transition-colors disabled:opacity-50"
+                  className={primaryButtonClass}
                 >
                   {configCopied ? "Copied" : "Copy String"}
                 </button>
@@ -781,7 +928,7 @@ function App() {
                 <button
                   onClick={handleImportSlimText}
                   disabled={isImportingSlim}
-                  className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 text-white transition-colors disabled:opacity-50"
+                  className={primaryButtonClass}
                 >
                   {isImportingSlim ? "Importing..." : "Import Missing Accounts"}
                 </button>
@@ -791,6 +938,7 @@ function App() {
         </div>
       )}
 
+      <UpdateChecker />
     </div>
   );
 }

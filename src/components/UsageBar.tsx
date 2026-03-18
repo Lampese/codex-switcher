@@ -47,16 +47,13 @@ function RateLimitBar({
   windowMinutes?: number | null;
   resetsAt?: number | null;
 }) {
-  // Calculate remaining percentage
   const remainingPercent = Math.max(0, 100 - usedPercent);
-  
-  // Color based on remaining (green = plenty left, red = almost none left)
   const colorClass =
     remainingPercent <= 10
-      ? "bg-red-500"
+      ? "theme-progress-fill--danger"
       : remainingPercent <= 30
-        ? "bg-amber-500"
-        : "bg-emerald-500";
+        ? "theme-progress-fill--warn"
+        : "theme-progress-fill--good";
 
   const windowLabel = formatWindowDuration(windowMinutes);
   const resetLabel = formatResetTime(resetsAt);
@@ -64,19 +61,21 @@ function RateLimitBar({
 
   return (
     <div className="space-y-1">
-      <div className="flex justify-between text-xs text-gray-500">
-        <span>{label} {windowLabel && `(${windowLabel})`}</span>
+      <div className="flex justify-between text-xs text-gray-500 dark:text-slate-400">
+        <span>
+          {label} {windowLabel && `(${windowLabel})`}
+        </span>
         <span>
           {remainingPercent.toFixed(0)}% left
-          {resetLabel && ` • resets ${resetLabel}`}
+          {resetLabel && ` - resets ${resetLabel}`}
           {resetLabel && exactResetLabel && ` (${exactResetLabel})`}
         </span>
       </div>
-      <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+      <div className="theme-progress-track h-1.5 overflow-hidden rounded-full">
         <div
           className={`h-full transition-all duration-300 ${colorClass}`}
           style={{ width: `${Math.min(remainingPercent, 100)}%` }}
-        ></div>
+        />
       </div>
     </div>
   );
@@ -86,14 +85,14 @@ export function UsageBar({ usage, loading }: UsageBarProps) {
   if (loading && !usage) {
     return (
       <div className="space-y-2">
-        <div className="text-xs text-gray-400 italic animate-pulse">
+        <div className="animate-pulse text-xs italic text-gray-400 dark:text-slate-500">
           Fetching usage...
         </div>
-        <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden animate-pulse">
-          <div className="h-full w-2/3 bg-gray-200"></div>
+        <div className="theme-progress-track h-1.5 animate-pulse overflow-hidden rounded-full">
+          <div className="h-full w-2/3 theme-progress-fill--good opacity-50" />
         </div>
-        <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden animate-pulse">
-          <div className="h-full w-1/2 bg-gray-200"></div>
+        <div className="theme-progress-track h-1.5 animate-pulse overflow-hidden rounded-full">
+          <div className="h-full w-1/2 theme-progress-fill--good opacity-40" />
         </div>
       </div>
     );
@@ -101,7 +100,7 @@ export function UsageBar({ usage, loading }: UsageBarProps) {
 
   if (!usage) {
     return (
-      <div className="text-xs text-gray-400 italic py-1 animate-pulse">
+      <div className="py-1 text-xs italic text-gray-400 dark:text-slate-500">
         Fetching usage...
       </div>
     );
@@ -109,18 +108,21 @@ export function UsageBar({ usage, loading }: UsageBarProps) {
 
   if (usage.error) {
     return (
-      <div className="text-xs text-gray-400 italic py-1">
+      <div className="py-1 text-xs italic text-gray-400 dark:text-slate-500">
         {usage.error}
       </div>
     );
   }
 
-  const hasPrimary = usage.primary_used_percent !== null && usage.primary_used_percent !== undefined;
-  const hasSecondary = usage.secondary_used_percent !== null && usage.secondary_used_percent !== undefined;
+  const hasPrimary =
+    usage.primary_used_percent !== null && usage.primary_used_percent !== undefined;
+  const hasSecondary =
+    usage.secondary_used_percent !== null &&
+    usage.secondary_used_percent !== undefined;
 
   if (!hasPrimary && !hasSecondary) {
     return (
-      <div className="text-xs text-gray-400 italic py-1">
+      <div className="py-1 text-xs italic text-gray-400 dark:text-slate-500">
         No rate limit data
       </div>
     );
@@ -145,7 +147,7 @@ export function UsageBar({ usage, loading }: UsageBarProps) {
         />
       )}
       {usage.credits_balance && (
-        <div className="text-xs text-gray-500">
+        <div className="text-xs text-gray-500 dark:text-slate-400">
           Credits: {usage.credits_balance}
         </div>
       )}

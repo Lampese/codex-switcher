@@ -10,6 +10,11 @@ type UpdateStatus =
   | { kind: "ready" }
   | { kind: "error"; message: string };
 
+const mutedButtonClass =
+  "theme-button-secondary rounded-lg px-3 py-1.5 text-xs font-medium";
+const primaryButtonClass =
+  "theme-button-primary rounded-lg px-3 py-1.5 text-xs font-medium";
+
 export function UpdateChecker() {
   const [status, setStatus] = useState<UpdateStatus>({ kind: "idle" });
   const [dismissed, setDismissed] = useState(false);
@@ -19,11 +24,7 @@ export function UpdateChecker() {
       setStatus({ kind: "checking" });
       setDismissed(false);
       const update = await check();
-      if (update) {
-        setStatus({ kind: "available", update });
-      } else {
-        setStatus({ kind: "idle" });
-      }
+      setStatus(update ? { kind: "available", update } : { kind: "idle" });
     } catch (err) {
       console.error("Update check failed:", err);
       setStatus({ kind: "idle" });
@@ -31,18 +32,17 @@ export function UpdateChecker() {
   }, []);
 
   useEffect(() => {
-    checkForUpdate();
+    void checkForUpdate();
   }, [checkForUpdate]);
 
   const handleDownloadAndInstall = async () => {
     if (status.kind !== "available") return;
-    const { update } = status;
 
     try {
       let downloaded = 0;
       let total: number | null = null;
 
-      await update.downloadAndInstall((event) => {
+      await status.update.downloadAndInstall((event) => {
         switch (event.event) {
           case "Started":
             total = event.data.contentLength ?? null;
@@ -85,31 +85,28 @@ export function UpdateChecker() {
   };
 
   return (
-    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 max-w-md w-full px-4">
-      <div className="bg-white border border-gray-200 rounded-xl shadow-xl p-4">
+    <div className="fixed bottom-6 left-1/2 z-50 w-full max-w-md -translate-x-1/2 px-4">
+      <div
+        className="theme-panel rounded-xl p-4 shadow-xl shadow-slate-200/50 dark:shadow-slate-950/60"
+        style={{ backgroundColor: "var(--theme-surface)" }}
+      >
         {status.kind === "available" && (
           <div className="flex items-start gap-3">
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-gray-900">
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium text-slate-900 dark:text-slate-50">
                 Update available: v{status.update.version}
               </p>
               {status.update.body && (
-                <p className="text-xs text-gray-500 mt-0.5 truncate">
+                <p className="mt-0.5 truncate text-xs text-slate-500 dark:text-slate-400">
                   {status.update.body}
                 </p>
               )}
             </div>
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                onClick={() => setDismissed(true)}
-                className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-600 transition-colors"
-              >
+            <div className="flex shrink-0 items-center gap-2">
+              <button onClick={() => setDismissed(true)} className={mutedButtonClass}>
                 Later
               </button>
-              <button
-                onClick={handleDownloadAndInstall}
-                className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-900 hover:bg-gray-800 text-white transition-colors"
-              >
+              <button onClick={handleDownloadAndInstall} className={primaryButtonClass}>
                 Update
               </button>
             </div>
@@ -118,16 +115,18 @@ export function UpdateChecker() {
 
         {status.kind === "downloading" && (
           <div>
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-sm font-medium text-gray-900">Downloading update...</p>
-              <p className="text-xs text-gray-500">
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-sm font-medium text-slate-900 dark:text-slate-50">
+                Downloading update...
+              </p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
                 {formatBytes(status.downloaded)}
                 {status.total ? ` / ${formatBytes(status.total)}` : ""}
               </p>
             </div>
-            <div className="w-full bg-gray-100 rounded-full h-1.5">
+            <div className="theme-progress-track h-1.5 w-full rounded-full">
               <div
-                className="bg-gray-900 h-1.5 rounded-full transition-all duration-300"
+                className="theme-button-primary h-1.5 rounded-full transition-all duration-300"
                 style={{
                   width:
                     status.total && status.total > 0
@@ -140,21 +139,15 @@ export function UpdateChecker() {
         )}
 
         {status.kind === "ready" && (
-          <div className="flex items-center justify-between">
-            <p className="text-sm font-medium text-gray-900">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm font-medium text-slate-900 dark:text-slate-50">
               Update ready. Restart to apply.
             </p>
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                onClick={() => setDismissed(true)}
-                className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-600 transition-colors"
-              >
+            <div className="flex shrink-0 items-center gap-2">
+              <button onClick={() => setDismissed(true)} className={mutedButtonClass}>
                 Later
               </button>
-              <button
-                onClick={handleRelaunch}
-                className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-900 hover:bg-gray-800 text-white transition-colors"
-              >
+              <button onClick={handleRelaunch} className={primaryButtonClass}>
                 Restart
               </button>
             </div>
@@ -162,14 +155,11 @@ export function UpdateChecker() {
         )}
 
         {status.kind === "error" && (
-          <div className="flex items-center justify-between">
-            <p className="text-sm text-red-600">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm text-red-600 dark:text-red-300">
               Update failed: {status.message}
             </p>
-            <button
-              onClick={() => setDismissed(true)}
-              className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-600 transition-colors shrink-0 ml-2"
-            >
+            <button onClick={() => setDismissed(true)} className={mutedButtonClass}>
               Dismiss
             </button>
           </div>
