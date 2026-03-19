@@ -6,6 +6,7 @@ import type {
   AccountWithUsage,
   WarmupSummary,
   ImportAccountsSummary,
+  LiveAuthSyncResult,
 } from "../types";
 
 export function useAccounts() {
@@ -87,6 +88,22 @@ export function useAccounts() {
       setLoading(false);
     }
   }, []);
+
+  const syncLiveAuth = useCallback(
+    async (reloadOnChange = true) => {
+      try {
+        const result = await invoke<LiveAuthSyncResult>("sync_live_auth");
+        if (reloadOnChange && result.changed) {
+          return await loadAccounts(true);
+        }
+        return null;
+      } catch (err) {
+        console.error("Failed to sync live auth:", err);
+        return null;
+      }
+    },
+    [loadAccounts]
+  );
 
   const refreshUsage = useCallback(
     async (accountList?: AccountInfo[] | AccountWithUsage[]) => {
@@ -344,21 +361,48 @@ export function useAccounts() {
   }, []);
 
   useEffect(() => {
-    loadAccounts().then((accountList) => refreshUsage(accountList));
-    
-    // Auto-refresh usage every 60 seconds (same as official Codex CLI)
-    const interval = setInterval(() => {
+    let cancelled = false;
+
+    const initialize = async () => {
+      await syncLiveAuth(false);
+      if (cancelled) return;
+
+      const accountList = await loadAccounts();
+      if (cancelled) return;
+
+      await refreshUsage(accountList);
+    };
+
+    void initialize();
+
+    const syncInterval = setInterval(() => {
+      syncLiveAuth(true).catch(() => {});
+    }, 5000);
+
+    const usageInterval = setInterval(() => {
       refreshUsage().catch(() => {});
     }, 60000);
-    
-    return () => clearInterval(interval);
-  }, [loadAccounts, refreshUsage]);
+
+    const handleWindowFocus = () => {
+      syncLiveAuth(true).catch(() => {});
+    };
+
+    window.addEventListener("focus", handleWindowFocus);
+
+    return () => {
+      cancelled = true;
+      clearInterval(syncInterval);
+      clearInterval(usageInterval);
+      window.removeEventListener("focus", handleWindowFocus);
+    };
+  }, [loadAccounts, refreshUsage, syncLiveAuth]);
 
   return {
     accounts,
     loading,
     error,
     loadAccounts,
+    syncLiveAuth,
     refreshUsage,
     refreshSingleUsage,
     warmupAccount,

@@ -56,3 +56,11 @@ export interface ImportAccountsSummary {
   imported_count: number;
   skipped_count: number;
 }
+
+export interface LiveAuthSyncResult {
+  changed: boolean;
+  active_account_id: string | null;
+  created_account_id: string | null;
+  updated_account_id: string | null;
+  cleared_active_account: boolean;
+}

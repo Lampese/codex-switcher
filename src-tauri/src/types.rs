@@ -132,6 +132,9 @@ pub enum AuthData {
 /// The official Codex auth.json format
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthDotJson {
+    /// Explicit auth mode used by the official app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_mode: Option<String>,
     /// OpenAI API key (for API key auth mode)
     #[serde(rename = "OPENAI_API_KEY", skip_serializing_if = "Option::is_none")]
     pub openai_api_key: Option<String>,
@@ -257,6 +260,16 @@ pub struct ImportAccountsSummary {
     pub imported_count: usize,
     /// Number of accounts skipped because they already exist.
     pub skipped_count: usize,
+}
+
+/// Summary returned after reconciling live auth.json with stored accounts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiveAuthSyncResult {
+    pub changed: bool,
+    pub active_account_id: Option<String>,
+    pub created_account_id: Option<String>,
+    pub updated_account_id: Option<String>,
+    pub cleared_active_account: bool,
 }
 
 /// OAuth login information returned to frontend

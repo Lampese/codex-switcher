@@ -2,10 +2,12 @@
 
 use crate::auth::{
     add_account, create_chatgpt_account_from_refresh_token, get_active_account,
-    import_from_auth_json, load_accounts, remove_account, save_accounts, set_active_account,
-    switch_to_account, touch_account,
+    import_from_auth_json, load_accounts, refresh_chatgpt_tokens, remove_account, save_accounts,
+    set_active_account, switch_to_account, sync_live_auth_to_store, touch_account,
 };
-use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
+use crate::types::{
+    AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, LiveAuthSyncResult, StoredAccount,
+};
 
 use anyhow::Context;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -109,9 +111,17 @@ pub async fn add_account_from_file(path: String, name: String) -> Result<Account
     Ok(AccountInfo::from_stored(&stored, active_id))
 }
 
+/// Reconcile the live ~/.codex/auth.json with the stored accounts.
+#[tauri::command]
+pub async fn sync_live_auth() -> Result<LiveAuthSyncResult, String> {
+    sync_live_auth_to_store().await.map_err(|e| e.to_string())
+}
+
 /// Switch to a different account
 #[tauri::command]
 pub async fn switch_account(account_id: String) -> Result<(), String> {
+    sync_live_auth_to_store().await.map_err(|e| e.to_string())?;
+
     let store = load_accounts().map_err(|e| e.to_string())?;
 
     // Find the account
@@ -119,10 +129,18 @@ pub async fn switch_account(account_id: String) -> Result<(), String> {
         .accounts
         .iter()
         .find(|a| a.id == account_id)
+        .cloned()
         .ok_or_else(|| format!("Account not found: {account_id}"))?;
 
+    let account = match account.auth_mode {
+        crate::types::AuthMode::ApiKey => account,
+        crate::types::AuthMode::ChatGPT => refresh_chatgpt_tokens(&account)
+            .await
+            .map_err(|e| format!("Failed to validate account before switch: {e}"))?,
+    };
+
     // Write to ~/.codex/auth.json
-    switch_to_account(account).map_err(|e| e.to_string())?;
+    switch_to_account(&account).map_err(|e| e.to_string())?;
 
     // Update the active account in our store
     set_active_account(&account_id).map_err(|e| e.to_string())?;
