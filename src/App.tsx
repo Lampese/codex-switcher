@@ -28,6 +28,8 @@ function App() {
     cancelOAuthLogin,
     loadMaskedAccountIds,
     saveMaskedAccountIds,
+    loadOpencodeSyncEnabled,
+    saveOpencodeSyncEnabled,
   } = useAccounts();
 
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -59,6 +61,12 @@ function App() {
   >("deadline_asc");
   const [isActionsMenuOpen, setIsActionsMenuOpen] = useState(false);
   const actionsMenuRef = useRef<HTMLDivElement | null>(null);
+
+  const [opencodeSyncEnabled, setOpencodeSyncEnabled] = useState(true);
+  const [switchSuccessToast, setSwitchSuccessToast] = useState<{
+    message: string;
+    show: boolean;
+  }>({ message: "", show: false });
 
   const toggleMask = (accountId: string) => {
     setMaskedAccounts((prev) => {
@@ -101,14 +109,23 @@ function App() {
     return () => clearInterval(interval);
   }, [checkProcesses]);
 
-  // Load masked accounts from storage on mount
+  // Load masked accounts and OpenCode settings from storage on mount
   useEffect(() => {
     loadMaskedAccountIds().then((ids) => {
       if (ids.length > 0) {
         setMaskedAccounts(new Set(ids));
       }
     });
-  }, [loadMaskedAccountIds]);
+    loadOpencodeSyncEnabled().then((enabled) => {
+      setOpencodeSyncEnabled(enabled);
+    });
+  }, [loadMaskedAccountIds, loadOpencodeSyncEnabled]);
+
+  const toggleOpencodeSync = async () => {
+    const next = !opencodeSyncEnabled;
+    setOpencodeSyncEnabled(next);
+    await saveOpencodeSyncEnabled(next);
+  };
 
   useEffect(() => {
     if (!isActionsMenuOpen) return;
@@ -133,7 +150,14 @@ function App() {
 
     try {
       setSwitchingId(accountId);
-      await switchAccount(accountId);
+      const result = await switchAccount(accountId);
+      
+      const message = result.opencode_synced 
+        ? "✓ Synced to Codex CLI + OpenCode"
+        : "✓ Synced to Codex CLI";
+        
+      setSwitchSuccessToast({ message, show: true });
+      setTimeout(() => setSwitchSuccessToast({ message: "", show: false }), 3000);
     } catch (err) {
       console.error("Failed to switch account:", err);
     } finally {
@@ -493,6 +517,23 @@ function App() {
                     >
                       + Add Account
                     </button>
+                    
+                    <div className="my-1 border-t border-gray-100"></div>
+                    
+                    <label className="flex items-center justify-between w-full px-3 py-2 text-sm rounded-lg hover:bg-gray-100 cursor-pointer">
+                      <span className="text-gray-700">Sync to OpenCode</span>
+                      <div className={`w-8 h-4 rounded-full transition-colors ${opencodeSyncEnabled ? 'bg-green-500' : 'bg-gray-300'} relative`}>
+                        <div className={`absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full transition-transform ${opencodeSyncEnabled ? 'translate-x-4' : 'translate-x-0'}`}></div>
+                      </div>
+                      <input 
+                        type="checkbox" 
+                        className="hidden" 
+                        checked={opencodeSyncEnabled}
+                        onChange={toggleOpencodeSync} 
+                      />
+                    </label>
+
+                    <div className="my-1 border-t border-gray-100"></div>
                     <button
                       onClick={() => {
                         setIsActionsMenuOpen(false);
@@ -671,6 +712,13 @@ function App() {
           </div>
         )}
       </main>
+
+      {/* Switch Success Toast */}
+      {switchSuccessToast.show && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-3 bg-green-600 text-white rounded-lg shadow-lg text-sm flex items-center gap-2">
+          <span>{switchSuccessToast.message}</span>
+        </div>
+      )}
 
       {/* Refresh Success Toast */}
       {refreshSuccess && (

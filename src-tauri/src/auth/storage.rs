@@ -4,8 +4,62 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 use crate::types::{AccountsStore, AuthData, StoredAccount};
+
+// ============================================================================
+// App Settings (persisted to ~/.codex-switcher/settings.json)
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppSettings {
+    /// Whether to sync credentials to OpenCode's auth.json on switch
+    #[serde(default = "default_true")]
+    pub opencode_sync_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            opencode_sync_enabled: true,
+        }
+    }
+}
+
+/// Get the path to settings.json
+fn get_settings_file() -> Result<PathBuf> {
+    Ok(get_config_dir()?.join("settings.json"))
+}
+
+/// Load app settings from disk
+pub fn load_settings() -> Result<AppSettings> {
+    let path = get_settings_file()?;
+    if !path.exists() {
+        return Ok(AppSettings::default());
+    }
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read settings file: {}", path.display()))?;
+    let settings: AppSettings = serde_json::from_str(&content).unwrap_or_default();
+    Ok(settings)
+}
+
+/// Save app settings to disk
+pub fn save_settings(settings: &AppSettings) -> Result<()> {
+    let path = get_settings_file()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let content = serde_json::to_string_pretty(settings)
+        .context("Failed to serialize settings")?;
+    fs::write(&path, content)
+        .with_context(|| format!("Failed to write settings file: {}", path.display()))?;
+    Ok(())
+}
 
 /// Get the path to the codex-switcher config directory
 pub fn get_config_dir() -> Result<PathBuf> {

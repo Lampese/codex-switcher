@@ -109,9 +109,16 @@ pub async fn add_account_from_file(path: String, name: String) -> Result<Account
     Ok(AccountInfo::from_stored(&stored, active_id))
 }
 
+/// Result of a switch operation, telling the frontend what happened
+#[derive(Debug, serde::Serialize)]
+pub struct SwitchResult {
+    /// Whether OpenCode auth.json was also updated
+    pub opencode_synced: bool,
+}
+
 /// Switch to a different account
 #[tauri::command]
-pub async fn switch_account(account_id: String) -> Result<(), String> {
+pub async fn switch_account(account_id: String) -> Result<SwitchResult, String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
 
     // Find the account
@@ -124,10 +131,19 @@ pub async fn switch_account(account_id: String) -> Result<(), String> {
     // Write to ~/.codex/auth.json
     switch_to_account(account).map_err(|e| e.to_string())?;
 
-    // Also write to ~/.local/share/opencode/auth.json (merge, not overwrite)
-    if let Err(e) = crate::auth::switch_to_opencode(account) {
-        eprintln!("Warning: Failed to update OpenCode auth.json: {e}");
-    }
+    // Conditionally sync to OpenCode's auth.json (merge, not overwrite)
+    let settings = crate::auth::load_settings().unwrap_or_default();
+    let opencode_synced = if settings.opencode_sync_enabled {
+        match crate::auth::switch_to_opencode(account) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("Warning: Failed to update OpenCode auth.json: {e}");
+                false
+            }
+        }
+    } else {
+        false
+    };
 
     // Update the active account in our store
     set_active_account(&account_id).map_err(|e| e.to_string())?;
@@ -155,7 +171,7 @@ pub async fn switch_account(account_id: String) -> Result<(), String> {
         }
     }
 
-    Ok(())
+    Ok(SwitchResult { opencode_synced })
 }
 
 /// Remove an account
@@ -706,4 +722,19 @@ pub async fn get_masked_account_ids() -> Result<Vec<String>, String> {
 #[tauri::command]
 pub async fn set_masked_account_ids(ids: Vec<String>) -> Result<(), String> {
     crate::auth::storage::set_masked_account_ids(ids).map_err(|e| e.to_string())
+}
+
+/// Get whether OpenCode sync is enabled
+#[tauri::command]
+pub async fn get_opencode_sync_enabled() -> Result<bool, String> {
+    let settings = crate::auth::load_settings().map_err(|e| e.to_string())?;
+    Ok(settings.opencode_sync_enabled)
+}
+
+/// Set whether OpenCode sync is enabled
+#[tauri::command]
+pub async fn set_opencode_sync_enabled(enabled: bool) -> Result<(), String> {
+    let mut settings = crate::auth::load_settings().unwrap_or_default();
+    settings.opencode_sync_enabled = enabled;
+    crate::auth::save_settings(&settings).map_err(|e| e.to_string())
 }

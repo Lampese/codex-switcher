@@ -6,6 +6,7 @@ import type {
   AccountWithUsage,
   WarmupSummary,
   ImportAccountsSummary,
+  SwitchResult,
 } from "../types";
 
 export function useAccounts() {
@@ -195,10 +196,11 @@ export function useAccounts() {
   }, []);
 
   const switchAccount = useCallback(
-    async (accountId: string) => {
+    async (accountId: string): Promise<SwitchResult> => {
       try {
-        await invoke("switch_account", { accountId });
+        const result = await invoke<SwitchResult>("switch_account", { accountId });
         await loadAccounts(true); // Preserve usage data
+        return result;
       } catch (err) {
         throw err;
       }
@@ -343,6 +345,23 @@ export function useAccounts() {
     }
   }, []);
 
+  const loadOpencodeSyncEnabled = useCallback(async () => {
+    try {
+      return await invoke<boolean>("get_opencode_sync_enabled");
+    } catch (err) {
+      console.error("Failed to load OpenCode sync setting:", err);
+      return true; // default to enabled
+    }
+  }, []);
+
+  const saveOpencodeSyncEnabled = useCallback(async (enabled: boolean) => {
+    try {
+      await invoke("set_opencode_sync_enabled", { enabled });
+    } catch (err) {
+      console.error("Failed to save OpenCode sync setting:", err);
+    }
+  }, []);
+
   useEffect(() => {
     loadAccounts().then((accountList) => refreshUsage(accountList));
     
@@ -376,5 +395,7 @@ export function useAccounts() {
     cancelOAuthLogin,
     loadMaskedAccountIds,
     saveMaskedAccountIds,
+    loadOpencodeSyncEnabled,
+    saveOpencodeSyncEnabled,
   };
 }
