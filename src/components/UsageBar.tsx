@@ -47,10 +47,8 @@ function RateLimitBar({
   windowMinutes?: number | null;
   resetsAt?: number | null;
 }) {
-  // Calculate remaining percentage
   const remainingPercent = Math.max(0, 100 - usedPercent);
-  
-  // Color based on remaining (green = plenty left, red = almost none left)
+
   const colorClass =
     remainingPercent <= 10
       ? "bg-red-500"
@@ -61,18 +59,25 @@ function RateLimitBar({
   const windowLabel = formatWindowDuration(windowMinutes);
   const resetLabel = formatResetTime(resetsAt);
   const exactResetLabel = formatExactResetTime(resetsAt);
+  const summary = [
+    `${remainingPercent.toFixed(0)}% left`,
+    resetLabel ? `resets ${resetLabel}` : null,
+  ]
+    .filter(Boolean)
+    .join(" • ");
 
   return (
     <div className="space-y-1">
-      <div className="flex justify-between text-xs text-gray-500">
-        <span>{label} {windowLabel && `(${windowLabel})`}</span>
-        <span>
-          {remainingPercent.toFixed(0)}% left
-          {resetLabel && ` • resets ${resetLabel}`}
-          {resetLabel && exactResetLabel && ` (${exactResetLabel})`}
+      <div className="flex items-start justify-between gap-3 text-xs text-gray-500 dark:text-slate-300">
+        <span className="leading-4 text-slate-500 dark:text-slate-300">
+          {label}
+          {windowLabel && ` (${windowLabel})`}
+        </span>
+        <span className="max-w-[68%] text-right leading-4 tracking-[0.01em] text-slate-500 dark:text-slate-300" title={exactResetLabel || undefined}>
+          {summary}
         </span>
       </div>
-      <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+      <div className="h-1.5 overflow-hidden rounded-full bg-slate-100/90 dark:bg-slate-800">
         <div
           className={`h-full transition-all duration-300 ${colorClass}`}
           style={{ width: `${Math.min(remainingPercent, 100)}%` }}
@@ -86,14 +91,14 @@ export function UsageBar({ usage, loading }: UsageBarProps) {
   if (loading && !usage) {
     return (
       <div className="space-y-2">
-        <div className="text-xs text-gray-400 italic animate-pulse">
+        <div className="text-xs text-gray-400 italic animate-pulse dark:text-slate-400">
           Fetching usage...
         </div>
-        <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden animate-pulse">
-          <div className="h-full w-2/3 bg-gray-200"></div>
+        <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden animate-pulse dark:bg-slate-800">
+          <div className="h-full w-2/3 bg-gray-200 dark:bg-slate-700"></div>
         </div>
-        <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden animate-pulse">
-          <div className="h-full w-1/2 bg-gray-200"></div>
+        <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden animate-pulse dark:bg-slate-800">
+          <div className="h-full w-1/2 bg-gray-200 dark:bg-slate-700"></div>
         </div>
       </div>
     );
@@ -101,7 +106,7 @@ export function UsageBar({ usage, loading }: UsageBarProps) {
 
   if (!usage) {
     return (
-      <div className="text-xs text-gray-400 italic py-1 animate-pulse">
+        <div className="text-xs text-gray-400 italic py-1 animate-pulse dark:text-slate-400">
         Fetching usage...
       </div>
     );
@@ -109,7 +114,7 @@ export function UsageBar({ usage, loading }: UsageBarProps) {
 
   if (usage.error) {
     return (
-      <div className="text-xs text-gray-400 italic py-1">
+        <div className="text-xs text-gray-400 italic py-1 dark:text-slate-400">
         {usage.error}
       </div>
     );
@@ -120,7 +125,7 @@ export function UsageBar({ usage, loading }: UsageBarProps) {
 
   if (!hasPrimary && !hasSecondary) {
     return (
-      <div className="text-xs text-gray-400 italic py-1">
+        <div className="text-xs text-gray-400 italic py-1 dark:text-slate-400">
         No rate limit data
       </div>
     );
@@ -145,7 +150,7 @@ export function UsageBar({ usage, loading }: UsageBarProps) {
         />
       )}
       {usage.credits_balance && (
-        <div className="text-xs text-gray-500">
+        <div className="text-xs text-gray-500 dark:text-slate-300">
           Credits: {usage.credits_balance}
         </div>
       )}

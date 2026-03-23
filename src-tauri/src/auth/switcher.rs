@@ -162,3 +162,106 @@ pub fn has_active_login() -> Result<bool> {
         None => Ok(false),
     }
 }
+
+// ============================================================================
+// OpenCode auth.json support
+// ============================================================================
+
+/// Get the path to OpenCode's auth.json file
+fn get_opencode_auth_file() -> Result<PathBuf> {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        // OpenCode uses ~/.local/share on macOS and Windows.
+        // See: https://github.com/anomalyco/opencode/issues/5238
+        let home = dirs::home_dir().context("Could not find home directory")?;
+        Ok(home
+            .join(".local")
+            .join("share")
+            .join("opencode")
+            .join("auth.json"))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        // On Linux: $XDG_DATA_HOME/opencode/auth.json (or ~/.local/share/...)
+        let data_dir = dirs::data_dir().context("Could not find data directory")?;
+        Ok(data_dir.join("opencode").join("auth.json"))
+    }
+}
+
+/// Switch account in OpenCode's auth.json.
+///
+/// This function **merges** with the existing file content so that other
+/// provider entries (e.g. `"groq"`) are preserved untouched.  Only the
+/// `"openai"` key is updated.
+pub fn switch_to_opencode(account: &StoredAccount) -> Result<()> {
+    let auth_path = get_opencode_auth_file()?;
+
+    // 1. Read existing file into a generic JSON map to preserve other keys
+    let mut auth_map: serde_json::Map<String, serde_json::Value> = if auth_path.exists() {
+        let content = fs::read_to_string(&auth_path).with_context(|| {
+            format!("Failed to read OpenCode auth.json: {}", auth_path.display())
+        })?;
+        serde_json::from_str(&content).unwrap_or_default()
+    } else {
+        serde_json::Map::new()
+    };
+
+    // 2. Build the new "openai" provider value from account credentials
+    let openai_value = match &account.auth_data {
+        AuthData::ChatGPT {
+            access_token,
+            refresh_token,
+            account_id,
+            ..
+        } => {
+            serde_json::json!({
+                "type": "oauth",
+                "refresh": refresh_token,
+                "access": access_token,
+                "expires": opencode_expires_timestamp(),
+                "accountId": account_id.clone().unwrap_or_default(),
+            })
+        }
+        AuthData::ApiKey { key } => {
+            serde_json::json!({
+                "type": "api",
+                "key": key,
+            })
+        }
+    };
+
+    // 3. Replace only the "openai" key, leaving everything else intact
+    auth_map.insert("openai".to_string(), openai_value);
+
+    // 4. Write back the full merged content
+    if let Some(parent) = auth_path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!("Failed to create OpenCode config dir: {}", parent.display())
+        })?;
+    }
+
+    let content = serde_json::to_string_pretty(&auth_map)
+        .context("Failed to serialize OpenCode auth.json")?;
+
+    fs::write(&auth_path, &content).with_context(|| {
+        format!(
+            "Failed to write OpenCode auth.json: {}",
+            auth_path.display()
+        )
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::Permissions::from_mode(0o600);
+        fs::set_permissions(&auth_path, perms)?;
+    }
+
+    Ok(())
+}
+
+/// Calculate an expiry timestamp ~7 days from now, in milliseconds (OpenCode format).
+fn opencode_expires_timestamp() -> i64 {
+    (Utc::now() + chrono::Duration::days(7)).timestamp_millis()
+}
