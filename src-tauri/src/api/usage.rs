@@ -126,8 +126,7 @@ async fn warmup_with_chatgpt_auth(account: &StoredAccount) -> Result<()> {
     let fresh_account = ensure_chatgpt_tokens_fresh(account).await?;
     let (access_token, chatgpt_account_id) = extract_chatgpt_auth(&fresh_account)?;
 
-    let mut response =
-        send_chatgpt_warmup_request(access_token, chatgpt_account_id, true).await?;
+    let mut response = send_chatgpt_warmup_request(access_token, chatgpt_account_id, true).await?;
     if response.status() == StatusCode::UNAUTHORIZED {
         println!(
             "[Warmup] Unauthorized for account {}, refreshing token and retrying once",
@@ -409,13 +408,13 @@ pub async fn refresh_all_usage(accounts: &[StoredAccount]) -> Vec<UsageInfo> {
     println!("[Usage] Refreshing usage for {} accounts", accounts.len());
 
     let concurrency = accounts.len().min(10).max(1);
-    let results: Vec<UsageInfo> = stream::iter(accounts.iter().cloned())
-        .map(|account| async move {
+    let mut results: Vec<(usize, UsageInfo)> = stream::iter(accounts.iter().cloned().enumerate())
+        .map(|(index, account)| async move {
             match get_account_usage(&account).await {
-                Ok(info) => info,
+                Ok(info) => (index, info),
                 Err(e) => {
                     println!("[Usage] Error for {}: {}", account.name, e);
-                    UsageInfo::error(account.id.clone(), e.to_string())
+                    (index, UsageInfo::error(account.id.clone(), e.to_string()))
                 }
             }
         })
@@ -423,6 +422,8 @@ pub async fn refresh_all_usage(accounts: &[StoredAccount]) -> Vec<UsageInfo> {
         .collect()
         .await;
 
+    results.sort_by_key(|(index, _)| *index);
+
     println!("[Usage] Refresh complete");
-    results
+    results.into_iter().map(|(_, info)| info).collect()
 }
