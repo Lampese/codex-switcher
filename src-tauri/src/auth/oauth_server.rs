@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use tiny_http::{Header, Request, Response, Server};
 use tokio::sync::oneshot;
 
+use crate::auth::chatgpt::parse_chatgpt_token_claims;
 use crate::types::{OAuthLoginInfo, StoredAccount};
 
 const DEFAULT_ISSUER: &str = "https://auth.openai.com";
@@ -122,40 +123,6 @@ async fn exchange_code_for_tokens(
         .await
         .context("Failed to parse token response")?;
     Ok(tokens)
-}
-
-/// Parse claims from JWT ID token
-fn parse_id_token_claims(id_token: &str) -> (Option<String>, Option<String>, Option<String>) {
-    let parts: Vec<&str> = id_token.split('.').collect();
-    if parts.len() != 3 {
-        return (None, None, None);
-    }
-
-    let payload = match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[1]) {
-        Ok(bytes) => bytes,
-        Err(_) => return (None, None, None),
-    };
-
-    let json: serde_json::Value = match serde_json::from_slice(&payload) {
-        Ok(v) => v,
-        Err(_) => return (None, None, None),
-    };
-
-    let email = json.get("email").and_then(|v| v.as_str()).map(String::from);
-
-    let auth_claims = json.get("https://api.openai.com/auth");
-
-    let plan_type = auth_claims
-        .and_then(|auth| auth.get("chatgpt_plan_type"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
-
-    let account_id = auth_claims
-        .and_then(|auth| auth.get("chatgpt_account_id"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
-
-    (email, plan_type, account_id)
 }
 
 /// OAuth login flow result
@@ -362,18 +329,17 @@ async fn handle_oauth_request(
             Ok(tokens) => {
                 println!("[OAuth] Token exchange successful!");
                 // Parse claims from ID token
-                let (email, plan_type, chatgpt_account_id) =
-                    parse_id_token_claims(&tokens.id_token);
+                let claims = parse_chatgpt_token_claims(&tokens.id_token);
 
                 // Create the account
                 let account = StoredAccount::new_chatgpt(
                     account_name.to_string(),
-                    email,
-                    plan_type,
+                    claims.email,
+                    claims.plan_type,
                     tokens.id_token,
                     tokens.access_token,
                     tokens.refresh_token,
-                    chatgpt_account_id,
+                    claims.account_id,
                 );
 
                 // Send success response

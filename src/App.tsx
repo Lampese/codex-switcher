@@ -11,6 +11,7 @@ function App() {
     accounts,
     loading,
     error,
+    syncLiveAuth,
     refreshUsage,
     refreshSingleUsage,
     warmupAccount,
@@ -160,7 +161,8 @@ function App() {
     setIsRefreshing(true);
     setRefreshSuccess(false);
     try {
-      await refreshUsage();
+      const syncedAccounts = await syncLiveAuth();
+      await refreshUsage(syncedAccounts ?? undefined);
       setRefreshSuccess(true);
       setTimeout(() => setRefreshSuccess(false), 2000);
     } finally {
