@@ -11,6 +11,8 @@ export interface AccountInfo {
   is_active: boolean;
   created_at: string;
   last_used_at: string | null;
+  cached_usage: UsageInfo | null;
+  cached_usage_updated_at: string | null;
 }
 
 export interface UsageInfo {
@@ -33,9 +35,16 @@ export interface OAuthLoginInfo {
   callback_port: number;
 }
 
+export interface CachedUsageInfo {
+  account_id: string;
+  usage: UsageInfo;
+  updated_at: string;
+}
+
 export interface AccountWithUsage extends AccountInfo {
   usage?: UsageInfo;
   usageLoading?: boolean;
+  usageUpdatedAt?: string | null;
 }
 
 export interface CodexProcessInfo {
