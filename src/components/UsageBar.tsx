@@ -49,11 +49,13 @@ function RateLimitBar({
   usedPercent,
   windowMinutes,
   resetsAt,
+  stale = false,
 }: {
   label: string;
   usedPercent: number;
   windowMinutes?: number | null;
   resetsAt?: number | null;
+  stale?: boolean;
 }) {
   const remainingPercent = Math.max(0, 100 - usedPercent);
   const colorClass =
@@ -81,9 +83,16 @@ function RateLimitBar({
       </div>
       <div className="h-1.5 overflow-hidden rounded-full bg-gray-100">
         <div
-          className={`h-full transition-all duration-300 ${colorClass}`}
+          className="relative h-full overflow-hidden transition-all duration-300"
           style={{ width: `${Math.min(remainingPercent, 100)}%` }}
-        />
+        >
+          <div
+            className={`h-full transition-all duration-300 ${colorClass} ${
+              stale ? "usage-stale-fill" : ""
+            }`}
+          />
+          {stale && <div className="usage-stale-sheen absolute inset-0" aria-hidden="true" />}
+        </div>
       </div>
     </div>
   );
@@ -134,6 +143,7 @@ export function UsageBar({ usage, loading }: UsageBarProps) {
           usedPercent={usage.primary_used_percent!}
           windowMinutes={usage.primary_window_minutes}
           resetsAt={usage.primary_resets_at}
+          stale={showRefreshingState}
         />
       )}
       {hasSecondary && (
@@ -142,6 +152,7 @@ export function UsageBar({ usage, loading }: UsageBarProps) {
           usedPercent={usage.secondary_used_percent!}
           windowMinutes={usage.secondary_window_minutes}
           resetsAt={usage.secondary_resets_at}
+          stale={showRefreshingState}
         />
       )}
       {usage.credits_balance && (

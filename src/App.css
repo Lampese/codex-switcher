@@ -1,1 +1,44 @@
 @import "tailwindcss";
+
+@keyframes usage-stale-sheen {
+  0% {
+    transform: translateX(-140%);
+    opacity: 0;
+  }
+
+  20% {
+    opacity: 1;
+  }
+
+  100% {
+    transform: translateX(160%);
+    opacity: 0;
+  }
+}
+
+.usage-stale-fill {
+  opacity: 0.55;
+  filter: saturate(0.7);
+}
+
+.usage-stale-sheen {
+  pointer-events: none;
+  background: linear-gradient(
+    110deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.12) 28%,
+    rgba(148, 163, 184, 0.36) 50%,
+    rgba(255, 255, 255, 0.12) 72%,
+    transparent 100%
+  );
+  transform: translateX(-140%);
+  animation: usage-stale-sheen 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .usage-stale-sheen {
+    animation: none;
+    opacity: 0.35;
+    transform: none;
+  }
+}

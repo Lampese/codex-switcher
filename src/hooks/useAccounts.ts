@@ -10,9 +10,11 @@ import type {
 import {
   applyUsageFetchError,
   applyUsageFetchResult,
+  extractCachedUsageEntriesFromAccounts,
   filterCachedUsageEntries,
   loadCachedUsageFromBrowser,
   markAccountsUsageLoading,
+  mergeCachedUsageEntries,
   mergeAccountsWithCachedUsage,
   persistCachedUsageToBrowser,
   saveCachedUsageToBrowser,
@@ -74,13 +76,21 @@ export function useAccounts() {
       setError(null);
       const browserCachedUsage = loadCachedUsageFromBrowser();
       const accountList = await invoke<AccountInfo[]>("list_accounts");
+      const backendCachedUsage = extractCachedUsageEntriesFromAccounts(accountList);
       const accountIdSet = new Set(accountList.map((account) => account.id));
-      const filteredCachedUsage = filterCachedUsageEntries(browserCachedUsage, accountIdSet);
+      const filteredBrowserCachedUsage = filterCachedUsageEntries(
+        browserCachedUsage,
+        accountIdSet
+      );
+      const mergedCachedUsage = mergeCachedUsageEntries(
+        backendCachedUsage,
+        filteredBrowserCachedUsage
+      );
 
-      persistCachedUsageToBrowser(filteredCachedUsage);
+      persistCachedUsageToBrowser(mergedCachedUsage);
 
       setAccounts((prev) =>
-        mergeAccountsWithCachedUsage(accountList, prev, filteredCachedUsage, preserveUsage)
+        mergeAccountsWithCachedUsage(accountList, prev, mergedCachedUsage, preserveUsage)
       );
       return accountList;
     } catch (err) {

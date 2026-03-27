@@ -48,6 +48,12 @@ pub struct StoredAccount {
     pub created_at: DateTime<Utc>,
     /// Last time this account was used
     pub last_used_at: Option<DateTime<Utc>>,
+    /// Last successful usage snapshot for stale-while-revalidate UI.
+    #[serde(default)]
+    pub cached_usage: Option<UsageInfo>,
+    /// When the cached usage snapshot was recorded.
+    #[serde(default)]
+    pub cached_usage_updated_at: Option<DateTime<Utc>>,
 }
 
 impl StoredAccount {
@@ -62,6 +68,8 @@ impl StoredAccount {
             auth_data: AuthData::ApiKey { key: api_key },
             created_at: Utc::now(),
             last_used_at: None,
+            cached_usage: None,
+            cached_usage_updated_at: None,
         }
     }
 
@@ -89,6 +97,8 @@ impl StoredAccount {
             },
             created_at: Utc::now(),
             last_used_at: None,
+            cached_usage: None,
+            cached_usage_updated_at: None,
         }
     }
 }
@@ -172,6 +182,8 @@ pub struct AccountInfo {
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub last_used_at: Option<DateTime<Utc>>,
+    pub cached_usage: Option<UsageInfo>,
+    pub cached_usage_updated_at: Option<DateTime<Utc>>,
 }
 
 impl AccountInfo {
@@ -185,6 +197,8 @@ impl AccountInfo {
             is_active: active_id == Some(&account.id),
             created_at: account.created_at,
             last_used_at: account.last_used_at,
+            cached_usage: account.cached_usage.clone(),
+            cached_usage_updated_at: account.cached_usage_updated_at,
         }
     }
 }

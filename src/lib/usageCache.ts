@@ -2,6 +2,36 @@ import type { AccountInfo, AccountWithUsage, CachedUsageInfo, UsageInfo } from "
 
 const BROWSER_USAGE_CACHE_STORAGE_KEY = "codex-switcher.usage-cache.v1";
 
+export function extractCachedUsageEntriesFromAccounts(
+  accountList: AccountInfo[]
+): CachedUsageInfo[] {
+  return accountList
+    .filter(
+      (account) =>
+        !!account.cached_usage &&
+        !!account.cached_usage_updated_at &&
+        !account.cached_usage.error
+    )
+    .map((account) => ({
+      account_id: account.id,
+      usage: account.cached_usage!,
+      updated_at: account.cached_usage_updated_at!,
+    }));
+}
+
+export function mergeCachedUsageEntries(
+  ...entryGroups: CachedUsageInfo[][]
+): CachedUsageInfo[] {
+  return entryGroups.reduce<CachedUsageInfo[]>(
+    (merged, entries) =>
+      entries.reduce(
+        (nextEntries, entry) => upsertCachedUsageEntry(nextEntries, entry),
+        merged
+      ),
+    []
+  );
+}
+
 export function mergeAccountsWithCachedUsage(
   accountList: AccountInfo[],
   previousAccounts: AccountWithUsage[],
@@ -14,10 +44,12 @@ export function mergeAccountsWithCachedUsage(
   return accountList.map((account) => {
     const previous = previousById.get(account.id);
     const cached = cachedById.get(account.id);
+    const shouldReusePreviousUsage =
+      preserveExistingUsage && !!previous?.usage && !previous.usage.error;
 
     return {
       ...account,
-      usage: preserveExistingUsage ? previous?.usage ?? cached?.usage : cached?.usage,
+      usage: shouldReusePreviousUsage ? previous?.usage : cached?.usage ?? previous?.usage,
       usageLoading: preserveExistingUsage ? previous?.usageLoading ?? false : false,
       usageUpdatedAt: preserveExistingUsage
         ? previous?.usageUpdatedAt ?? cached?.updated_at ?? null
@@ -69,7 +101,7 @@ export function applyUsageFetchError(
     account.id === accountId
       ? {
           ...account,
-          usage,
+          usage: account.usage && !account.usage.error ? account.usage : usage,
           usageLoading: false,
         }
       : account
