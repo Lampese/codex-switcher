@@ -55,11 +55,7 @@ export function AccountCard({
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState(account.name);
   const inputRef = useRef<HTMLInputElement>(null);
-  const lastRefresh = account.usageUpdatedAt
-    ? new Date(account.usageUpdatedAt)
-    : account.usage && !account.usage.error
-      ? new Date()
-      : null;
+  const lastRefresh = account.usageUpdatedAt ? new Date(account.usageUpdatedAt) : null;
 
   useEffect(() => {
     if (isEditing && inputRef.current) {

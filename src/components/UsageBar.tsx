@@ -5,9 +5,12 @@ interface UsageBarProps {
   loading?: boolean;
 }
 
-function formatResetTime(resetAt: number | null | undefined): string {
+export function formatResetTime(
+  resetAt: number | null | undefined,
+  nowSeconds = Math.floor(Date.now() / 1000)
+): string {
   if (!resetAt) return "";
-  const diff = resetAt - Math.floor(Date.now() / 1000);
+  const diff = resetAt - nowSeconds;
   if (diff <= 0) return "now";
   if (diff < 60) return `${diff}s`;
 
