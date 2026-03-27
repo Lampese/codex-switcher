@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getOrderedOtherAccountIds } from "../src/lib/otherAccountsOrder";
-import type { AccountInfo, AccountWithUsage, UsageInfo } from "../src/types";
+import { getOrderedOtherAccountIds } from "../src/lib/otherAccountsOrder.ts";
+import type { AccountInfo, AccountWithUsage, UsageInfo } from "../src/types/index.ts";
 
 const backendBaseUrl = process.env.CODEX_SWITCHER_BACKEND_URL ?? "http://127.0.0.1:3211";
 

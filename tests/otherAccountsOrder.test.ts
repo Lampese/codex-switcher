@@ -5,8 +5,8 @@ import {
   areOtherAccountsLoading,
   buildOtherAccountsSortSignature,
   getOrderedOtherAccountIds,
-} from "../src/lib/otherAccountsOrder";
-import type { AccountWithUsage } from "../src/types";
+} from "../src/lib/otherAccountsOrder.ts";
+import type { AccountWithUsage } from "../src/types/index.ts";
 
 function makeAccount(
   name: string,
