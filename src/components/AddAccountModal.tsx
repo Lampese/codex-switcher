@@ -1,11 +1,16 @@
 import { useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
-import { open } from "@tauri-apps/plugin-dialog";
+import {
+  describeFileSource,
+  isTauriRuntime,
+  openExternalUrl,
+  pickAuthJsonFile,
+  type FileSource,
+} from "../lib/platform";
 
 interface AddAccountModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onImportFile: (path: string, name: string) => Promise<void>;
+  onImportFile: (source: FileSource, name: string) => Promise<void>;
   onStartOAuth: (name: string) => Promise<{ auth_url: string }>;
   onCompleteOAuth: () => Promise<unknown>;
   onCancelOAuth: () => Promise<void>;
@@ -23,17 +28,18 @@ export function AddAccountModal({
 }: AddAccountModalProps) {
   const [activeTab, setActiveTab] = useState<Tab>("oauth");
   const [name, setName] = useState("");
-  const [filePath, setFilePath] = useState("");
+  const [fileSource, setFileSource] = useState<FileSource | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [oauthPending, setOauthPending] = useState(false);
   const [authUrl, setAuthUrl] = useState<string>("");
   const [copied, setCopied] = useState<boolean>(false);
   const isPrimaryDisabled = loading || (activeTab === "oauth" && oauthPending);
+  const tauriRuntime = isTauriRuntime();
 
   const resetForm = () => {
     setName("");
-    setFilePath("");
+    setFileSource(null);
     setError(null);
     setLoading(false);
     setOauthPending(false);
@@ -74,20 +80,8 @@ export function AddAccountModal({
 
   const handleSelectFile = async () => {
     try {
-      const selected = await open({
-        multiple: false,
-        filters: [
-          {
-            name: "JSON",
-            extensions: ["json"],
-          },
-        ],
-        title: "Select auth.json file",
-      });
-
-      if (selected) {
-        setFilePath(selected);
-      }
+      const selected = await pickAuthJsonFile();
+      if (selected) setFileSource(selected);
     } catch (err) {
       console.error("Failed to open file dialog:", err);
     }
@@ -98,7 +92,7 @@ export function AddAccountModal({
       setError("Please enter an account name");
       return;
     }
-    if (!filePath.trim()) {
+    if (!fileSource) {
       setError("Please select an auth.json file");
       return;
     }
@@ -106,7 +100,7 @@ export function AddAccountModal({
     try {
       setLoading(true);
       setError(null);
-      await onImportFile(filePath.trim(), name.trim());
+      await onImportFile(fileSource, name.trim());
       handleClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -191,9 +185,15 @@ export function AddAccountModal({
                     />
                     <button
                       onClick={() => {
-                        navigator.clipboard.writeText(authUrl);
-                        setCopied(true);
-                        setTimeout(() => setCopied(false), 2000);
+                        void navigator.clipboard
+                          .writeText(authUrl)
+                          .then(() => {
+                            setCopied(true);
+                            setTimeout(() => setCopied(false), 2000);
+                          })
+                          .catch(() => {
+                            setError("Clipboard unavailable. Copy the link manually.");
+                          });
                       }}
                       className={`px-3 py-1.5 border rounded text-xs font-medium transition-colors shrink-0 
                         ${copied
@@ -204,12 +204,20 @@ export function AddAccountModal({
                       {copied ? "Copied!" : "Copy"}
                     </button>
                     <button
-                      onClick={() => openUrl(authUrl)}
+                      onClick={() => {
+                        void openExternalUrl(authUrl);
+                      }}
                       className="px-3 py-1.5 bg-gray-900 border border-gray-900 rounded text-xs font-medium text-white hover:bg-gray-800 transition-colors shrink-0"
                     >
                       Open
                     </button>
                   </div>
+                  {!tauriRuntime && (
+                    <p className="text-xs text-amber-600">
+                      OAuth login must finish on the same host machine because the callback
+                      redirects to `localhost`.
+                    </p>
+                  )}
                 </div>
               ) : (
                 <p>
@@ -227,7 +235,7 @@ export function AddAccountModal({
               </label>
               <div className="flex gap-2">
                 <div className="flex-1 px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-600 truncate">
-                  {filePath || "No file selected"}
+                  {describeFileSource(fileSource)}
                 </div>
                 <button
                   onClick={handleSelectFile}

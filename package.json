@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "sh ./scripts/tauri.sh"
+    "tauri": "sh ./scripts/tauri.sh",
+    "lan": "pnpm build && cargo run --manifest-path src-tauri/Cargo.toml --bin codex-web"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.0",

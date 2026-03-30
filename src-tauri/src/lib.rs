@@ -4,6 +4,7 @@ pub mod api;
 pub mod auth;
 pub mod commands;
 pub mod types;
+pub mod web;
 
 use commands::{
     add_account_from_file, cancel_login, check_codex_processes, complete_login, delete_account,

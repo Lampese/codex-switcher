@@ -2,8 +2,8 @@
 
 use crate::auth::{
     add_account, create_chatgpt_account_from_refresh_token, get_active_account,
-    import_from_auth_json, load_accounts, remove_account, save_accounts, set_active_account,
-    switch_to_account, touch_account,
+    import_from_auth_json, import_from_auth_json_contents, load_accounts, remove_account,
+    save_accounts, set_active_account, switch_to_account, touch_account,
 };
 use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
 
@@ -101,6 +101,20 @@ pub async fn add_account_from_file(path: String, name: String) -> Result<Account
     let account = import_from_auth_json(&path, name).map_err(|e| e.to_string())?;
 
     // Add to storage
+    let stored = add_account(account).map_err(|e| e.to_string())?;
+
+    let store = load_accounts().map_err(|e| e.to_string())?;
+    let active_id = store.active_account_id.as_deref();
+
+    Ok(AccountInfo::from_stored(&stored, active_id))
+}
+
+/// Add an account from uploaded auth.json contents.
+pub async fn add_account_from_auth_json_text(
+    name: String,
+    contents: String,
+) -> Result<AccountInfo, String> {
+    let account = import_from_auth_json_contents(&contents, name).map_err(|e| e.to_string())?;
     let stored = add_account(account).map_err(|e| e.to_string())?;
 
     let store = load_accounts().map_err(|e| e.to_string())?;
@@ -213,6 +227,12 @@ pub async fn export_accounts_full_encrypted_file(path: String) -> Result<(), Str
     Ok(())
 }
 
+/// Export full account config as encrypted bytes for browser clients.
+pub async fn export_accounts_full_encrypted_bytes() -> Result<Vec<u8>, String> {
+    let store = load_accounts().map_err(|e| e.to_string())?;
+    encode_full_encrypted_store(&store, FULL_PRESET_PASSPHRASE).map_err(|e| e.to_string())
+}
+
 /// Import full account config from an encrypted file, skipping existing accounts.
 #[tauri::command]
 pub async fn import_accounts_full_encrypted_file(
@@ -221,6 +241,20 @@ pub async fn import_accounts_full_encrypted_file(
     let encrypted = read_encrypted_file(&path).map_err(|e| e.to_string())?;
     let imported = decode_full_encrypted_store(&encrypted, FULL_PRESET_PASSPHRASE)
         .map_err(|e| e.to_string())?;
+    validate_imported_store(&imported).map_err(|e| e.to_string())?;
+
+    let current = load_accounts().map_err(|e| e.to_string())?;
+    let (merged, summary) = merge_accounts_store(current, imported);
+    save_accounts(&merged).map_err(|e| e.to_string())?;
+    Ok(summary)
+}
+
+/// Import full account config from encrypted bytes uploaded through the browser UI.
+pub async fn import_accounts_full_encrypted_bytes(
+    bytes: Vec<u8>,
+) -> Result<ImportAccountsSummary, String> {
+    let imported =
+        decode_full_encrypted_store(&bytes, FULL_PRESET_PASSPHRASE).map_err(|e| e.to_string())?;
     validate_imported_store(&imported).map_err(|e| e.to_string())?;
 
     let current = load_accounts().map_err(|e| e.to_string())?;

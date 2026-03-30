@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import type {
   AccountInfo,
   UsageInfo,
@@ -7,6 +6,7 @@ import type {
   WarmupSummary,
   ImportAccountsSummary,
 } from "../types";
+import { invokeBackend, type FileSource } from "../lib/platform";
 
 export function useAccounts() {
   const [accounts, setAccounts] = useState<AccountWithUsage[]>([]);
@@ -62,7 +62,7 @@ export function useAccounts() {
     try {
       setLoading(true);
       setError(null);
-      const accountList = await invoke<AccountInfo[]>("list_accounts");
+      const accountList = await invokeBackend<AccountInfo[]>("list_accounts");
       
       if (preserveUsage) {
         // Preserve existing usage data when just updating account info
@@ -111,7 +111,7 @@ export function useAccounts() {
         accountIds,
         async (accountId) => {
           try {
-            const usage = await invoke<UsageInfo>("get_usage", { accountId });
+            const usage = await invokeBackend<UsageInfo>("get_usage", { accountId });
             setAccounts((prev) =>
               prev.map((account) =>
                 account.id === accountId
@@ -152,7 +152,7 @@ export function useAccounts() {
           a.id === accountId ? { ...a, usageLoading: true } : a
         )
       );
-      const usage = await invoke<UsageInfo>("get_usage", { accountId });
+      const usage = await invokeBackend<UsageInfo>("get_usage", { accountId });
       setAccounts((prev) =>
         prev.map((a) =>
           a.id === accountId ? { ...a, usage, usageLoading: false } : a
@@ -178,7 +178,7 @@ export function useAccounts() {
 
   const warmupAccount = useCallback(async (accountId: string) => {
     try {
-      await invoke("warmup_account", { accountId });
+      await invokeBackend("warmup_account", { accountId });
     } catch (err) {
       console.error("Failed to warm up account:", err);
       throw err;
@@ -187,7 +187,7 @@ export function useAccounts() {
 
   const warmupAllAccounts = useCallback(async () => {
     try {
-      return await invoke<WarmupSummary>("warmup_all_accounts");
+      return await invokeBackend<WarmupSummary>("warmup_all_accounts");
     } catch (err) {
       console.error("Failed to warm up all accounts:", err);
       throw err;
@@ -197,7 +197,7 @@ export function useAccounts() {
   const switchAccount = useCallback(
     async (accountId: string) => {
       try {
-        await invoke("switch_account", { accountId });
+        await invokeBackend("switch_account", { accountId });
         await loadAccounts(true); // Preserve usage data
       } catch (err) {
         throw err;
@@ -209,7 +209,7 @@ export function useAccounts() {
   const deleteAccount = useCallback(
     async (accountId: string) => {
       try {
-        await invoke("delete_account", { accountId });
+        await invokeBackend("delete_account", { accountId });
         await loadAccounts();
       } catch (err) {
         throw err;
@@ -221,7 +221,7 @@ export function useAccounts() {
   const renameAccount = useCallback(
     async (accountId: string, newName: string) => {
       try {
-        await invoke("rename_account", { accountId, newName });
+        await invokeBackend("rename_account", { accountId, newName });
         await loadAccounts(true); // Preserve usage data
       } catch (err) {
         throw err;
@@ -231,9 +231,17 @@ export function useAccounts() {
   );
 
   const importFromFile = useCallback(
-    async (path: string, name: string) => {
+    async (source: FileSource, name: string) => {
       try {
-        await invoke<AccountInfo>("add_account_from_file", { path, name });
+        if (typeof source === "string") {
+          await invokeBackend<AccountInfo>("add_account_from_file", { path: source, name });
+        } else {
+          const contents = await source.text();
+          await invokeBackend<AccountInfo>("add_account_from_auth_json_text", {
+            name,
+            contents,
+          });
+        }
         const accountList = await loadAccounts();
         await refreshUsage(accountList);
       } catch (err) {
@@ -245,7 +253,7 @@ export function useAccounts() {
 
   const startOAuthLogin = useCallback(async (accountName: string) => {
     try {
-      const info = await invoke<{ auth_url: string; callback_port: number }>(
+      const info = await invokeBackend<{ auth_url: string; callback_port: number }>(
         "start_login",
         { accountName }
       );
@@ -257,7 +265,7 @@ export function useAccounts() {
 
   const completeOAuthLogin = useCallback(async () => {
     try {
-      const account = await invoke<AccountInfo>("complete_login");
+      const account = await invokeBackend<AccountInfo>("complete_login");
       const accountList = await loadAccounts();
       await refreshUsage(accountList);
       return account;
@@ -268,7 +276,7 @@ export function useAccounts() {
 
   const exportAccountsSlimText = useCallback(async () => {
     try {
-      return await invoke<string>("export_accounts_slim_text");
+      return await invokeBackend<string>("export_accounts_slim_text");
     } catch (err) {
       throw err;
     }
@@ -277,7 +285,7 @@ export function useAccounts() {
   const importAccountsSlimText = useCallback(
     async (payload: string) => {
       try {
-        const summary = await invoke<ImportAccountsSummary>("import_accounts_slim_text", {
+        const summary = await invokeBackend<ImportAccountsSummary>("import_accounts_slim_text", {
           payload,
         });
         const accountList = await loadAccounts();
@@ -293,7 +301,7 @@ export function useAccounts() {
   const exportAccountsFullEncryptedFile = useCallback(
     async (path: string) => {
       try {
-        await invoke("export_accounts_full_encrypted_file", { path });
+        await invokeBackend("export_accounts_full_encrypted_file", { path });
       } catch (err) {
         throw err;
       }
@@ -304,7 +312,7 @@ export function useAccounts() {
   const importAccountsFullEncryptedFile = useCallback(
     async (path: string) => {
       try {
-        const summary = await invoke<ImportAccountsSummary>(
+        const summary = await invokeBackend<ImportAccountsSummary>(
           "import_accounts_full_encrypted_file",
           { path }
         );
@@ -320,7 +328,7 @@ export function useAccounts() {
 
   const cancelOAuthLogin = useCallback(async () => {
     try {
-      await invoke("cancel_login");
+      await invokeBackend("cancel_login");
     } catch (err) {
       console.error("Failed to cancel login:", err);
     }
@@ -328,7 +336,7 @@ export function useAccounts() {
 
   const loadMaskedAccountIds = useCallback(async () => {
     try {
-      return await invoke<string[]>("get_masked_account_ids");
+      return await invokeBackend<string[]>("get_masked_account_ids");
     } catch (err) {
       console.error("Failed to load masked account IDs:", err);
       return [];
@@ -337,7 +345,7 @@ export function useAccounts() {
 
   const saveMaskedAccountIds = useCallback(async (ids: string[]) => {
     try {
-      await invoke("set_masked_account_ids", { ids });
+      await invokeBackend("set_masked_account_ids", { ids });
     } catch (err) {
       console.error("Failed to save masked account IDs:", err);
     }

@@ -83,8 +83,17 @@ pub fn import_from_auth_json(path: &str, account_name: String) -> Result<StoredA
     let content =
         fs::read_to_string(path).with_context(|| format!("Failed to read auth.json: {path}"))?;
 
-    let auth: AuthDotJson = serde_json::from_str(&content)
-        .with_context(|| format!("Failed to parse auth.json: {path}"))?;
+    import_from_auth_json_contents(&content, account_name)
+        .with_context(|| format!("Failed to parse auth.json: {path}"))
+}
+
+/// Import an account from auth.json file contents.
+pub fn import_from_auth_json_contents(
+    content: &str,
+    account_name: String,
+) -> Result<StoredAccount> {
+    let auth: AuthDotJson =
+        serde_json::from_str(&content).context("Failed to parse auth.json contents")?;
 
     // Determine auth mode and create account
     if let Some(api_key) = auth.openai_api_key {

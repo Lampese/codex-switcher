@@ -43,6 +43,22 @@ pnpm tauri build
 
 The built application will be in `src-tauri/target/release/bundle/`.
 
+### Run the Dashboard in a Browser
+
+You can also serve the built dashboard over HTTP instead of opening the Tauri shell.
+
+```bash
+# Build the frontend and start the web server on 0.0.0.0:3210
+pnpm lan
+```
+
+Optional environment variables:
+
+- `CODEX_SWITCHER_WEB_HOST` to override the bind host
+- `CODEX_SWITCHER_WEB_PORT` to override the port
+
+The browser dashboard serves the same UI and backend actions through `/api/invoke/*`, which makes it usable over LAN, Tailscale, or a remote host tunnel when you expose the chosen port safely.
+
 ## Disclaimer
 
 This tool is designed **exclusively for individuals who personally own multiple OpenAI/ChatGPT accounts**. It is intended to help users manage their own accounts more conveniently.
