@@ -10,12 +10,14 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use tokio::runtime::Runtime;
 
 use crate::commands::{
-    add_account_from_auth_json_text, add_account_from_file, cancel_login, check_codex_processes,
-    complete_login, delete_account, export_accounts_full_encrypted_bytes,
-    export_accounts_slim_text, get_active_account_info, get_masked_account_ids, get_usage,
+    add_account_from_auth_json_text, add_account_from_file, auto_switch_status, cancel_login,
+    check_codex_processes, clear_auto_switch_events, complete_login, delete_account,
+    export_accounts_full_encrypted_bytes, export_accounts_slim_text, get_active_account_info,
+    get_auto_switch_config, get_auto_switch_events, get_masked_account_ids, get_usage,
     import_accounts_full_encrypted_bytes, import_accounts_slim_text, list_accounts,
-    refresh_all_accounts_usage, rename_account, set_masked_account_ids, start_login,
-    switch_account, warmup_account, warmup_all_accounts,
+    refresh_all_accounts_usage, rename_account, set_auto_switch_config, set_masked_account_ids,
+    start_auto_switch, start_login, stop_auto_switch, switch_account, warmup_account,
+    warmup_all_accounts,
 };
 
 #[derive(Debug, Deserialize)]
@@ -50,6 +52,27 @@ struct ImportSlimArgs {
 struct MaskedIdsArgs {
     ids: Vec<String>,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AutoSwitchConfigArgs {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "default_threshold")]
+    threshold_percent: f64,
+    #[serde(default = "default_interval")]
+    check_interval_seconds: u64,
+    #[serde(default = "default_true")]
+    respect_weekly_limit: bool,
+    #[serde(default)]
+    excluded_account_ids: Vec<String>,
+    #[serde(default)]
+    priority_order: Vec<String>,
+}
+
+fn default_threshold() -> f64 { 95.0 }
+fn default_interval() -> u64 { 60 }
+fn default_true() -> bool { true }
 
 #[derive(Debug, Deserialize)]
 struct UploadAuthJsonArgs {
@@ -187,6 +210,24 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
             to_json(set_masked_account_ids(args.ids).await?)
         }
         "check_codex_processes" => to_json(check_codex_processes().await?),
+        "get_auto_switch_config" => to_json(get_auto_switch_config().await?),
+        "set_auto_switch_config" => {
+            let args: AutoSwitchConfigArgs = parse_args(payload)?;
+            let config = crate::types::AutoSwitchConfig {
+                enabled: args.enabled,
+                threshold_percent: args.threshold_percent,
+                check_interval_seconds: args.check_interval_seconds,
+                respect_weekly_limit: args.respect_weekly_limit,
+                excluded_account_ids: args.excluded_account_ids,
+                priority_order: args.priority_order,
+            };
+            to_json(set_auto_switch_config(config).await?)
+        }
+        "start_auto_switch" => to_json(start_auto_switch().await?),
+        "stop_auto_switch" => to_json(stop_auto_switch().await?),
+        "auto_switch_status" => to_json(auto_switch_status()?),
+        "get_auto_switch_events" => to_json(get_auto_switch_events().await?),
+        "clear_auto_switch_events" => to_json(clear_auto_switch_events()?),
         _ => Err(format!("Unsupported web command: {command}")),
     }
 }

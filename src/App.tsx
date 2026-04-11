@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useAccounts } from "./hooks/useAccounts";
-import { AccountCard, AddAccountModal, UpdateChecker } from "./components";
+import { useAutoSwitch } from "./hooks/useAutoSwitch";
+import { AccountCard, AddAccountModal, AutoSwitchSettings, UpdateChecker } from "./components";
 import type { CodexProcessInfo } from "./types";
 import {
   exportFullBackupFile,
@@ -60,7 +61,20 @@ function App() {
     "deadline_asc" | "deadline_desc" | "remaining_desc" | "remaining_asc"
   >("deadline_asc");
   const [isActionsMenuOpen, setIsActionsMenuOpen] = useState(false);
+  const [isAutoSwitchModalOpen, setIsAutoSwitchModalOpen] = useState(false);
   const actionsMenuRef = useRef<HTMLDivElement | null>(null);
+
+  const {
+    config: autoSwitchConfig,
+    isRunning: isAutoSwitchRunning,
+    events: autoSwitchEvents,
+    loading: autoSwitchLoading,
+    error: autoSwitchError,
+    saveConfig: saveAutoSwitchConfig,
+    start: startAutoSwitch,
+    stop: stopAutoSwitch,
+    clearEvents: clearAutoSwitchEvents,
+  } = useAutoSwitch();
 
   const toggleMask = (accountId: string) => {
     setMaskedAccounts((prev) => {
@@ -455,6 +469,20 @@ function App() {
                   </span>
                 )}
               </button>
+              <button
+                onClick={() => setIsAutoSwitchModalOpen(true)}
+                className={`h-10 px-4 py-2 text-sm font-medium rounded-lg transition-colors shrink-0 whitespace-nowrap ${
+                  isAutoSwitchRunning
+                    ? "bg-green-100 text-green-700 hover:bg-green-200"
+                    : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                }`}
+                title="Auto-switch settings"
+              >
+                <span className="flex items-center gap-2">
+                  <span>{isAutoSwitchRunning ? "🔄" : "⚙️"}</span>
+                  {isAutoSwitchRunning ? "Auto" : "Auto-Switch"}
+                </span>
+              </button>
 
               <div className="relative" ref={actionsMenuRef}>
                 <button
@@ -767,6 +795,39 @@ function App() {
                   {isImportingSlim ? "Importing..." : "Import Missing Accounts"}
                 </button>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Auto-Switch Settings Modal */}
+      {isAutoSwitchModalOpen && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white border border-gray-200 rounded-2xl w-full max-w-md mx-4 shadow-xl">
+            <div className="flex items-center justify-between p-5 border-b border-gray-100">
+              <h2 className="text-lg font-semibold text-gray-900">
+                Auto-Switch Settings
+              </h2>
+              <button
+                onClick={() => setIsAutoSwitchModalOpen(false)}
+                className="text-gray-400 hover:text-gray-600 transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="p-5">
+              <AutoSwitchSettings
+                config={autoSwitchConfig}
+                isRunning={isAutoSwitchRunning}
+                events={autoSwitchEvents}
+                accounts={accounts}
+                loading={autoSwitchLoading}
+                error={autoSwitchError}
+                onConfigChange={saveAutoSwitchConfig}
+                onStart={startAutoSwitch}
+                onStop={stopAutoSwitch}
+                onClearEvents={clearAutoSwitchEvents}
+              />
             </div>
           </div>
         </div>

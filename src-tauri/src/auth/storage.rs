@@ -251,3 +251,52 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
     save_accounts(&store)?;
     Ok(())
 }
+
+/// Get the path to auto-switch config file
+pub fn get_auto_switch_config_file() -> Result<PathBuf> {
+    Ok(get_config_dir()?.join("auto_switch_config.json"))
+}
+
+/// Load auto-switch configuration
+pub fn load_auto_switch_config() -> Result<crate::types::AutoSwitchConfig> {
+    let path = get_auto_switch_config_file()?;
+
+    if !path.exists() {
+        return Ok(crate::types::AutoSwitchConfig::default());
+    }
+
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read auto-switch config: {}", path.display()))?;
+
+    let config: crate::types::AutoSwitchConfig = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse auto-switch config: {}", path.display()))?;
+
+    Ok(config)
+}
+
+/// Save auto-switch configuration
+pub fn save_auto_switch_config(config: &crate::types::AutoSwitchConfig) -> Result<()> {
+    let path = get_auto_switch_config_file()?;
+
+    // Ensure the config directory exists
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create config directory: {}", parent.display()))?;
+    }
+
+    let content =
+        serde_json::to_string_pretty(config).context("Failed to serialize auto-switch config")?;
+
+    fs::write(&path, content)
+        .with_context(|| format!("Failed to write auto-switch config: {}", path.display()))?;
+
+    // Set restrictive permissions on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::Permissions::from_mode(0o600);
+        fs::set_permissions(&path, perms)?;
+    }
+
+    Ok(())
+}

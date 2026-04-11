@@ -248,6 +248,73 @@ pub struct WarmupSummary {
     pub failed_account_ids: Vec<String>,
 }
 
+/// Auto-switch configuration for automatic account rotation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoSwitchConfig {
+    /// Whether auto-switch is enabled
+    #[serde(default)]
+    pub enabled: bool,
+    /// Usage threshold percentage to trigger switch (0-100)
+    /// Switches when usage >= this value
+    #[serde(default = "default_threshold")]
+    pub threshold_percent: f64,
+    /// Interval in seconds between usage checks
+    #[serde(default = "default_interval")]
+    pub check_interval_seconds: u64,
+    /// Whether to respect weekly (secondary) limit in addition to primary
+    #[serde(default = "default_true")]
+    pub respect_weekly_limit: bool,
+    /// Accounts to exclude from auto-switch (by ID)
+    #[serde(default)]
+    pub excluded_account_ids: Vec<String>,
+    /// Priority order for accounts (by ID), empty means auto-order by remaining quota
+    #[serde(default)]
+    pub priority_order: Vec<String>,
+}
+
+fn default_threshold() -> f64 { 95.0 }
+fn default_interval() -> u64 { 60 }
+fn default_true() -> bool { true }
+
+impl Default for AutoSwitchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold_percent: default_threshold(),
+            check_interval_seconds: default_interval(),
+            respect_weekly_limit: true,
+            excluded_account_ids: Vec::new(),
+            priority_order: Vec::new(),
+        }
+    }
+}
+
+/// Result of an auto-switch event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoSwitchEvent {
+    /// Timestamp of the event
+    pub timestamp: i64,
+    /// Account that was switched from
+    pub from_account_id: String,
+    /// Account that was switched to
+    pub to_account_id: String,
+    /// Reason for the switch
+    pub reason: AutoSwitchReason,
+    /// Usage percentage that triggered the switch
+    pub triggered_at_percent: f64,
+}
+
+/// Reason for auto-switch
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AutoSwitchReason {
+    /// Primary (5-hour) limit threshold reached
+    PrimaryLimitReached,
+    /// Weekly (secondary) limit threshold reached
+    WeeklyLimitReached,
+    /// Both limits reached
+    BothLimitsReached,
+}
+
 /// Import summary for account config import operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportAccountsSummary {
