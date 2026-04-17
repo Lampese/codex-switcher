@@ -1,11 +1,16 @@
 //! Account management Tauri commands
 
 use crate::auth::{
-    add_account, create_chatgpt_account_from_refresh_token, get_active_account,
-    import_from_auth_json, import_from_auth_json_contents, load_accounts, remove_account,
-    save_accounts, set_active_account, switch_to_account, touch_account,
+    add_account, clear_queued_account, create_chatgpt_account_from_refresh_token,
+    get_active_account, get_switch_state as load_switch_state, import_from_auth_json,
+    import_from_auth_json_contents, load_accounts, remove_account, save_accounts,
+    set_active_account, set_queued_account, switch_to_account, touch_account,
 };
-use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
+use crate::commands::process::has_running_codex_processes;
+use crate::types::{
+    AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount, SwitchActionResult,
+    SwitchOutcome, SwitchReason, SwitchState,
+};
 
 use anyhow::Context;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -125,7 +130,7 @@ pub async fn add_account_from_auth_json_text(
 
 /// Switch to a different account
 #[tauri::command]
-pub async fn switch_account(account_id: String) -> Result<(), String> {
+pub async fn switch_account(account_id: String) -> Result<SwitchActionResult, String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
 
     // Find the account
@@ -135,11 +140,21 @@ pub async fn switch_account(account_id: String) -> Result<(), String> {
         .find(|a| a.id == account_id)
         .ok_or_else(|| format!("Account not found: {account_id}"))?;
 
+    if has_running_codex_processes().map_err(|e| e.to_string())? {
+        set_queued_account(&account_id, SwitchReason::Manual).map_err(|e| e.to_string())?;
+        return Ok(SwitchActionResult {
+            outcome: SwitchOutcome::QueuedForNextSession,
+            account_id: Some(account_id),
+            state: load_switch_state().map_err(|e| e.to_string())?,
+        });
+    }
+
     // Write to ~/.codex/auth.json
     switch_to_account(account).map_err(|e| e.to_string())?;
 
     // Update the active account in our store
     set_active_account(&account_id).map_err(|e| e.to_string())?;
+    clear_queued_account().map_err(|e| e.to_string())?;
 
     // Update last_used_at
     touch_account(&account_id).map_err(|e| e.to_string())?;
@@ -164,7 +179,79 @@ pub async fn switch_account(account_id: String) -> Result<(), String> {
         }
     }
 
-    Ok(())
+    Ok(SwitchActionResult {
+        outcome: SwitchOutcome::SwitchedNow,
+        account_id: Some(account_id),
+        state: load_switch_state().map_err(|e| e.to_string())?,
+    })
+}
+
+#[tauri::command]
+pub async fn clear_queued_switch() -> Result<SwitchActionResult, String> {
+    clear_queued_account().map_err(|e| e.to_string())?;
+    Ok(SwitchActionResult {
+        outcome: SwitchOutcome::ClearedQueued,
+        account_id: None,
+        state: load_switch_state().map_err(|e| e.to_string())?,
+    })
+}
+
+#[tauri::command]
+pub async fn queue_account_for_next_session(
+    account_id: String,
+    reason: SwitchReason,
+) -> Result<SwitchActionResult, String> {
+    set_queued_account(&account_id, reason).map_err(|e| e.to_string())?;
+    Ok(SwitchActionResult {
+        outcome: SwitchOutcome::QueuedForNextSession,
+        account_id: Some(account_id),
+        state: load_switch_state().map_err(|e| e.to_string())?,
+    })
+}
+
+#[tauri::command]
+pub async fn get_switch_state() -> Result<SwitchState, String> {
+    load_switch_state().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn apply_queued_account_if_possible() -> Result<SwitchActionResult, String> {
+    if has_running_codex_processes().map_err(|e| e.to_string())? {
+        return Ok(SwitchActionResult {
+            outcome: SwitchOutcome::Noop,
+            account_id: None,
+            state: load_switch_state().map_err(|e| e.to_string())?,
+        });
+    }
+
+    let store = load_accounts().map_err(|e| e.to_string())?;
+    let queued_id = match store.queued_account_id.clone() {
+        Some(id) => id,
+        None => {
+            return Ok(SwitchActionResult {
+                outcome: SwitchOutcome::Noop,
+                account_id: None,
+                state: SwitchState::from_store(&store),
+            });
+        }
+    };
+
+    let account = store
+        .accounts
+        .iter()
+        .find(|a| a.id == queued_id)
+        .ok_or_else(|| format!("Queued account not found: {queued_id}"))?;
+
+    switch_to_account(account).map_err(|e| e.to_string())?;
+    set_active_account(&queued_id).map_err(|e| e.to_string())?;
+    clear_queued_account().map_err(|e| e.to_string())?;
+    touch_account(&queued_id).map_err(|e| e.to_string())?;
+
+    Ok(SwitchActionResult {
+        outcome: SwitchOutcome::AppliedQueued,
+        account_id: Some(queued_id),
+        state: load_switch_state().map_err(|e| e.to_string())?,
+    })
 }
 
 /// Remove an account
@@ -482,6 +569,10 @@ async fn build_store_from_slim_payload(
         accounts,
         active_account_id,
         masked_account_ids: Vec::new(),
+        queued_account_id: None,
+        queued_reason: None,
+        queued_at: None,
+        switch_policy: crate::types::SwitchPolicy::NextSessionOnly,
     })
 }
 
