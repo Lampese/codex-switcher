@@ -14,6 +14,9 @@ interface AccountCardProps {
   warmingUp?: boolean;
   masked?: boolean;
   onToggleMask?: () => void;
+  queued?: boolean;
+  switchLabel?: string;
+  switchTitle?: string;
 }
 
 function formatLastRefresh(date: Date | null): string {
@@ -50,6 +53,9 @@ export function AccountCard({
   warmingUp,
   masked = false,
   onToggleMask,
+  queued = false,
+  switchLabel,
+  switchTitle,
 }: AccountCardProps) {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(
@@ -134,6 +140,11 @@ export function AccountCard({
               <span className="flex h-2 w-2">
                 <span className="animate-ping absolute inline-flex h-2 w-2 rounded-full bg-green-400 opacity-75"></span>
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+              </span>
+            )}
+            {queued && !account.is_active && (
+              <span className="px-2 py-0.5 text-[11px] font-medium rounded-full border bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-900/30 dark:text-sky-300 dark:border-sky-700">
+                Queued next
               </span>
             )}
             {isEditing ? (
@@ -224,9 +235,9 @@ export function AccountCard({
                 ? "bg-gray-200 text-gray-400 cursor-not-allowed"
                 : "bg-gray-900 hover:bg-gray-800 text-white"
             }`}
-            title={switchDisabled ? "Close all Codex processes first" : undefined}
+            title={switchTitle}
           >
-            {switching ? "Switching..." : switchDisabled ? "Codex Running" : "Switch"}
+            {switching ? "Working..." : switchLabel ?? (switchDisabled ? "Queue Next" : "Switch Now")}
           </button>
         )}
         <button
