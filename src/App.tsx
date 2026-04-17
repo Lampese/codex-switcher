@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useAccounts } from "./hooks/useAccounts";
-import { AccountCard, AddAccountModal, UpdateChecker } from "./components";
-import type { CodexProcessInfo } from "./types";
+import { useAutoSwitch } from "./hooks/useAutoSwitch";
+import { AccountCard, AddAccountModal, AutoSwitchSettings, UpdateChecker } from "./components";
+import type { CodexProcessInfo, SwitchState } from "./types";
 import {
   exportFullBackupFile,
   importFullBackupFile,
@@ -33,6 +34,10 @@ function App() {
     cancelOAuthLogin,
     loadMaskedAccountIds,
     saveMaskedAccountIds,
+    loadSwitchState,
+    applyQueuedAccount,
+    clearQueuedSwitch,
+    queueAccountForNextSession,
   } = useAccounts();
 
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -44,9 +49,11 @@ function App() {
   const [configModalError, setConfigModalError] = useState<string | null>(null);
   const [configCopied, setConfigCopied] = useState(false);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
+  const [switchState, setSwitchState] = useState<SwitchState | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [processInfo, setProcessInfo] = useState<CodexProcessInfo | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const previousHadRunningProcessesRef = useRef(false);
   const [isExportingSlim, setIsExportingSlim] = useState(false);
   const [isImportingSlim, setIsImportingSlim] = useState(false);
   const [isExportingFull, setIsExportingFull] = useState(false);
@@ -63,6 +70,7 @@ function App() {
     "deadline_asc" | "deadline_desc" | "remaining_desc" | "remaining_asc"
   >("deadline_asc");
   const [isActionsMenuOpen, setIsActionsMenuOpen] = useState(false);
+  const [isAutoSwitchModalOpen, setIsAutoSwitchModalOpen] = useState(false);
   const actionsMenuRef = useRef<HTMLDivElement | null>(null);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
     if (typeof window === "undefined") return "light";
@@ -73,6 +81,18 @@ function App() {
       return "light";
     }
   });
+
+  const {
+    config: autoSwitchConfig,
+    isRunning: isAutoSwitchRunning,
+    events: autoSwitchEvents,
+    loading: autoSwitchLoading,
+    error: autoSwitchError,
+    saveConfig: saveAutoSwitchConfig,
+    start: startAutoSwitch,
+    stop: stopAutoSwitch,
+    clearEvents: clearAutoSwitchEvents,
+  } = useAutoSwitch();
 
   const toggleMask = (accountId: string) => {
     setMaskedAccounts((prev) => {
@@ -103,10 +123,26 @@ function App() {
     try {
       const info = await invokeBackend<CodexProcessInfo>("check_codex_processes");
       setProcessInfo(info);
+
+      const hasRunning = info.count > 0;
+      const hadRunning = previousHadRunningProcessesRef.current;
+      previousHadRunningProcessesRef.current = hasRunning;
+
+      if (hadRunning && !hasRunning) {
+        const result = await applyQueuedAccount();
+        setSwitchState(result.state);
+        if (result.outcome === "applied_queued" && result.account_id) {
+          const accountList = await loadAccounts(true);
+          const applied = accountList.find((account) => account.id === result.account_id);
+          showWarmupToast(
+            `Applied queued account: ${applied?.name ?? "Next account"}`
+          );
+        }
+      }
     } catch (err) {
       console.error("Failed to check processes:", err);
     }
-  }, []);
+  }, [applyQueuedAccount, loadAccounts]);
 
   // Check processes on mount and periodically
   useEffect(() => {
@@ -114,6 +150,12 @@ function App() {
     const interval = setInterval(checkProcesses, 3000); // Check every 3 seconds
     return () => clearInterval(interval);
   }, [checkProcesses]);
+
+  useEffect(() => {
+    loadSwitchState()
+      .then((state) => setSwitchState(state))
+      .catch((err) => console.error("Failed to load switch state:", err));
+  }, [loadSwitchState]);
 
   // Load masked accounts from storage on mount
   useEffect(() => {
@@ -149,19 +191,26 @@ function App() {
   }, [themeMode]);
 
   const handleSwitch = async (accountId: string) => {
-    // Check processes before switching
-    await checkProcesses();
-    if (processInfo && !processInfo.can_switch) {
-      return;
-    }
-
     try {
       setSwitchingId(accountId);
-      await switchAccount(accountId);
+      const result = await switchAccount(accountId);
+      setSwitchState(result.state);
+
+      if (result.outcome === "queued_for_next_session") {
+        const queued = accounts.find((account) => account.id === accountId);
+        showWarmupToast(
+          `Queued ${queued?.name ?? "account"} for the next session`
+        );
+      } else if (result.outcome === "switched_now") {
+        const switched = accounts.find((account) => account.id === accountId);
+        showWarmupToast(`Switched to ${switched?.name ?? "account"}`);
+      }
     } catch (err) {
       console.error("Failed to switch account:", err);
+      showWarmupToast(`Switch failed: ${formatWarmupError(err)}`, true);
     } finally {
       setSwitchingId(null);
+      await checkProcesses();
     }
   };
 
@@ -189,6 +238,34 @@ function App() {
       setTimeout(() => setRefreshSuccess(false), 2000);
     } finally {
       setIsRefreshing(false);
+    }
+  };
+
+  const handleApplyQueued = async () => {
+    try {
+      const result = await applyQueuedAccount();
+      setSwitchState(result.state);
+      if (result.outcome === "applied_queued" && result.account_id) {
+        const accountList = await loadAccounts(true);
+        const applied = accountList.find((account) => account.id === result.account_id);
+        showWarmupToast(`Applied queued account: ${applied?.name ?? "account"}`);
+      } else {
+        showWarmupToast("No queued account was applied");
+      }
+    } catch (err) {
+      console.error("Failed to apply queued account:", err);
+      showWarmupToast(`Apply failed: ${formatWarmupError(err)}`, true);
+    }
+  };
+
+  const handleClearQueued = async () => {
+    try {
+      const result = await clearQueuedSwitch();
+      setSwitchState(result.state);
+      showWarmupToast("Cleared queued next-session account");
+    } catch (err) {
+      console.error("Failed to clear queued switch:", err);
+      showWarmupToast(`Clear failed: ${formatWarmupError(err)}`, true);
     }
   };
 
@@ -345,6 +422,9 @@ function App() {
   const activeAccount = accounts.find((a) => a.is_active);
   const otherAccounts = accounts.filter((a) => !a.is_active);
   const hasRunningProcesses = processInfo && processInfo.count > 0;
+  const queuedAccount = switchState?.queued_account_id
+    ? accounts.find((account) => account.id === switchState.queued_account_id)
+    : undefined;
 
   const sortedOtherAccounts = useMemo(() => {
     const getResetDeadline = (resetAt: number | null | undefined) =>
@@ -389,6 +469,63 @@ function App() {
     });
   }, [otherAccounts, otherAccountsSort]);
 
+  const evaluateAutoQueueCandidate = useCallback(() => {
+    if (!autoSwitchConfig?.enabled || !activeAccount?.usage) return null;
+    const activeUsage = activeAccount.usage.primary_used_percent;
+    if (activeUsage == null || activeUsage < autoSwitchConfig.threshold_percent) return null;
+
+    const excluded = new Set(autoSwitchConfig.excluded_account_ids);
+    const priority = new Map(autoSwitchConfig.priority_order.map((id, index) => [id, index]));
+
+    const candidates = otherAccounts.filter((account) => {
+      if (excluded.has(account.id)) return false;
+      if (maskedAccounts.has(account.id)) return false;
+      if (!account.usage || account.usage.error) return false;
+      if (account.usage.primary_used_percent == null) return false;
+      if (account.usage.primary_used_percent >= autoSwitchConfig.threshold_percent) return false;
+      if (
+        autoSwitchConfig.respect_weekly_limit &&
+        account.usage.secondary_used_percent != null &&
+        account.usage.secondary_used_percent >= autoSwitchConfig.threshold_percent
+      ) {
+        return false;
+      }
+      return true;
+    });
+
+    if (candidates.length === 0) return null;
+
+    return [...candidates].sort((a, b) => {
+      const priorityDiff = (priority.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (priority.get(b.id) ?? Number.MAX_SAFE_INTEGER);
+      if (priorityDiff !== 0) return priorityDiff;
+
+      const remainingA = 100 - (a.usage?.primary_used_percent ?? 100);
+      const remainingB = 100 - (b.usage?.primary_used_percent ?? 100);
+      if (remainingB !== remainingA) return remainingB - remainingA;
+
+      const resetA = a.usage?.primary_resets_at ?? Number.POSITIVE_INFINITY;
+      const resetB = b.usage?.primary_resets_at ?? Number.POSITIVE_INFINITY;
+      if (resetA !== resetB) return resetA - resetB;
+
+      return a.name.localeCompare(b.name);
+    })[0];
+  }, [activeAccount, autoSwitchConfig, maskedAccounts, otherAccounts]);
+
+  useEffect(() => {
+    const candidate = evaluateAutoQueueCandidate();
+    if (!candidate) return;
+    if (switchState?.queued_account_id === candidate.id) return;
+
+    void queueAccountForNextSession(candidate.id, "threshold")
+      .then((result) => {
+        setSwitchState(result.state);
+        showWarmupToast(`Auto-queued ${candidate.name} for the next session`);
+      })
+      .catch((err) => {
+        console.error("Failed to auto-queue account:", err);
+      });
+  }, [evaluateAutoQueueCandidate, queueAccountForNextSession, switchState?.queued_account_id]);
+
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
       {/* Header */}
@@ -424,7 +561,7 @@ function App() {
                   )}
                 </div>
                 <p className="text-xs text-gray-500 dark:text-gray-400">
-                  Multi-account manager for Codex CLI
+                  Multi-account manager for Codex CLI · auto-switch applies on the next session only
                 </p>
               </div>
             </div>
@@ -476,6 +613,20 @@ function App() {
                     <span>⚡</span> Warm-up All
                   </span>
                 )}
+              </button>
+              <button
+                onClick={() => setIsAutoSwitchModalOpen(true)}
+                className={`h-10 px-4 py-2 text-sm font-medium rounded-lg transition-colors shrink-0 whitespace-nowrap ${
+                  isAutoSwitchRunning
+                    ? "bg-green-100 text-green-700 hover:bg-green-200 dark:bg-green-900/30 dark:text-green-300 dark:hover:bg-green-900/40"
+                    : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 dark:text-gray-200"
+                }`}
+                title="Auto-switch settings"
+              >
+                <span className="flex items-center gap-2">
+                  <span>{isAutoSwitchRunning ? "🔄" : "⚙️"}</span>
+                  {isAutoSwitchRunning ? "Auto" : "Auto-Switch"}
+                </span>
               </button>
               <button
                 onClick={() => setThemeMode((prev) => (prev === "dark" ? "light" : "dark"))}
@@ -553,6 +704,64 @@ function App() {
 
       {/* Main Content */}
       <main className="max-w-5xl mx-auto px-6 py-8">
+        <div className="space-y-4 mb-6">
+          <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4">
+            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div>
+                <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                  Auto-switch (next session only)
+                </p>
+                <p className="text-sm text-gray-600 dark:text-gray-300 mt-1">
+                  Running Codex sessions are never interrupted. When you switch while Codex is active,
+                  the next account is queued and applied after the current session ends.
+                </p>
+              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">
+                Policy: {switchState?.switch_policy ?? "next_session_only"}
+              </div>
+            </div>
+          </div>
+
+          {queuedAccount && (
+            <div className="rounded-2xl border border-sky-200 dark:border-sky-800 bg-sky-50 dark:bg-sky-950/30 p-4">
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <p className="text-sm font-semibold text-sky-900 dark:text-sky-200">
+                    Next account queued: {queuedAccount.name}
+                  </p>
+                  <p className="text-sm text-sky-700 dark:text-sky-300 mt-1">
+                    {hasRunningProcesses
+                      ? "Will be applied automatically after the current Codex session ends."
+                      : "Ready to apply now. No Codex process is currently running."}
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  {!hasRunningProcesses && (
+                    <button
+                      onClick={handleApplyQueued}
+                      className="px-4 py-2 text-sm font-medium rounded-lg bg-sky-600 hover:bg-sky-700 text-white transition-colors"
+                    >
+                      Apply now
+                    </button>
+                  )}
+                  <button
+                    onClick={handleClearQueued}
+                    className="px-4 py-2 text-sm font-medium rounded-lg bg-white dark:bg-gray-900 border border-sky-200 dark:border-sky-700 text-sky-700 dark:text-sky-200 hover:bg-sky-100 dark:hover:bg-sky-900/40 transition-colors"
+                  >
+                    Clear queue
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {hasRunningProcesses && !queuedAccount && (
+            <div className="rounded-2xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 p-4 text-sm text-amber-800 dark:text-amber-200">
+              Codex is running. Immediate account switching is disabled; selecting another account will queue it for the next session.
+            </div>
+          )}
+        </div>
+
         {loading && accounts.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20">
             <div className="animate-spin h-10 w-10 border-2 border-gray-900 dark:border-gray-100 border-t-transparent rounded-full mb-4"></div>
@@ -599,10 +808,11 @@ function App() {
                   onRefresh={() => refreshSingleUsage(activeAccount.id)}
                   onRename={(newName) => renameAccount(activeAccount.id, newName)}
                   switching={switchingId === activeAccount.id}
-                  switchDisabled={hasRunningProcesses ?? false}
+                  switchDisabled={false}
                   warmingUp={isWarmingAll || warmingUpId === activeAccount.id}
                   masked={maskedAccounts.has(activeAccount.id)}
                   onToggleMask={() => toggleMask(activeAccount.id)}
+                  switchLabel="Active now"
                 />
               </section>
             )}
@@ -667,7 +877,22 @@ function App() {
                       onRefresh={() => refreshSingleUsage(account.id)}
                       onRename={(newName) => renameAccount(account.id, newName)}
                       switching={switchingId === account.id}
-                      switchDisabled={hasRunningProcesses ?? false}
+                      switchDisabled={false}
+                      queued={switchState?.queued_account_id === account.id}
+                      switchLabel={
+                        switchState?.queued_account_id === account.id
+                          ? "Queued Next"
+                          : hasRunningProcesses
+                            ? "Queue Next"
+                            : "Switch Now"
+                      }
+                      switchTitle={
+                        switchState?.queued_account_id === account.id
+                          ? "This account will be applied when the current Codex session ends."
+                          : hasRunningProcesses
+                            ? "Codex is running. This will queue the account for the next session."
+                            : "Apply this account immediately because no Codex process is running."
+                      }
                       warmingUp={isWarmingAll || warmingUpId === account.id}
                       masked={maskedAccounts.has(account.id)}
                       onToggleMask={() => toggleMask(account.id)}
@@ -799,6 +1024,39 @@ function App() {
         </div>
       )}
       <UpdateChecker />
+
+      {/* Auto-Switch Settings Modal */}
+      {isAutoSwitchModalOpen && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white border border-gray-200 rounded-2xl w-full max-w-md mx-4 shadow-xl">
+            <div className="flex items-center justify-between p-5 border-b border-gray-100">
+              <h2 className="text-lg font-semibold text-gray-900">
+                Auto-Switch Settings
+              </h2>
+              <button
+                onClick={() => setIsAutoSwitchModalOpen(false)}
+                className="text-gray-400 hover:text-gray-600 transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="p-5">
+              <AutoSwitchSettings
+                config={autoSwitchConfig}
+                isRunning={isAutoSwitchRunning}
+                events={autoSwitchEvents}
+                accounts={accounts}
+                loading={autoSwitchLoading}
+                error={autoSwitchError}
+                onConfigChange={saveAutoSwitchConfig}
+                onStart={startAutoSwitch}
+                onStop={stopAutoSwitch}
+                onClearEvents={clearAutoSwitchEvents}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

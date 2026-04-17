@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::types::{AccountsStore, AuthData, StoredAccount};
+use crate::types::{AccountsStore, AuthData, StoredAccount, SwitchReason, SwitchState};
 
 /// Get the path to the codex-switcher config directory
 pub fn get_config_dir() -> Result<PathBuf> {
@@ -77,6 +77,9 @@ pub fn add_account(account: StoredAccount) -> Result<StoredAccount> {
     // If this is the first account, make it active
     if store.accounts.len() == 1 {
         store.active_account_id = Some(account_clone.id.clone());
+        store.queued_account_id = None;
+        store.queued_reason = None;
+        store.queued_at = None;
     }
 
     save_accounts(&store)?;
@@ -99,6 +102,12 @@ pub fn remove_account(account_id: &str) -> Result<()> {
         store.active_account_id = store.accounts.first().map(|a| a.id.clone());
     }
 
+    if store.queued_account_id.as_deref() == Some(account_id) {
+        store.queued_account_id = None;
+        store.queued_reason = None;
+        store.queued_at = None;
+    }
+
     save_accounts(&store)?;
     Ok(())
 }
@@ -115,6 +124,37 @@ pub fn set_active_account(account_id: &str) -> Result<()> {
     store.active_account_id = Some(account_id.to_string());
     save_accounts(&store)?;
     Ok(())
+}
+
+/// Queue an account for the next session.
+pub fn set_queued_account(account_id: &str, reason: SwitchReason) -> Result<()> {
+    let mut store = load_accounts()?;
+
+    if !store.accounts.iter().any(|a| a.id == account_id) {
+        anyhow::bail!("Account not found: {account_id}");
+    }
+
+    store.queued_account_id = Some(account_id.to_string());
+    store.queued_reason = Some(reason);
+    store.queued_at = Some(chrono::Utc::now());
+    save_accounts(&store)?;
+    Ok(())
+}
+
+/// Clear any queued account.
+pub fn clear_queued_account() -> Result<()> {
+    let mut store = load_accounts()?;
+    store.queued_account_id = None;
+    store.queued_reason = None;
+    store.queued_at = None;
+    save_accounts(&store)?;
+    Ok(())
+}
+
+/// Return the current queued switch state.
+pub fn get_switch_state() -> Result<SwitchState> {
+    let store = load_accounts()?;
+    Ok(SwitchState::from_store(&store))
 }
 
 /// Get an account by ID
@@ -249,5 +289,54 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
     let mut store = load_accounts()?;
     store.masked_account_ids = ids;
     save_accounts(&store)?;
+    Ok(())
+}
+
+/// Get the path to auto-switch config file
+pub fn get_auto_switch_config_file() -> Result<PathBuf> {
+    Ok(get_config_dir()?.join("auto_switch_config.json"))
+}
+
+/// Load auto-switch configuration
+pub fn load_auto_switch_config() -> Result<crate::types::AutoSwitchConfig> {
+    let path = get_auto_switch_config_file()?;
+
+    if !path.exists() {
+        return Ok(crate::types::AutoSwitchConfig::default());
+    }
+
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read auto-switch config: {}", path.display()))?;
+
+    let config: crate::types::AutoSwitchConfig = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse auto-switch config: {}", path.display()))?;
+
+    Ok(config)
+}
+
+/// Save auto-switch configuration
+pub fn save_auto_switch_config(config: &crate::types::AutoSwitchConfig) -> Result<()> {
+    let path = get_auto_switch_config_file()?;
+
+    // Ensure the config directory exists
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create config directory: {}", parent.display()))?;
+    }
+
+    let content =
+        serde_json::to_string_pretty(config).context("Failed to serialize auto-switch config")?;
+
+    fs::write(&path, content)
+        .with_context(|| format!("Failed to write auto-switch config: {}", path.display()))?;
+
+    // Set restrictive permissions on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::Permissions::from_mode(0o600);
+        fs::set_permissions(&path, perms)?;
+    }
+
     Ok(())
 }

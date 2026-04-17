@@ -16,6 +16,18 @@ pub struct AccountsStore {
     /// Set of account IDs that are masked (hidden)
     #[serde(default)]
     pub masked_account_ids: Vec<String>,
+    /// Account queued for the next Codex session.
+    #[serde(default)]
+    pub queued_account_id: Option<String>,
+    /// Why the account was queued.
+    #[serde(default)]
+    pub queued_reason: Option<SwitchReason>,
+    /// When the queued switch was created.
+    #[serde(default)]
+    pub queued_at: Option<DateTime<Utc>>,
+    /// Safe switching policy.
+    #[serde(default)]
+    pub switch_policy: SwitchPolicy,
 }
 
 impl Default for AccountsStore {
@@ -25,8 +37,28 @@ impl Default for AccountsStore {
             accounts: Vec::new(),
             active_account_id: None,
             masked_account_ids: Vec::new(),
+            queued_account_id: None,
+            queued_reason: None,
+            queued_at: None,
+            switch_policy: SwitchPolicy::NextSessionOnly,
         }
     }
+}
+
+/// Why an account switch was queued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchReason {
+    Manual,
+    Threshold,
+}
+
+/// Safe switching policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchPolicy {
+    #[default]
+    NextSessionOnly,
 }
 
 /// A stored account with all its metadata and credentials
@@ -95,24 +127,27 @@ impl StoredAccount {
 
 /// Authentication mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum AuthMode {
     /// Using an OpenAI API key
+    #[serde(rename = "api_key")]
     ApiKey,
     /// Using ChatGPT OAuth tokens
+    #[serde(rename = "chat_gpt", alias = "chatgpt", alias = "chat_g_p_t")]
     ChatGPT,
 }
 
 /// Authentication data (credentials)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type")]
 pub enum AuthData {
     /// API key authentication
+    #[serde(rename = "api_key")]
     ApiKey {
         /// The API key
         key: String,
     },
     /// ChatGPT OAuth authentication
+    #[serde(rename = "chat_gpt", alias = "chat_g_p_t")]
     ChatGPT {
         /// JWT ID token containing user info
         id_token: String,
@@ -189,6 +224,88 @@ impl AccountInfo {
     }
 }
 
+/// Persistent switch state shown in the UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwitchState {
+    pub active_account_id: Option<String>,
+    pub queued_account_id: Option<String>,
+    pub queued_reason: Option<SwitchReason>,
+    pub queued_at: Option<DateTime<Utc>>,
+    pub switch_policy: SwitchPolicy,
+}
+
+impl SwitchState {
+    pub fn from_store(store: &AccountsStore) -> Self {
+        Self {
+            active_account_id: store.active_account_id.clone(),
+            queued_account_id: store.queued_account_id.clone(),
+            queued_reason: store.queued_reason,
+            queued_at: store.queued_at,
+            switch_policy: store.switch_policy,
+        }
+    }
+}
+
+/// Outcome of a switch action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchOutcome {
+    SwitchedNow,
+    QueuedForNextSession,
+    AppliedQueued,
+    ClearedQueued,
+    Noop,
+}
+
+/// Result returned to the UI when switching or applying queued state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwitchActionResult {
+    pub outcome: SwitchOutcome,
+    pub account_id: Option<String>,
+    pub state: SwitchState,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AuthData, AuthMode};
+
+    #[test]
+    fn auth_mode_serializes_to_chat_gpt() {
+        let json = serde_json::to_string(&AuthMode::ChatGPT).expect("serialize auth mode");
+        assert_eq!(json, "\"chat_gpt\"");
+    }
+
+    #[test]
+    fn auth_mode_accepts_legacy_spellings() {
+        let legacy: AuthMode = serde_json::from_str("\"chatgpt\"").expect("legacy auth mode");
+        assert_eq!(legacy, AuthMode::ChatGPT);
+
+        let snake_case_acronym: AuthMode =
+            serde_json::from_str("\"chat_g_p_t\"").expect("acronym auth mode");
+        assert_eq!(snake_case_acronym, AuthMode::ChatGPT);
+    }
+
+    #[test]
+    fn auth_data_accepts_legacy_chat_gpt_tag() {
+        let data = r#"{
+            "type": "chat_g_p_t",
+            "id_token": "id",
+            "access_token": "access",
+            "refresh_token": "refresh",
+            "account_id": "acct"
+        }"#;
+
+        let parsed: AuthData = serde_json::from_str(data).expect("parse legacy auth data");
+
+        match parsed {
+            AuthData::ChatGPT { account_id, .. } => {
+                assert_eq!(account_id.as_deref(), Some("acct"));
+            }
+            AuthData::ApiKey { .. } => panic!("expected chatgpt auth data"),
+        }
+    }
+}
+
 /// Usage information for an account
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageInfo {
@@ -246,6 +363,73 @@ pub struct WarmupSummary {
     pub warmed_accounts: usize,
     /// Account IDs whose warm-up request failed
     pub failed_account_ids: Vec<String>,
+}
+
+/// Auto-switch configuration for automatic account rotation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoSwitchConfig {
+    /// Whether auto-switch is enabled
+    #[serde(default)]
+    pub enabled: bool,
+    /// Usage threshold percentage to trigger switch (0-100)
+    /// Switches when usage >= this value
+    #[serde(default = "default_threshold")]
+    pub threshold_percent: f64,
+    /// Interval in seconds between usage checks
+    #[serde(default = "default_interval")]
+    pub check_interval_seconds: u64,
+    /// Whether to respect weekly (secondary) limit in addition to primary
+    #[serde(default = "default_true")]
+    pub respect_weekly_limit: bool,
+    /// Accounts to exclude from auto-switch (by ID)
+    #[serde(default)]
+    pub excluded_account_ids: Vec<String>,
+    /// Priority order for accounts (by ID), empty means auto-order by remaining quota
+    #[serde(default)]
+    pub priority_order: Vec<String>,
+}
+
+fn default_threshold() -> f64 { 95.0 }
+fn default_interval() -> u64 { 60 }
+fn default_true() -> bool { true }
+
+impl Default for AutoSwitchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold_percent: default_threshold(),
+            check_interval_seconds: default_interval(),
+            respect_weekly_limit: true,
+            excluded_account_ids: Vec::new(),
+            priority_order: Vec::new(),
+        }
+    }
+}
+
+/// Result of an auto-switch event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoSwitchEvent {
+    /// Timestamp of the event
+    pub timestamp: i64,
+    /// Account that was switched from
+    pub from_account_id: String,
+    /// Account that was switched to
+    pub to_account_id: String,
+    /// Reason for the switch
+    pub reason: AutoSwitchReason,
+    /// Usage percentage that triggered the switch
+    pub triggered_at_percent: f64,
+}
+
+/// Reason for auto-switch
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AutoSwitchReason {
+    /// Primary (5-hour) limit threshold reached
+    PrimaryLimitReached,
+    /// Weekly (secondary) limit threshold reached
+    WeeklyLimitReached,
+    /// Both limits reached
+    BothLimitsReached,
 }
 
 /// Import summary for account config import operations.

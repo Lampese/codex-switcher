@@ -45,6 +45,38 @@ export interface CodexProcessInfo {
   pids: number[];
 }
 
+export type SwitchReason = "manual" | "threshold";
+export type SwitchPolicy = "next_session_only";
+export type SwitchOutcome =
+  | "switched_now"
+  | "queued_for_next_session"
+  | "applied_queued"
+  | "cleared_queued"
+  | "noop";
+
+export interface SwitchState {
+  active_account_id: string | null;
+  queued_account_id: string | null;
+  queued_reason: SwitchReason | null;
+  queued_at: string | null;
+  switch_policy: SwitchPolicy;
+}
+
+export interface SwitchActionResult {
+  outcome: SwitchOutcome;
+  account_id: string | null;
+  state: SwitchState;
+}
+
+export interface AutoSwitchConfig {
+  enabled: boolean;
+  threshold_percent: number;
+  check_interval_seconds: number;
+  respect_weekly_limit: boolean;
+  excluded_account_ids: string[];
+  priority_order: string[];
+}
+
 export interface WarmupSummary {
   total_accounts: number;
   warmed_accounts: number;
@@ -55,4 +87,17 @@ export interface ImportAccountsSummary {
   total_in_payload: number;
   imported_count: number;
   skipped_count: number;
+}
+
+export type AutoSwitchReason =
+  | "PrimaryLimitReached"
+  | "WeeklyLimitReached"
+  | "BothLimitsReached";
+
+export interface AutoSwitchEvent {
+  timestamp: number;
+  from_account_id: string;
+  to_account_id: string;
+  reason: AutoSwitchReason;
+  triggered_at_percent: number;
 }

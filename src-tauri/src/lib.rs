@@ -2,16 +2,22 @@
 
 pub mod api;
 pub mod auth;
+pub mod auto_switch;
 pub mod commands;
 pub mod types;
 pub mod web;
 
 use commands::{
-    add_account_from_file, cancel_login, check_codex_processes, complete_login, delete_account,
-    export_accounts_full_encrypted_file, export_accounts_slim_text, get_active_account_info,
-    get_masked_account_ids, get_usage, import_accounts_full_encrypted_file,
-    import_accounts_slim_text, list_accounts, refresh_all_accounts_usage, rename_account,
-    set_masked_account_ids, start_login, switch_account, warmup_account, warmup_all_accounts,
+    add_account_from_file, auto_switch_status, cancel_login, check_codex_processes,
+    clear_auto_switch_events, complete_login, delete_account, export_accounts_full_encrypted_file,
+    export_accounts_slim_text, get_active_account_info, get_auto_switch_config,
+    get_auto_switch_events, get_masked_account_ids, get_switch_state, get_usage,
+    import_accounts_full_encrypted_file, import_accounts_slim_text, list_accounts,
+    refresh_all_accounts_usage, rename_account,
+    set_auto_switch_config, set_masked_account_ids, start_auto_switch, start_login,
+    stop_auto_switch, switch_account, apply_queued_account_if_possible,
+    queue_account_for_next_session,
+    clear_queued_switch, warmup_account, warmup_all_accounts,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -32,6 +38,12 @@ pub fn run() {
             get_active_account_info,
             add_account_from_file,
             switch_account,
+            queue_account_for_next_session,
+            clear_queued_switch,
+            get_switch_state,
+            apply_queued_account_if_possible,
+            get_auto_switch_config,
+            set_auto_switch_config,
             delete_account,
             rename_account,
             export_accounts_slim_text,
@@ -52,6 +64,12 @@ pub fn run() {
             warmup_all_accounts,
             // Process detection
             check_codex_processes,
+            // Auto-switch
+            start_auto_switch,
+            stop_auto_switch,
+            auto_switch_status,
+            get_auto_switch_events,
+            clear_auto_switch_events,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

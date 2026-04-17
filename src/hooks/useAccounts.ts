@@ -5,6 +5,10 @@ import type {
   AccountWithUsage,
   WarmupSummary,
   ImportAccountsSummary,
+  SwitchActionResult,
+  SwitchState,
+  AutoSwitchConfig,
+  SwitchReason,
 } from "../types";
 import { invokeBackend, type FileSource } from "../lib/platform";
 
@@ -197,14 +201,51 @@ export function useAccounts() {
   const switchAccount = useCallback(
     async (accountId: string) => {
       try {
-        await invokeBackend("switch_account", { accountId });
+        const result = await invokeBackend<SwitchActionResult>("switch_account", { accountId });
         await loadAccounts(true); // Preserve usage data
+        return result;
       } catch (err) {
         throw err;
       }
     },
     [loadAccounts]
   );
+
+  const loadSwitchState = useCallback(async () => {
+    return invokeBackend<SwitchState>("get_switch_state");
+  }, []);
+
+  const applyQueuedAccount = useCallback(async () => {
+    const result = await invokeBackend<SwitchActionResult>("apply_queued_account_if_possible");
+    await loadAccounts(true);
+    return result;
+  }, [loadAccounts]);
+
+  const clearQueuedSwitch = useCallback(async () => {
+    const result = await invokeBackend<SwitchActionResult>("clear_queued_switch");
+    await loadAccounts(true);
+    return result;
+  }, [loadAccounts]);
+
+  const queueAccountForNextSession = useCallback(
+    async (accountId: string, reason: SwitchReason) => {
+      const result = await invokeBackend<SwitchActionResult>("queue_account_for_next_session", {
+        accountId,
+        reason,
+      });
+      await loadAccounts(true);
+      return result;
+    },
+    [loadAccounts]
+  );
+
+  const loadAutoSwitchConfig = useCallback(async () => {
+    return invokeBackend<AutoSwitchConfig>("get_auto_switch_config");
+  }, []);
+
+  const saveAutoSwitchConfig = useCallback(async (config: AutoSwitchConfig) => {
+    return invokeBackend<AutoSwitchConfig>("set_auto_switch_config", { config });
+  }, []);
 
   const deleteAccount = useCallback(
     async (accountId: string) => {
@@ -384,5 +425,11 @@ export function useAccounts() {
     cancelOAuthLogin,
     loadMaskedAccountIds,
     saveMaskedAccountIds,
+    loadSwitchState,
+    applyQueuedAccount,
+    clearQueuedSwitch,
+    queueAccountForNextSession,
+    loadAutoSwitchConfig,
+    saveAutoSwitchConfig,
   };
 }
