@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::types::{AccountsStore, AuthData, StoredAccount};
+use crate::types::{AccountsStore, AuthData, StoredAccount, SwitchReason, SwitchState};
 
 /// Get the path to the codex-switcher config directory
 pub fn get_config_dir() -> Result<PathBuf> {
@@ -77,6 +77,9 @@ pub fn add_account(account: StoredAccount) -> Result<StoredAccount> {
     // If this is the first account, make it active
     if store.accounts.len() == 1 {
         store.active_account_id = Some(account_clone.id.clone());
+        store.queued_account_id = None;
+        store.queued_reason = None;
+        store.queued_at = None;
     }
 
     save_accounts(&store)?;
@@ -99,6 +102,12 @@ pub fn remove_account(account_id: &str) -> Result<()> {
         store.active_account_id = store.accounts.first().map(|a| a.id.clone());
     }
 
+    if store.queued_account_id.as_deref() == Some(account_id) {
+        store.queued_account_id = None;
+        store.queued_reason = None;
+        store.queued_at = None;
+    }
+
     save_accounts(&store)?;
     Ok(())
 }
@@ -115,6 +124,37 @@ pub fn set_active_account(account_id: &str) -> Result<()> {
     store.active_account_id = Some(account_id.to_string());
     save_accounts(&store)?;
     Ok(())
+}
+
+/// Queue an account for the next session.
+pub fn set_queued_account(account_id: &str, reason: SwitchReason) -> Result<()> {
+    let mut store = load_accounts()?;
+
+    if !store.accounts.iter().any(|a| a.id == account_id) {
+        anyhow::bail!("Account not found: {account_id}");
+    }
+
+    store.queued_account_id = Some(account_id.to_string());
+    store.queued_reason = Some(reason);
+    store.queued_at = Some(chrono::Utc::now());
+    save_accounts(&store)?;
+    Ok(())
+}
+
+/// Clear any queued account.
+pub fn clear_queued_account() -> Result<()> {
+    let mut store = load_accounts()?;
+    store.queued_account_id = None;
+    store.queued_reason = None;
+    store.queued_at = None;
+    save_accounts(&store)?;
+    Ok(())
+}
+
+/// Return the current queued switch state.
+pub fn get_switch_state() -> Result<SwitchState> {
+    let store = load_accounts()?;
+    Ok(SwitchState::from_store(&store))
 }
 
 /// Get an account by ID

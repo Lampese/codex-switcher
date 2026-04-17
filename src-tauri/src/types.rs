@@ -16,6 +16,18 @@ pub struct AccountsStore {
     /// Set of account IDs that are masked (hidden)
     #[serde(default)]
     pub masked_account_ids: Vec<String>,
+    /// Account queued for the next Codex session.
+    #[serde(default)]
+    pub queued_account_id: Option<String>,
+    /// Why the account was queued.
+    #[serde(default)]
+    pub queued_reason: Option<SwitchReason>,
+    /// When the queued switch was created.
+    #[serde(default)]
+    pub queued_at: Option<DateTime<Utc>>,
+    /// Safe switching policy.
+    #[serde(default)]
+    pub switch_policy: SwitchPolicy,
 }
 
 impl Default for AccountsStore {
@@ -25,8 +37,28 @@ impl Default for AccountsStore {
             accounts: Vec::new(),
             active_account_id: None,
             masked_account_ids: Vec::new(),
+            queued_account_id: None,
+            queued_reason: None,
+            queued_at: None,
+            switch_policy: SwitchPolicy::NextSessionOnly,
         }
     }
+}
+
+/// Why an account switch was queued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchReason {
+    Manual,
+    Threshold,
+}
+
+/// Safe switching policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchPolicy {
+    #[default]
+    NextSessionOnly,
 }
 
 /// A stored account with all its metadata and credentials
@@ -185,6 +217,73 @@ impl AccountInfo {
             is_active: active_id == Some(&account.id),
             created_at: account.created_at,
             last_used_at: account.last_used_at,
+        }
+    }
+}
+
+/// Persistent switch state shown in the UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwitchState {
+    pub active_account_id: Option<String>,
+    pub queued_account_id: Option<String>,
+    pub queued_reason: Option<SwitchReason>,
+    pub queued_at: Option<DateTime<Utc>>,
+    pub switch_policy: SwitchPolicy,
+}
+
+impl SwitchState {
+    pub fn from_store(store: &AccountsStore) -> Self {
+        Self {
+            active_account_id: store.active_account_id.clone(),
+            queued_account_id: store.queued_account_id.clone(),
+            queued_reason: store.queued_reason,
+            queued_at: store.queued_at,
+            switch_policy: store.switch_policy,
+        }
+    }
+}
+
+/// Outcome of a switch action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchOutcome {
+    SwitchedNow,
+    QueuedForNextSession,
+    AppliedQueued,
+    ClearedQueued,
+    Noop,
+}
+
+/// Result returned to the UI when switching or applying queued state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwitchActionResult {
+    pub outcome: SwitchOutcome,
+    pub account_id: Option<String>,
+    pub state: SwitchState,
+}
+
+/// Config for threshold-based next-session auto switch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoSwitchConfig {
+    pub enabled: bool,
+    pub threshold_percent: f64,
+    pub check_interval_seconds: u64,
+    pub respect_weekly_limit: bool,
+    #[serde(default)]
+    pub excluded_account_ids: Vec<String>,
+    #[serde(default)]
+    pub priority_order: Vec<String>,
+}
+
+impl Default for AutoSwitchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold_percent: 95.0,
+            check_interval_seconds: 60,
+            respect_weekly_limit: true,
+            excluded_account_ids: Vec::new(),
+            priority_order: Vec::new(),
         }
     }
 }

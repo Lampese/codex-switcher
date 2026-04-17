@@ -115,6 +115,11 @@ fn find_codex_processes() -> anyhow::Result<(Vec<u32>, usize)> {
     Ok((Vec::new(), 0))
 }
 
+pub fn has_running_codex_processes() -> anyhow::Result<bool> {
+    let (pids, _) = find_codex_processes()?;
+    Ok(!pids.is_empty())
+}
+
 #[cfg(windows)]
 fn find_windows_codex_processes() -> anyhow::Result<(Vec<u32>, usize)> {
     // tasklist counts every Electron helper (`--type=gpu-process`, crashpad, renderer, etc.),
