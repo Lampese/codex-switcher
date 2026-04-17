@@ -89,15 +89,6 @@ export interface ImportAccountsSummary {
   skipped_count: number;
 }
 
-export interface AutoSwitchConfig {
-  enabled: boolean;
-  threshold_percent: number;
-  check_interval_seconds: number;
-  respect_weekly_limit: boolean;
-  excluded_account_ids: string[];
-  priority_order: string[];
-}
-
 export type AutoSwitchReason =
   | "PrimaryLimitReached"
   | "WeeklyLimitReached"

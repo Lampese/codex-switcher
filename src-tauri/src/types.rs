@@ -127,24 +127,27 @@ impl StoredAccount {
 
 /// Authentication mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum AuthMode {
     /// Using an OpenAI API key
+    #[serde(rename = "api_key")]
     ApiKey,
     /// Using ChatGPT OAuth tokens
+    #[serde(rename = "chat_gpt", alias = "chatgpt", alias = "chat_g_p_t")]
     ChatGPT,
 }
 
 /// Authentication data (credentials)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type")]
 pub enum AuthData {
     /// API key authentication
+    #[serde(rename = "api_key")]
     ApiKey {
         /// The API key
         key: String,
     },
     /// ChatGPT OAuth authentication
+    #[serde(rename = "chat_gpt", alias = "chat_g_p_t")]
     ChatGPT {
         /// JWT ID token containing user info
         id_token: String,
@@ -262,28 +265,43 @@ pub struct SwitchActionResult {
     pub state: SwitchState,
 }
 
-/// Config for threshold-based next-session auto switch.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AutoSwitchConfig {
-    pub enabled: bool,
-    pub threshold_percent: f64,
-    pub check_interval_seconds: u64,
-    pub respect_weekly_limit: bool,
-    #[serde(default)]
-    pub excluded_account_ids: Vec<String>,
-    #[serde(default)]
-    pub priority_order: Vec<String>,
-}
+#[cfg(test)]
+mod tests {
+    use super::{AuthData, AuthMode};
 
-impl Default for AutoSwitchConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            threshold_percent: 95.0,
-            check_interval_seconds: 60,
-            respect_weekly_limit: true,
-            excluded_account_ids: Vec::new(),
-            priority_order: Vec::new(),
+    #[test]
+    fn auth_mode_serializes_to_chat_gpt() {
+        let json = serde_json::to_string(&AuthMode::ChatGPT).expect("serialize auth mode");
+        assert_eq!(json, "\"chat_gpt\"");
+    }
+
+    #[test]
+    fn auth_mode_accepts_legacy_spellings() {
+        let legacy: AuthMode = serde_json::from_str("\"chatgpt\"").expect("legacy auth mode");
+        assert_eq!(legacy, AuthMode::ChatGPT);
+
+        let snake_case_acronym: AuthMode =
+            serde_json::from_str("\"chat_g_p_t\"").expect("acronym auth mode");
+        assert_eq!(snake_case_acronym, AuthMode::ChatGPT);
+    }
+
+    #[test]
+    fn auth_data_accepts_legacy_chat_gpt_tag() {
+        let data = r#"{
+            "type": "chat_g_p_t",
+            "id_token": "id",
+            "access_token": "access",
+            "refresh_token": "refresh",
+            "account_id": "acct"
+        }"#;
+
+        let parsed: AuthData = serde_json::from_str(data).expect("parse legacy auth data");
+
+        match parsed {
+            AuthData::ChatGPT { account_id, .. } => {
+                assert_eq!(account_id.as_deref(), Some("acct"));
+            }
+            AuthData::ApiKey { .. } => panic!("expected chatgpt auth data"),
         }
     }
 }
