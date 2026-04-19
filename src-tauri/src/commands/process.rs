@@ -3,6 +3,9 @@
 use std::process::Command;
 
 #[cfg(windows)]
+use anyhow::Context;
+
+#[cfg(windows)]
 use std::collections::HashSet;
 
 #[cfg(windows)]
