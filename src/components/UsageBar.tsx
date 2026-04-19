@@ -92,9 +92,6 @@ export function UsageBar({ usage, loading }: UsageBarProps) {
         <div className="h-1.5 bg-gray-100 dark:bg-gray-800 rounded-full overflow-hidden animate-pulse">
           <div className="h-full w-2/3 bg-gray-200 dark:bg-gray-700"></div>
         </div>
-        <div className="h-1.5 bg-gray-100 dark:bg-gray-800 rounded-full overflow-hidden animate-pulse">
-          <div className="h-full w-1/2 bg-gray-200 dark:bg-gray-700"></div>
-        </div>
       </div>
     );
   }

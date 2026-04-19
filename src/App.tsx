@@ -1,16 +1,22 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAccounts } from "./hooks/useAccounts";
 import { AccountCard, AddAccountModal, UpdateChecker } from "./components";
 import type { CodexProcessInfo } from "./types";
 import {
   exportFullBackupFile,
   importFullBackupFile,
+  isTauriRuntime,
   invokeBackend,
 } from "./lib/platform";
 import "./App.css";
 
 const THEME_STORAGE_KEY = "codex-switcher-theme";
 type ThemeMode = "light" | "dark";
+const appWindow = getCurrentWindow();
+const isMacOs =
+  typeof navigator !== "undefined" &&
+  /(Mac|iPhone|iPod|iPad)/i.test(navigator.userAgent);
 
 function App() {
   const {
@@ -73,6 +79,20 @@ function App() {
       return "light";
     }
   });
+  const [isWindowMaximized, setIsWindowMaximized] = useState(false);
+
+  const handleTitlebarDrag = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      if (!isTauriRuntime() || event.button !== 0) return;
+      void appWindow.startDragging();
+    },
+    []
+  );
+
+  const handleTitlebarDoubleClick = useCallback(() => {
+    if (!isTauriRuntime()) return;
+    void appWindow.toggleMaximize();
+  }, []);
 
   const toggleMask = (accountId: string) => {
     setMaskedAccounts((prev) => {
@@ -102,7 +122,19 @@ function App() {
   const checkProcesses = useCallback(async () => {
     try {
       const info = await invokeBackend<CodexProcessInfo>("check_codex_processes");
-      setProcessInfo(info);
+      setProcessInfo((prev) => {
+        if (
+          prev &&
+          prev.can_switch === info.can_switch &&
+          prev.count === info.count &&
+          prev.background_count === info.background_count &&
+          prev.pids.length === info.pids.length &&
+          prev.pids.every((pid, index) => pid === info.pids[index])
+        ) {
+          return prev;
+        }
+        return info;
+      });
     } catch (err) {
       console.error("Failed to check processes:", err);
     }
@@ -111,7 +143,7 @@ function App() {
   // Check processes on mount and periodically
   useEffect(() => {
     checkProcesses();
-    const interval = setInterval(checkProcesses, 3000); // Check every 3 seconds
+    const interval = setInterval(checkProcesses, 5000);
     return () => clearInterval(interval);
   }, [checkProcesses]);
 
@@ -147,6 +179,37 @@ function App() {
       // Ignore storage errors; theme still works for current session.
     }
   }, [themeMode]);
+
+  useEffect(() => {
+    if (!isTauriRuntime() || isMacOs) return;
+
+    let unlisten: (() => void) | undefined;
+
+    const syncMaximizedState = async () => {
+      try {
+        setIsWindowMaximized(await appWindow.isMaximized());
+      } catch (err) {
+        console.error("Failed to read window state:", err);
+      }
+    };
+
+    void syncMaximizedState();
+
+    appWindow
+      .onResized(() => {
+        void syncMaximizedState();
+      })
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch((err) => {
+        console.error("Failed to watch window resize:", err);
+      });
+
+    return () => {
+      unlisten?.();
+    };
+  }, []);
 
   const handleSwitch = async (accountId: string) => {
     // Check processes before switching
@@ -391,12 +454,63 @@ function App() {
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
-      {/* Header */}
-      <header className="sticky top-0 z-40 bg-white border-b border-gray-200 dark:bg-gray-900 dark:border-gray-800">
+      <header className="sticky top-0 z-40 border-b border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-900">
+        <div className="flex h-9 items-center bg-white px-3 dark:bg-gray-900">
+          <div
+            onMouseDown={handleTitlebarDrag}
+            onDoubleClick={handleTitlebarDoubleClick}
+            className={`h-full flex-1 select-none cursor-default ${isMacOs ? "ml-18 mr-2" : "mr-3"}`}
+          />
+          {!isMacOs && (
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => {
+                  void appWindow.minimize();
+                }}
+                className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
+                title="Minimize"
+              >
+                <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                  <path d="M5 12h14" strokeWidth="2" strokeLinecap="round" />
+                </svg>
+              </button>
+              <button
+                onClick={() => {
+                  void appWindow.toggleMaximize();
+                }}
+                className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
+                title={isWindowMaximized ? "Restore" : "Maximize"}
+              >
+                {isWindowMaximized ? (
+                  <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                    <path d="M9 9h10v10H9z" strokeWidth="2" />
+                    <path d="M5 15V5h10" strokeWidth="2" strokeLinecap="round" />
+                  </svg>
+                ) : (
+                  <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                    <rect x="5" y="5" width="14" height="14" strokeWidth="2" />
+                  </svg>
+                )}
+              </button>
+              <button
+                onClick={() => {
+                  void appWindow.close();
+                }}
+                className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-red-500 hover:text-white dark:text-gray-400 dark:hover:bg-red-500 dark:hover:text-white"
+                title="Close"
+              >
+                <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                  <path d="M6 6l12 12M18 6L6 18" strokeWidth="2" strokeLinecap="round" />
+                </svg>
+              </button>
+            </div>
+          )}
+        </div>
+
         <div className="max-w-5xl mx-auto px-6 py-4">
           <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_max-content] md:items-center md:gap-4">
             <div className="flex items-center gap-3 min-w-0 flex-1">
-              <div className="h-10 w-10 rounded-xl bg-gray-900 dark:bg-gray-100 flex items-center justify-center text-white dark:text-gray-900 font-bold text-lg">
+              <div className="h-10 w-10 rounded-xl bg-black flex items-center justify-center text-white font-bold text-lg">
                 C
               </div>
               <div className="min-w-0">
@@ -432,74 +546,64 @@ function App() {
             <div className="flex flex-wrap items-center gap-2 shrink-0 md:ml-4 md:w-max md:flex-nowrap md:justify-end">
               <button
                 onClick={toggleMaskAll}
-                className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors shrink-0 whitespace-nowrap"
+                className="flex h-10 w-10 items-center justify-center rounded-lg bg-gray-100 text-gray-700 transition-colors hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700 shrink-0"
                 title={allMasked ? "Show all account names and emails" : "Hide all account names and emails"}
               >
-                <span className="flex items-center gap-2">
-                  {allMasked ? (
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"
-                      />
-                    </svg>
-                  ) : (
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                    </svg>
-                  )}
-                  {allMasked ? "Show All" : "Hide All"}
-                </span>
+                {allMasked ? (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"
+                    />
+                  </svg>
+                ) : (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                  </svg>
+                )}
               </button>
               <button
                 onClick={handleRefresh}
                 disabled={isRefreshing}
-                className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-50 shrink-0 whitespace-nowrap"
+                className="flex h-10 w-10 items-center justify-center rounded-lg bg-gray-100 text-gray-700 transition-colors hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700 shrink-0"
+                title={isRefreshing ? "Refreshing all usage" : "Refresh all usage"}
               >
-                {isRefreshing ? "↻ Refreshing..." : "↻ Refresh All"}
+                <span className={isRefreshing ? "animate-spin inline-block" : ""}>↻</span>
               </button>
               <button
                 onClick={handleWarmupAll}
                 disabled={isWarmingAll || accounts.length === 0}
-                className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-50 shrink-0 whitespace-nowrap"
+                className="flex h-10 w-10 items-center justify-center rounded-lg bg-gray-100 text-gray-700 transition-colors hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700 shrink-0"
                 title="Send minimal traffic using all accounts"
               >
-                {isWarmingAll ? (
-                  <span className="flex items-center gap-2">
-                    <span className="animate-pulse">⚡</span> Warming...
-                  </span>
-                ) : (
-                  <span className="flex items-center gap-2">
-                    <span>⚡</span> Warm-up All
-                  </span>
-                )}
+                <span className={isWarmingAll ? "animate-pulse" : ""}>⚡</span>
               </button>
               <button
                 onClick={() => setThemeMode((prev) => (prev === "dark" ? "light" : "dark"))}
-                className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors shrink-0 whitespace-nowrap"
+                className="flex h-10 w-10 items-center justify-center rounded-lg bg-gray-100 text-lg text-gray-700 transition-colors hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700 shrink-0"
                 title={themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"}
               >
-                {themeMode === "dark" ? "☀ Light" : "☾ Dark"}
+                {themeMode === "dark" ? "☀" : "☾"}
               </button>
 
               <div className="relative" ref={actionsMenuRef}>
                 <button
                   onClick={() => setIsActionsMenuOpen((prev) => !prev)}
-                  className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors shrink-0 whitespace-nowrap"
+                  className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-900 text-white transition-colors hover:bg-gray-800 dark:bg-black dark:hover:bg-neutral-900 shrink-0 whitespace-nowrap"
                 >
                   Account ▾
                 </button>
                 {isActionsMenuOpen && (
-                  <div className="absolute right-0 mt-2 w-56 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-xl p-2 z-50">
+                  <div className="absolute right-0 z-50 mt-2 w-56 rounded-xl border border-gray-200 bg-white p-2 text-gray-700 shadow-xl dark:border-neutral-800 dark:bg-black dark:text-white">
                     <button
                       onClick={() => {
                         setIsActionsMenuOpen(false);
                         setIsAddModalOpen(true);
                       }}
-                      className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-200"
+                      className="w-full rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 dark:text-white dark:hover:bg-neutral-900"
                     >
                       + Add Account
                     </button>
@@ -509,7 +613,7 @@ function App() {
                         void handleExportSlimText();
                       }}
                       disabled={isExportingSlim}
-                      className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-200 disabled:opacity-50"
+                      className="w-full rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 disabled:opacity-50 dark:text-white dark:hover:bg-neutral-900"
                     >
                       {isExportingSlim ? "Exporting..." : "Export Slim Text"}
                     </button>
@@ -519,7 +623,7 @@ function App() {
                         openImportSlimTextModal();
                       }}
                       disabled={isImportingSlim}
-                      className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-200 disabled:opacity-50"
+                      className="w-full rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 disabled:opacity-50 dark:text-white dark:hover:bg-neutral-900"
                     >
                       {isImportingSlim ? "Importing..." : "Import Slim Text"}
                     </button>
@@ -529,7 +633,7 @@ function App() {
                         void handleExportFullFile();
                       }}
                       disabled={isExportingFull}
-                      className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-200 disabled:opacity-50"
+                      className="w-full rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 disabled:opacity-50 dark:text-white dark:hover:bg-neutral-900"
                     >
                       {isExportingFull ? "Exporting..." : "Export Full Encrypted File"}
                     </button>
@@ -539,7 +643,7 @@ function App() {
                         void handleImportFullFile();
                       }}
                       disabled={isImportingFull}
-                      className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-200 disabled:opacity-50"
+                      className="w-full rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 disabled:opacity-50 dark:text-white dark:hover:bg-neutral-900"
                     >
                       {isImportingFull ? "Importing..." : "Import Full Encrypted File"}
                     </button>

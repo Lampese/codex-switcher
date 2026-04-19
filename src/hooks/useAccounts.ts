@@ -90,57 +90,59 @@ export function useAccounts() {
 
   const refreshUsage = useCallback(
     async (accountList?: AccountInfo[] | AccountWithUsage[]) => {
-    try {
-      const list = accountList ?? accountsRef.current;
-      if (list.length === 0) {
-        return;
+      try {
+        const list = accountList ?? accountsRef.current;
+        if (list.length === 0) {
+          return;
+        }
+
+        const accountIds = list.map((account) => account.id);
+        const accountIdSet = new Set(accountIds);
+        const usageResults = new Map<string, UsageInfo>();
+
+        setAccounts((prev) =>
+          prev.map((account) =>
+            accountIdSet.has(account.id)
+              ? { ...account, usageLoading: true }
+              : account
+          )
+        );
+
+        await runWithConcurrency(
+          list,
+          async (account) => {
+            try {
+              const usage = await invokeBackend<UsageInfo>("get_usage", {
+                accountId: account.id,
+              });
+              usageResults.set(account.id, usage);
+            } catch (err) {
+              console.error("Failed to refresh usage:", err);
+              const message = err instanceof Error ? err.message : String(err);
+              usageResults.set(
+                account.id,
+                buildUsageError(account.id, message, account.plan_type ?? null)
+              );
+            }
+          },
+          maxConcurrentUsageRequests
+        );
+
+        setAccounts((prev) =>
+          prev.map((account) => {
+            const usage = usageResults.get(account.id);
+            if (!usage) return account;
+            return {
+              ...account,
+              usage,
+              usageLoading: false,
+            };
+          })
+        );
+      } catch (err) {
+        console.error("Failed to refresh usage:", err);
+        throw err;
       }
-
-      const accountIds = list.map((account) => account.id);
-      const accountIdSet = new Set(accountIds);
-
-      setAccounts((prev) =>
-        prev.map((account) =>
-          accountIdSet.has(account.id)
-            ? { ...account, usageLoading: true }
-            : account
-        )
-      );
-
-      await runWithConcurrency(
-        accountIds,
-        async (accountId) => {
-          try {
-            const usage = await invokeBackend<UsageInfo>("get_usage", { accountId });
-            setAccounts((prev) =>
-              prev.map((account) =>
-                account.id === accountId
-                  ? { ...account, usage, usageLoading: false }
-                  : account
-              )
-            );
-          } catch (err) {
-            console.error("Failed to refresh usage:", err);
-            const message = err instanceof Error ? err.message : String(err);
-            setAccounts((prev) =>
-              prev.map((account) =>
-                account.id === accountId
-                  ? {
-                      ...account,
-                      usage: buildUsageError(accountId, message, account.plan_type ?? null),
-                      usageLoading: false,
-                    }
-                  : account
-              )
-            );
-          }
-        },
-        maxConcurrentUsageRequests
-      );
-    } catch (err) {
-      console.error("Failed to refresh usage:", err);
-      throw err;
-    }
     },
     [buildUsageError, maxConcurrentUsageRequests, runWithConcurrency]
   );
