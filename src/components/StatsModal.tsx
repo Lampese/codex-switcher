@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import type {
   ClaudeStats,
   DailyModelData,
@@ -54,6 +54,10 @@ function fmtModelName(model: string): string {
   return model;
 }
 
+function startOfLocalDay(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
 function accumulateBreakdowns(
   dailyData: DailyModelData[],
   cutoff: string | null
@@ -78,7 +82,10 @@ function accumulateBreakdowns(
 }
 
 function isoDate(d: Date): string {
-  return d.toISOString().slice(0, 10);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function cutoffDate(range: TimeRange): string | null {
@@ -94,7 +101,8 @@ type TabId = "overview" | "models";
 // ── Heatmap calendar ─────────────────────────────────────────────────────────
 
 function HeatmapCalendar({ heatmap }: { heatmap: ClaudeStats["heatmap"] }) {
-  const today = new Date();
+  const today = startOfLocalDay(new Date());
+  const scrollRef = useRef<HTMLDivElement | null>(null);
   // Start from the Sunday 52 full weeks back
   const start = new Date(today);
   start.setDate(start.getDate() - start.getDay() - 52 * 7);
@@ -113,6 +121,12 @@ function HeatmapCalendar({ heatmap }: { heatmap: ClaudeStats["heatmap"] }) {
   const q1 = sorted[Math.floor(sorted.length * 0.25)] ?? 1;
   const q2 = sorted[Math.floor(sorted.length * 0.5)] ?? 1;
   const q3 = sorted[Math.floor(sorted.length * 0.75)] ?? 1;
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollLeft = el.scrollWidth - el.clientWidth;
+  }, [heatmap]);
 
   function level(count: number): number {
     if (count === 0) return 0;
@@ -145,7 +159,7 @@ function HeatmapCalendar({ heatmap }: { heatmap: ClaudeStats["heatmap"] }) {
   }
 
   return (
-    <div className="overflow-x-auto">
+    <div ref={scrollRef} className="overflow-x-auto">
       <div className="flex gap-[3px]">
         {weeks.map((week, wi) => (
           <div key={wi} className="flex flex-col gap-[3px]">
