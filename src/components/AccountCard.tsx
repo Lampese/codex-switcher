@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import type { AccountWithUsage } from "../types";
 import { UsageBar } from "./UsageBar";
+import { useI18n } from "../i18n";
 
 interface AccountCardProps {
   account: AccountWithUsage;
@@ -16,30 +17,42 @@ interface AccountCardProps {
   onToggleMask?: () => void;
 }
 
-function formatLastRefresh(date: Date | null): string {
-  if (!date) return "Never";
+function formatLastRefresh(
+  date: Date | null,
+  locale: string,
+  t: (key: string, params?: Record<string, string | number>) => string
+): string {
+  if (!date) return t("account.refresh.never");
   const now = new Date();
   const diff = Math.floor((now.getTime() - date.getTime()) / 1000);
-  if (diff < 5) return "Just now";
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return date.toLocaleDateString();
+  if (diff < 5) return t("account.refresh.justNow");
+  if (diff < 60) return t("account.refresh.secondsAgo", { count: diff });
+  if (diff < 3600) {
+    return t("account.refresh.minutesAgo", { count: Math.floor(diff / 60) });
+  }
+  if (diff < 86400) {
+    return t("account.refresh.hoursAgo", { count: Math.floor(diff / 3600) });
+  }
+  return date.toLocaleDateString(locale);
 }
 
-function getSubscriptionStatus(timestamp: string | null | undefined): {
+function getSubscriptionStatus(
+  timestamp: string | null | undefined,
+  locale: string,
+  t: (key: string, params?: Record<string, string | number>) => string
+): {
   label: string;
   className: string;
 } {
   if (!timestamp) {
     return {
-      label: "Expiry unavailable",
+      label: t("account.subscription.unavailable"),
       className: "text-gray-400 dark:text-gray-500",
     };
   }
 
   const expiryDate = new Date(timestamp);
-  const formattedDate = new Intl.DateTimeFormat(undefined, {
+  const formattedDate = new Intl.DateTimeFormat(locale, {
     month: "short",
     day: "numeric",
     year: "numeric",
@@ -48,27 +61,27 @@ function getSubscriptionStatus(timestamp: string | null | undefined): {
   const remainingMs = expiryDate.getTime() - Date.now();
   if (remainingMs <= 0) {
     return {
-      label: `Expired ${formattedDate}`,
+      label: t("account.subscription.expired", { date: formattedDate }),
       className: "text-red-500 dark:text-red-400",
     };
   }
 
   if (remainingMs <= 3 * 24 * 60 * 60 * 1000) {
     return {
-      label: `Until ${formattedDate}`,
+      label: t("account.subscription.until", { date: formattedDate }),
       className: "text-red-500 dark:text-red-400",
     };
   }
 
   if (remainingMs <= 7 * 24 * 60 * 60 * 1000) {
     return {
-      label: `Until ${formattedDate}`,
+      label: t("account.subscription.until", { date: formattedDate }),
       className: "text-amber-500 dark:text-amber-400",
     };
   }
 
   return {
-    label: `Until ${formattedDate}`,
+    label: t("account.subscription.until", { date: formattedDate }),
     className: "text-gray-400 dark:text-gray-500",
   };
 }
@@ -97,6 +110,7 @@ export function AccountCard({
   masked = false,
   onToggleMask,
 }: AccountCardProps) {
+  const { t, locale } = useI18n();
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(
     account.usage && !account.usage.error ? new Date() : null
@@ -148,8 +162,8 @@ export function AccountCard({
   const planDisplay = account.plan_type
     ? account.plan_type.charAt(0).toUpperCase() + account.plan_type.slice(1)
     : account.auth_mode === "api_key"
-      ? "API Key"
-      : "Unknown";
+      ? t("account.plan.apiKey")
+      : t("account.plan.unknown");
 
   const planColors: Record<string, string> = {
     pro: "bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-700",
@@ -163,7 +177,11 @@ export function AccountCard({
   const planKey = account.plan_type?.toLowerCase() || "api_key";
   const planColorClass = planColors[planKey] || planColors.free;
   const showSubscriptionStatus = account.auth_mode === "chat_g_p_t";
-  const subscriptionStatus = getSubscriptionStatus(account.subscription_expires_at);
+  const subscriptionStatus = getSubscriptionStatus(
+    account.subscription_expires_at,
+    locale,
+    t
+  );
 
 
   return (
@@ -202,7 +220,7 @@ export function AccountCard({
                   setEditName(account.name);
                   setIsEditing(true);
                 }}
-                title={masked ? undefined : "Click to rename"}
+                title={masked ? undefined : t("account.title.rename")}
               >
                 <BlurredText blur={masked}>{account.name}</BlurredText>
               </h3>
@@ -221,7 +239,7 @@ export function AccountCard({
             <button
               onClick={onToggleMask}
               className="p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
-              title={masked ? "Show info" : "Hide info"}
+              title={masked ? t("account.mask.showInfo") : t("account.mask.hideInfo")}
             >
               {masked ? (
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -252,7 +270,9 @@ export function AccountCard({
       {/* Last refresh time */}
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs mb-3">
         <div className="text-gray-400 dark:text-gray-500">
-          Last updated: {formatLastRefresh(lastRefresh)}
+          {t("account.lastUpdated", {
+            value: formatLastRefresh(lastRefresh, locale, t),
+          })}
         </div>
         {showSubscriptionStatus && (
           <div className={`text-right ${subscriptionStatus.className}`}>
@@ -268,7 +288,7 @@ export function AccountCard({
             disabled
             className="flex-1 px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700 cursor-default"
           >
-            ✓ Active
+            {t("account.button.active")}
           </button>
         ) : (
           <button
@@ -279,9 +299,15 @@ export function AccountCard({
                 ? "bg-gray-200 dark:bg-gray-800 text-gray-400 dark:text-gray-500 cursor-not-allowed"
                 : "bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900"
             }`}
-            title={switchDisabled ? "Close all Codex processes first" : undefined}
+            title={
+              switchDisabled ? t("account.button.switchDisabledTitle") : undefined
+            }
           >
-            {switching ? "Switching..." : switchDisabled ? "Codex Running" : "Switch"}
+            {switching
+              ? t("account.button.switching")
+              : switchDisabled
+                ? t("account.button.codexRunning")
+                : t("account.button.switch")}
           </button>
         )}
         <button
@@ -294,7 +320,11 @@ export function AccountCard({
               ? "bg-amber-100 dark:bg-amber-900/30 text-amber-500 dark:text-amber-300"
               : "bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-100 dark:hover:bg-amber-900/40 text-amber-700 dark:text-amber-300"
           }`}
-          title={warmingUp ? "Sending warm-up request..." : "Send minimal warm-up request"}
+          title={
+            warmingUp
+              ? t("account.button.warmupInProgress")
+              : t("account.button.warmup")
+          }
         >
           ⚡
         </button>
@@ -306,14 +336,14 @@ export function AccountCard({
               ? "bg-gray-200 dark:bg-gray-800 text-gray-400 dark:text-gray-500"
               : "bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300"
           }`}
-          title="Refresh usage"
+          title={t("account.button.refresh")}
         >
           <span className={isRefreshing ? "animate-spin inline-block" : ""}>↻</span>
         </button>
         <button
           onClick={onDelete}
           className="px-3 py-2 text-sm rounded-lg bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-300 transition-colors"
-          title="Remove account"
+          title={t("account.button.remove")}
         >
           ✕
         </button>

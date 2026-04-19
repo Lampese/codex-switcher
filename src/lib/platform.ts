@@ -106,8 +106,11 @@ export async function importFullBackupFile(): Promise<ImportAccountsSummary | nu
   });
 }
 
-export function describeFileSource(source: FileSource | null): string {
-  if (!source) return "No file selected";
+export function describeFileSource(
+  source: FileSource | null,
+  emptyLabel = "No file selected"
+): string {
+  if (!source) return emptyLabel;
   return typeof source === "string" ? source : source.name;
 }
 

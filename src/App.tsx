@@ -7,12 +7,14 @@ import {
   importFullBackupFile,
   invokeBackend,
 } from "./lib/platform";
+import { useI18n, type Language } from "./i18n";
 import "./App.css";
 
 const THEME_STORAGE_KEY = "codex-switcher-theme";
 type ThemeMode = "light" | "dark";
 
 function App() {
+  const { t, locale, language, setLanguage } = useI18n();
   const {
     accounts,
     loading,
@@ -203,13 +205,13 @@ function App() {
   };
 
   const formatWarmupError = (err: unknown) => {
-    if (!err) return "Unknown error";
+    if (!err) return t("app.errors.unknown");
     if (err instanceof Error && err.message) return err.message;
     if (typeof err === "string") return err;
     try {
       return JSON.stringify(err);
     } catch {
-      return "Unknown error";
+      return t("app.errors.unknown");
     }
   };
 
@@ -217,11 +219,16 @@ function App() {
     try {
       setWarmingUpId(accountId);
       await warmupAccount(accountId);
-      showWarmupToast(`Warm-up sent for ${accountName}`);
+      showWarmupToast(
+        t("app.warmup.toast.single", { name: accountName })
+      );
     } catch (err) {
       console.error("Failed to warm up account:", err);
       showWarmupToast(
-        `Warm-up failed for ${accountName}: ${formatWarmupError(err)}`,
+        t("app.warmup.toast.error", {
+          name: accountName,
+          error: formatWarmupError(err),
+        }),
         true
       );
     } finally {
@@ -234,25 +241,34 @@ function App() {
       setIsWarmingAll(true);
       const summary = await warmupAllAccounts();
       if (summary.total_accounts === 0) {
-        showWarmupToast("No accounts available for warm-up", true);
+        showWarmupToast(t("app.warmup.toast.noAccounts"), true);
         return;
       }
 
       if (summary.failed_account_ids.length === 0) {
+        const successKey =
+          summary.warmed_accounts === 1
+            ? "app.warmup.toast.success.one"
+            : "app.warmup.toast.success.other";
         showWarmupToast(
-          `Warm-up sent for all ${summary.warmed_accounts} account${
-            summary.warmed_accounts === 1 ? "" : "s"
-          }`
+          t(successKey, { count: summary.warmed_accounts })
         );
       } else {
         showWarmupToast(
-          `Warmed ${summary.warmed_accounts}/${summary.total_accounts}. Failed: ${summary.failed_account_ids.length}`,
+          t("app.warmup.toast.partial", {
+            warmed: summary.warmed_accounts,
+            total: summary.total_accounts,
+            failed: summary.failed_account_ids.length,
+          }),
           true
         );
       }
     } catch (err) {
       console.error("Failed to warm up all accounts:", err);
-      showWarmupToast(`Warm-up all failed: ${formatWarmupError(err)}`, true);
+      showWarmupToast(
+        t("app.warmup.toast.allError", { error: formatWarmupError(err) }),
+        true
+      );
     } finally {
       setIsWarmingAll(false);
     }
@@ -269,12 +285,14 @@ function App() {
       setIsExportingSlim(true);
       const payload = await exportAccountsSlimText();
       setConfigPayload(payload);
-      showWarmupToast(`Slim text exported (${accounts.length} accounts).`);
+      showWarmupToast(
+        t("app.toast.slimExportSuccess", { count: accounts.length })
+      );
     } catch (err) {
       console.error("Failed to export slim text:", err);
       const message = err instanceof Error ? err.message : String(err);
       setConfigModalError(message);
-      showWarmupToast("Slim export failed", true);
+      showWarmupToast(t("app.toast.slimExportFail"), true);
     } finally {
       setIsExportingSlim(false);
     }
@@ -290,7 +308,7 @@ function App() {
 
   const handleImportSlimText = async () => {
     if (!configPayload.trim()) {
-      setConfigModalError("Please paste the slim text string first.");
+      setConfigModalError(t("app.config.error.pasteFirst"));
       return;
     }
 
@@ -301,13 +319,17 @@ function App() {
       setMaskedAccounts(new Set());
       setIsConfigModalOpen(false);
       showWarmupToast(
-        `Imported ${summary.imported_count}, skipped ${summary.skipped_count} (total ${summary.total_in_payload})`
+        t("app.toast.importSummary", {
+          imported: summary.imported_count,
+          skipped: summary.skipped_count,
+          total: summary.total_in_payload,
+        })
       );
     } catch (err) {
       console.error("Failed to import slim text:", err);
       const message = err instanceof Error ? err.message : String(err);
       setConfigModalError(message);
-      showWarmupToast("Slim import failed", true);
+      showWarmupToast(t("app.toast.slimImportFail"), true);
     } finally {
       setIsImportingSlim(false);
     }
@@ -318,10 +340,10 @@ function App() {
       setIsExportingFull(true);
       const exported = await exportFullBackupFile();
       if (!exported) return;
-      showWarmupToast("Full encrypted file exported.");
+      showWarmupToast(t("app.toast.fullExportSuccess"));
     } catch (err) {
       console.error("Failed to export full encrypted file:", err);
-      showWarmupToast("Full export failed", true);
+      showWarmupToast(t("app.toast.fullExportFail"), true);
     } finally {
       setIsExportingFull(false);
     }
@@ -337,11 +359,15 @@ function App() {
       const maskedIds = await loadMaskedAccountIds();
       setMaskedAccounts(new Set(maskedIds));
       showWarmupToast(
-        `Imported ${summary.imported_count}, skipped ${summary.skipped_count} (total ${summary.total_in_payload})`
+        t("app.toast.importSummary", {
+          imported: summary.imported_count,
+          skipped: summary.skipped_count,
+          total: summary.total_in_payload,
+        })
       );
     } catch (err) {
       console.error("Failed to import full encrypted file:", err);
-      showWarmupToast("Full import failed", true);
+      showWarmupToast(t("app.toast.fullImportFail"), true);
     } finally {
       setIsImportingFull(false);
     }
@@ -401,7 +427,7 @@ function App() {
           getRemainingPercent(a.usage?.primary_used_percent);
         if (remainingDiff !== 0) return remainingDiff;
 
-        return a.name.localeCompare(b.name);
+        return a.name.localeCompare(b.name, locale);
       }
 
       if (otherAccountsSort === "deadline_asc" || otherAccountsSort === "deadline_desc") {
@@ -415,7 +441,7 @@ function App() {
           getRemainingPercent(b.usage?.primary_used_percent) -
           getRemainingPercent(a.usage?.primary_used_percent);
         if (remainingDiff !== 0) return remainingDiff;
-        return a.name.localeCompare(b.name);
+        return a.name.localeCompare(b.name, locale);
       }
 
       const remainingDiff =
@@ -431,9 +457,9 @@ function App() {
         getResetDeadline(a.usage?.primary_resets_at) -
         getResetDeadline(b.usage?.primary_resets_at);
       if (deadlineDiff !== 0) return deadlineDiff;
-      return a.name.localeCompare(b.name);
+      return a.name.localeCompare(b.name, locale);
     });
-  }, [otherAccounts, otherAccountsSort]);
+  }, [locale, otherAccounts, otherAccountsSort]);
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
@@ -448,7 +474,7 @@ function App() {
               <div className="min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
                   <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100 tracking-tight">
-                    Codex Switcher
+                    {t("app.title")}
                   </h1>
                   {processInfo && (
                     <span
@@ -463,14 +489,14 @@ function App() {
                       ></span>
                       <span>
                         {hasRunningProcesses
-                          ? `${processInfo.count} Codex running`
-                          : "0 Codex running"}
+                          ? t("app.process.running", { count: processInfo.count })
+                          : t("app.process.none")}
                       </span>
                     </span>
                   )}
                 </div>
                 <p className="text-xs text-gray-500 dark:text-gray-400">
-                  Multi-account manager for Codex CLI
+                  {t("app.subtitle")}
                 </p>
               </div>
             </div>
@@ -479,7 +505,11 @@ function App() {
               <button
                 onClick={toggleMaskAll}
                 className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors shrink-0 whitespace-nowrap"
-                title={allMasked ? "Show all account names and emails" : "Hide all account names and emails"}
+                title={
+                  allMasked
+                    ? t("app.mask.title.showAll")
+                    : t("app.mask.title.hideAll")
+                }
               >
                 <span className="flex items-center gap-2">
                   {allMasked ? (
@@ -497,7 +527,9 @@ function App() {
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
                     </svg>
                   )}
-                  {allMasked ? "Show All" : "Hide All"}
+                  {allMasked
+                    ? t("app.mask.button.showAll")
+                    : t("app.mask.button.hideAll")}
                 </span>
               </button>
               <button
@@ -505,30 +537,38 @@ function App() {
                 disabled={isRefreshing}
                 className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-50 shrink-0 whitespace-nowrap"
               >
-                {isRefreshing ? "↻ Refreshing..." : "↻ Refresh All"}
+                {isRefreshing
+                  ? t("app.refresh.refreshing")
+                  : t("app.refresh.button")}
               </button>
               <button
                 onClick={handleWarmupAll}
                 disabled={isWarmingAll || accounts.length === 0}
                 className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-50 shrink-0 whitespace-nowrap"
-                title="Send minimal traffic using all accounts"
+                title={t("app.warmup.title")}
               >
                 {isWarmingAll ? (
                   <span className="flex items-center gap-2">
-                    <span className="animate-pulse">⚡</span> Warming...
+                    <span className="animate-pulse">⚡</span> {t("app.warmup.warming")}
                   </span>
                 ) : (
                   <span className="flex items-center gap-2">
-                    <span>⚡</span> Warm-up All
+                    <span>⚡</span> {t("app.warmup.button")}
                   </span>
                 )}
               </button>
               <button
                 onClick={() => setThemeMode((prev) => (prev === "dark" ? "light" : "dark"))}
                 className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors shrink-0 whitespace-nowrap"
-                title={themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+                title={
+                  themeMode === "dark"
+                    ? t("app.theme.toLight")
+                    : t("app.theme.toDark")
+                }
               >
-                {themeMode === "dark" ? "☀ Light" : "☾ Dark"}
+                {themeMode === "dark"
+                  ? t("app.theme.light")
+                  : t("app.theme.dark")}
               </button>
 
               <div className="relative" ref={actionsMenuRef}>
@@ -536,10 +576,10 @@ function App() {
                   onClick={() => setIsActionsMenuOpen((prev) => !prev)}
                   className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors shrink-0 whitespace-nowrap"
                 >
-                  Account ▾
+                  {t("app.accountMenu.button")}
                 </button>
                 {isActionsMenuOpen && (
-                  <div className="absolute right-0 mt-2 w-56 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-xl p-2 z-50">
+                  <div className="absolute right-0 mt-2 w-64 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-xl p-2 z-50">
                     <button
                       onClick={() => {
                         setIsActionsMenuOpen(false);
@@ -547,7 +587,7 @@ function App() {
                       }}
                       className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-200"
                     >
-                      + Add Account
+                      {t("app.accountMenu.add")}
                     </button>
                     <button
                       onClick={() => {
@@ -557,7 +597,9 @@ function App() {
                       disabled={isExportingSlim}
                       className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-200 disabled:opacity-50"
                     >
-                      {isExportingSlim ? "Exporting..." : "Export Slim Text"}
+                      {isExportingSlim
+                        ? t("common.exporting")
+                        : t("app.accountMenu.exportSlim")}
                     </button>
                     <button
                       onClick={() => {
@@ -567,7 +609,9 @@ function App() {
                       disabled={isImportingSlim}
                       className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-200 disabled:opacity-50"
                     >
-                      {isImportingSlim ? "Importing..." : "Import Slim Text"}
+                      {isImportingSlim
+                        ? t("common.importing")
+                        : t("app.accountMenu.importSlim")}
                     </button>
                     <button
                       onClick={() => {
@@ -577,7 +621,9 @@ function App() {
                       disabled={isExportingFull}
                       className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-200 disabled:opacity-50"
                     >
-                      {isExportingFull ? "Exporting..." : "Export Full Encrypted File"}
+                      {isExportingFull
+                        ? t("common.exporting")
+                        : t("app.accountMenu.exportFull")}
                     </button>
                     <button
                       onClick={() => {
@@ -587,8 +633,43 @@ function App() {
                       disabled={isImportingFull}
                       className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-200 disabled:opacity-50"
                     >
-                      {isImportingFull ? "Importing..." : "Import Full Encrypted File"}
+                      {isImportingFull
+                        ? t("common.importing")
+                        : t("app.accountMenu.importFull")}
                     </button>
+                    <div className="mt-1 border-t border-gray-200 dark:border-gray-700 pt-2">
+                      <p className="px-3 pb-1 text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                        {t("language.section")}
+                      </p>
+                      <div className="grid grid-cols-3 gap-1">
+                        {([
+                          { code: "en", label: t("language.english") },
+                          { code: "zh", label: t("language.chinese") },
+                          { code: "fr", label: t("language.french") },
+                          { code: "de", label: t("language.german") },
+                          { code: "el", label: t("language.greek") },
+                          { code: "ru", label: t("language.russian") },
+                          { code: "ja", label: t("language.japanese") },
+                          { code: "ko", label: t("language.korean") },
+                          { code: "es", label: t("language.spanish") },
+                        ] as { code: Language; label: string }[]).map((item) => (
+                          <button
+                            key={item.code}
+                            onClick={() => {
+                              setLanguage(item.code);
+                              setIsActionsMenuOpen(false);
+                            }}
+                            className={`px-3 py-2 text-xs rounded-lg transition-colors ${
+                              language === item.code
+                                ? "bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900"
+                                : "bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-700"
+                            }`}
+                          >
+                            {item.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   </div>
                 )}
               </div>
@@ -602,11 +683,15 @@ function App() {
         {loading && accounts.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20">
             <div className="animate-spin h-10 w-10 border-2 border-gray-900 dark:border-gray-100 border-t-transparent rounded-full mb-4"></div>
-            <p className="text-gray-500 dark:text-gray-400">Loading accounts...</p>
+            <p className="text-gray-500 dark:text-gray-400">
+              {t("app.loadingAccounts")}
+            </p>
           </div>
         ) : error ? (
           <div className="text-center py-20">
-            <div className="text-red-600 dark:text-red-300 mb-2">Failed to load accounts</div>
+            <div className="text-red-600 dark:text-red-300 mb-2">
+              {t("app.error.loadAccounts")}
+            </div>
             <p className="text-sm text-gray-500 dark:text-gray-400">{error}</p>
           </div>
         ) : accounts.length === 0 ? (
@@ -615,16 +700,16 @@ function App() {
               <span className="text-3xl">👤</span>
             </div>
             <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100 mb-2">
-              No accounts yet
+              {t("app.empty.title")}
             </h2>
             <p className="text-gray-500 dark:text-gray-400 mb-6">
-              Add your first Codex account to get started
+              {t("app.empty.subtitle")}
             </p>
             <button
               onClick={() => setIsAddModalOpen(true)}
               className="px-6 py-3 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors"
             >
-              Add Account
+              {t("app.empty.add")}
             </button>
           </div>
         ) : (
@@ -633,7 +718,7 @@ function App() {
             {activeAccount && (
               <section>
                 <h2 className="text-sm font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-4">
-                  Active Account
+                  {t("app.section.active")}
                 </h2>
                 <AccountCard
                   account={activeAccount}
@@ -660,11 +745,11 @@ function App() {
               <section>
                 <div className="flex items-center justify-between gap-3 mb-4">
                   <h2 className="text-sm font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    Other Accounts ({otherAccounts.length})
+                    {t("app.section.other", { count: otherAccounts.length })}
                   </h2>
                   <div className="flex items-center gap-2">
                     <label htmlFor="other-accounts-sort" className="text-xs text-gray-500 dark:text-gray-400">
-                      Sort
+                      {t("app.sort.label")}
                     </label>
                     <div className="relative">
                       <select
@@ -683,19 +768,23 @@ function App() {
                         }
                         className="appearance-none font-sans text-xs sm:text-sm font-medium pl-3 pr-9 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-gradient-to-b from-white to-gray-50 dark:from-gray-900 dark:to-gray-800 text-gray-700 dark:text-gray-200 shadow-sm hover:border-gray-400 dark:hover:border-gray-600 hover:shadow focus:outline-none focus:ring-2 focus:ring-gray-300 dark:focus:ring-gray-600 focus:border-gray-400 dark:focus:border-gray-600 transition-all"
                       >
-                        <option value="deadline_asc">Reset: earliest to latest</option>
-                        <option value="deadline_desc">Reset: latest to earliest</option>
+                        <option value="deadline_asc">
+                          {t("app.sort.deadlineAsc")}
+                        </option>
+                        <option value="deadline_desc">
+                          {t("app.sort.deadlineDesc")}
+                        </option>
                         <option value="remaining_desc">
-                          % remaining: highest to lowest
+                          {t("app.sort.remainingDesc")}
                         </option>
                         <option value="remaining_asc">
-                          % remaining: lowest to highest
+                          {t("app.sort.remainingAsc")}
                         </option>
                         <option value="subscription_asc">
-                          Expiry: earliest to latest
+                          {t("app.sort.subscriptionAsc")}
                         </option>
                         <option value="subscription_desc">
-                          Expiry: latest to earliest
+                          {t("app.sort.subscriptionDesc")}
                         </option>
                       </select>
                       <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-gray-500 dark:text-gray-400">
@@ -741,7 +830,7 @@ function App() {
       {/* Refresh Success Toast */}
       {refreshSuccess && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-3 bg-green-600 text-white rounded-lg shadow-lg text-sm flex items-center gap-2">
-          <span>✓</span> Usage refreshed successfully
+          <span>✓</span> {t("app.toast.refreshSuccess")}
         </div>
       )}
 
@@ -761,7 +850,7 @@ function App() {
       {/* Delete Confirmation Toast */}
       {deleteConfirmId && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-3 bg-red-600 text-white rounded-lg shadow-lg text-sm">
-          Click delete again to confirm removal
+          {t("app.toast.deleteConfirm")}
         </div>
       )}
 
@@ -781,7 +870,9 @@ function App() {
           <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-2xl mx-4 shadow-xl">
             <div className="flex items-center justify-between p-5 border-b border-gray-100 dark:border-gray-800">
               <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-                {configModalMode === "slim_export" ? "Export Slim Text" : "Import Slim Text"}
+                {configModalMode === "slim_export"
+                  ? t("app.config.exportTitle")
+                  : t("app.config.importTitle")}
               </h2>
               <button
                 onClick={() => setIsConfigModalOpen(false)}
@@ -793,11 +884,11 @@ function App() {
             <div className="p-5 space-y-4">
               {configModalMode === "slim_import" ? (
                 <p className="text-sm text-amber-700 dark:text-amber-200 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-700 rounded-lg px-3 py-2">
-                  Existing accounts are kept. Only missing accounts are imported.
+                  {t("app.config.importHint")}
                 </p>
               ) : (
                 <p className="text-sm text-gray-500 dark:text-gray-400">
-                  This slim string contains account secrets. Keep it private.
+                  {t("app.config.exportHint")}
                 </p>
               )}
               <textarea
@@ -807,9 +898,9 @@ function App() {
                 placeholder={
                   configModalMode === "slim_export"
                     ? isExportingSlim
-                      ? "Generating..."
-                      : "Export string will appear here"
-                    : "Paste config string here"
+                      ? t("app.config.placeholder.generating")
+                      : t("app.config.placeholder.exportResult")
+                    : t("app.config.placeholder.importPrompt")
                 }
                 className="w-full h-48 px-4 py-3 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-sm text-gray-800 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-gray-400 dark:focus:border-gray-500 focus:ring-1 focus:ring-gray-400 dark:focus:ring-gray-500 font-mono"
               />
@@ -824,7 +915,7 @@ function App() {
                 onClick={() => setIsConfigModalOpen(false)}
                 className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors"
               >
-                Close
+                {t("common.close")}
               </button>
               {configModalMode === "slim_export" ? (
                 <button
@@ -835,13 +926,13 @@ function App() {
                       setConfigCopied(true);
                       setTimeout(() => setConfigCopied(false), 1500);
                     } catch {
-                      setConfigModalError("Clipboard unavailable. Please copy manually.");
+                      setConfigModalError(t("app.config.error.clipboard"));
                     }
                   }}
                   disabled={!configPayload || isExportingSlim}
                   className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors disabled:opacity-50"
                 >
-                  {configCopied ? "Copied" : "Copy String"}
+                  {configCopied ? t("common.copied") : t("app.config.copyString")}
                 </button>
               ) : (
                 <button
@@ -849,7 +940,9 @@ function App() {
                   disabled={isImportingSlim}
                   className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors disabled:opacity-50"
                 >
-                  {isImportingSlim ? "Importing..." : "Import Missing Accounts"}
+                  {isImportingSlim
+                    ? t("common.importing")
+                    : t("app.config.importMissing")}
                 </button>
               )}
             </div>
