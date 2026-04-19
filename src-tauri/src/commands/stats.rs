@@ -7,7 +7,7 @@ use chrono::{DateTime, Duration, Local, NaiveDate, Timelike, Utc};
 use rusqlite::Connection;
 use serde_json::Value;
 
-use crate::types::{ClaudeStats, DailyModelData, HeatmapDay, ModelTokenBreakdown, ModelTotals};
+use crate::types::{CodexStats, DailyModelData, HeatmapDay, ModelTokenBreakdown, ModelTotals};
 
 #[derive(Default)]
 struct DailyModelAccumulator {
@@ -34,7 +34,7 @@ impl ModelAccumulator {
 }
 
 #[tauri::command]
-pub async fn get_claude_stats() -> Result<ClaudeStats, String> {
+pub async fn get_codex_stats() -> Result<CodexStats, String> {
     let home = dirs::home_dir().ok_or_else(|| "Cannot find home directory".to_string())?;
     let codex_dir = home.join(".codex");
     let sessions_root = codex_dir.join("sessions");
@@ -55,16 +55,16 @@ pub async fn get_claude_stats() -> Result<ClaudeStats, String> {
         return load_sqlite_stats(&logs_path);
     }
 
-    Ok(ClaudeStats::empty())
+    Ok(CodexStats::empty())
 }
 
-fn load_session_history_stats(root: &Path) -> Result<ClaudeStats, String> {
+fn load_session_history_stats(root: &Path) -> Result<CodexStats, String> {
     let mut session_files = Vec::new();
     collect_session_files(root, &mut session_files).map_err(|e| e.to_string())?;
     session_files.sort();
 
     if session_files.is_empty() {
-        return Ok(ClaudeStats::empty());
+        return Ok(CodexStats::empty());
     }
 
     let mut message_count = 0u64;
@@ -201,7 +201,7 @@ fn ingest_session_file(
     }
 }
 
-fn load_sqlite_stats(logs_path: &Path) -> Result<ClaudeStats, String> {
+fn load_sqlite_stats(logs_path: &Path) -> Result<CodexStats, String> {
     let conn = Connection::open(logs_path).map_err(|e| e.to_string())?;
 
     let mut session_ids: HashSet<String> = HashSet::new();
@@ -349,7 +349,7 @@ fn build_stats(
     daily_model: HashMap<NaiveDate, HashMap<String, DailyModelAccumulator>>,
     model_totals_acc: HashMap<String, ModelAccumulator>,
     active_dates: BTreeSet<NaiveDate>,
-) -> ClaudeStats {
+) -> CodexStats {
     let mut heatmap: Vec<HeatmapDay> = active_dates
         .iter()
         .map(|date| {
@@ -446,7 +446,7 @@ fn build_stats(
     let total_output_tokens: u64 = model_totals.iter().map(|item| item.output_tokens).sum();
     let total_tokens = total_input_tokens + total_output_tokens;
 
-    ClaudeStats {
+    CodexStats {
         sessions,
         messages,
         total_input_tokens,

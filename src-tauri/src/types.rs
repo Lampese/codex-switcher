@@ -318,7 +318,7 @@ pub struct ModelTokenBreakdown {
 
 /// Aggregated stats from Codex local telemetry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClaudeStats {
+pub struct CodexStats {
     pub sessions: u64,
     pub messages: u64,
     pub total_input_tokens: u64,
@@ -340,7 +340,7 @@ pub struct ClaudeStats {
     pub fun_fact: Option<String>,
 }
 
-impl ClaudeStats {
+impl CodexStats {
     pub fn empty() -> Self {
         Self {
             sessions: 0,

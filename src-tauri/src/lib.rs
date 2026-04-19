@@ -9,7 +9,7 @@ pub mod web;
 use commands::{
     add_account_from_file, cancel_login, check_codex_processes, complete_login, delete_account,
     export_accounts_full_encrypted_file, export_accounts_slim_text, get_active_account_info,
-    get_claude_stats, get_masked_account_ids, get_usage, import_accounts_full_encrypted_file,
+    get_codex_stats, get_masked_account_ids, get_usage, import_accounts_full_encrypted_file,
     import_accounts_slim_text, list_accounts, refresh_all_accounts_usage, rename_account,
     set_masked_account_ids, start_login, switch_account, warmup_account, warmup_all_accounts,
 };
@@ -52,8 +52,8 @@ pub fn run() {
             warmup_all_accounts,
             // Process detection
             check_codex_processes,
-            // Claude Code stats
-            get_claude_stats,
+            // Codex stats
+            get_codex_stats,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -84,7 +84,7 @@ export interface ModelTotals {
   percentage: number;
 }
 
-export interface ClaudeStats {
+export interface CodexStats {
   sessions: number;
   messages: number;
   total_input_tokens: number;

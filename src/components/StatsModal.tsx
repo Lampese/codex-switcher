@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import type {
-  ClaudeStats,
+  CodexStats,
   DailyModelData,
   ModelTokenBreakdown,
   ModelTotals,
@@ -41,12 +41,6 @@ function fmtHour(h: number | null): string {
 }
 
 function fmtModelName(model: string): string {
-  const claudeMatch = model.match(/^claude-([a-z]+)-(\d+)-(\d+)/);
-  if (claudeMatch) {
-    const [, family, maj, min] = claudeMatch;
-    return `${family.charAt(0).toUpperCase()}${family.slice(1)} ${maj}.${min}`;
-  }
-
   if (model.startsWith("gpt-")) {
     return model.toUpperCase();
   }
@@ -100,7 +94,7 @@ type TabId = "overview" | "models";
 
 // ── Heatmap calendar ─────────────────────────────────────────────────────────
 
-function HeatmapCalendar({ heatmap }: { heatmap: ClaudeStats["heatmap"] }) {
+function HeatmapCalendar({ heatmap }: { heatmap: CodexStats["heatmap"] }) {
   const today = startOfLocalDay(new Date());
   const scrollRef = useRef<HTMLDivElement | null>(null);
   // Start from the Sunday 52 full weeks back
@@ -388,7 +382,7 @@ interface StatsModalProps {
 export function StatsModal({ isOpen, onClose }: StatsModalProps) {
   const [tab, setTab] = useState<TabId>("overview");
   const [range, setRange] = useState<TimeRange>("all");
-  const [stats, setStats] = useState<ClaudeStats | null>(null);
+  const [stats, setStats] = useState<CodexStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -396,7 +390,7 @@ export function StatsModal({ isOpen, onClose }: StatsModalProps) {
     if (!isOpen) return;
     setLoading(true);
     setError(null);
-    invokeBackend<ClaudeStats>("get_claude_stats")
+    invokeBackend<CodexStats>("get_codex_stats")
       .then(setStats)
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
@@ -513,7 +507,7 @@ export function StatsModal({ isOpen, onClose }: StatsModalProps) {
 
 // ── Overview tab ──────────────────────────────────────────────────────────────
 
-function OverviewTab({ stats, range }: { stats: ClaudeStats; range: TimeRange }) {
+function OverviewTab({ stats, range }: { stats: CodexStats; range: TimeRange }) {
   // For filtered ranges, recalculate the scalar stats from daily data
   const cutoff = cutoffDate(range);
   const heatmapFiltered = cutoff
@@ -624,7 +618,7 @@ function ModelsTab({
   filteredTotals,
   range,
 }: {
-  stats: ClaudeStats;
+  stats: CodexStats;
   filteredTotals: ModelTotals[];
   range: TimeRange;
 }) {
