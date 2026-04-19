@@ -56,3 +56,40 @@ export interface ImportAccountsSummary {
   imported_count: number;
   skipped_count: number;
 }
+
+// ── Claude Code usage stats ───────────────────────────────────────────────────
+
+export interface HeatmapDay {
+  date: string; // "YYYY-MM-DD"
+  count: number;
+}
+
+export interface DailyModelData {
+  date: string; // "YYYY-MM-DD"
+  models: Record<string, number>; // model → total tokens
+}
+
+export interface ModelTotals {
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  percentage: number;
+}
+
+export interface ClaudeStats {
+  sessions: number;
+  messages: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_tokens: number;
+  active_days: number;
+  current_streak: number;
+  longest_streak: number;
+  peak_hour: number | null;
+  favorite_model: string | null;
+  heatmap: HeatmapDay[];
+  daily_model_data: DailyModelData[];
+  model_totals: ModelTotals[];
+  fun_fact: string | null;
+}
