@@ -1,5 +1,10 @@
 import { useState, useEffect, useMemo } from "react";
-import type { ClaudeStats, DailyModelData, ModelTotals } from "../types";
+import type {
+  ClaudeStats,
+  DailyModelData,
+  ModelTokenBreakdown,
+  ModelTotals,
+} from "../types";
 import { invokeBackend } from "../lib/platform";
 
 // ── Colour palette (7 blues, darkest first) ───────────────────────────────────
@@ -35,14 +40,41 @@ function fmtHour(h: number | null): string {
   return `${h - 12} PM`;
 }
 
-function fmtModelName(m: string): string {
-  // "claude-sonnet-4-6" → "Sonnet 4.6"
-  const match = m.match(/claude-([a-z]+)-(\d+)-(\d+)/);
-  if (match) {
-    const [, family, maj, min] = match;
+function fmtModelName(model: string): string {
+  const claudeMatch = model.match(/^claude-([a-z]+)-(\d+)-(\d+)/);
+  if (claudeMatch) {
+    const [, family, maj, min] = claudeMatch;
     return `${family.charAt(0).toUpperCase()}${family.slice(1)} ${maj}.${min}`;
   }
-  return m;
+
+  if (model.startsWith("gpt-")) {
+    return model.toUpperCase();
+  }
+
+  return model;
+}
+
+function accumulateBreakdowns(
+  dailyData: DailyModelData[],
+  cutoff: string | null
+): Record<string, ModelTokenBreakdown> {
+  const relevantDays = cutoff
+    ? dailyData.filter((day) => day.date >= cutoff)
+    : dailyData;
+  const totals: Record<string, ModelTokenBreakdown> = {};
+
+  for (const day of relevantDays) {
+    for (const [model, detail] of Object.entries(day.details)) {
+      if (!totals[model]) {
+        totals[model] = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
+      }
+      totals[model].input_tokens += detail.input_tokens;
+      totals[model].output_tokens += detail.output_tokens;
+      totals[model].total_tokens += detail.total_tokens;
+    }
+  }
+
+  return totals;
 }
 
 function isoDate(d: Date): string {
@@ -356,33 +388,24 @@ export function StatsModal({ isOpen, onClose }: StatsModalProps) {
       .finally(() => setLoading(false));
   }, [isOpen]);
 
-  // Filter model totals + daily data by time range
   const filteredModelTotals = useMemo(() => {
     if (!stats) return [];
-    if (range === "all") return stats.model_totals;
-    const cutoff = cutoffDate(range)!;
-    const relevantDays = stats.daily_model_data.filter((d) => d.date >= cutoff);
-    const totals: Record<string, { inp: number; out: number }> = {};
-    for (const day of relevantDays) {
-      for (const [model, tokens] of Object.entries(day.models)) {
-        if (!totals[model]) totals[model] = { inp: 0, out: 0 };
-        // We only store combined in daily_model_data; use original ratio from model_totals
-        const mt = stats.model_totals.find((m) => m.model === model);
-        if (mt && mt.total_tokens > 0) {
-          const ratio = mt.input_tokens / mt.total_tokens;
-          totals[model].inp += Math.round(tokens * ratio);
-          totals[model].out += Math.round(tokens * (1 - ratio));
-        }
-      }
-    }
-    const grand = Object.values(totals).reduce((a, v) => a + v.inp + v.out, 0);
+    const totals = accumulateBreakdowns(
+      stats.daily_model_data,
+      cutoffDate(range)
+    );
+    const grand = Object.values(totals).reduce(
+      (sum, detail) => sum + detail.total_tokens,
+      0
+    );
+
     return Object.entries(totals)
-      .map(([model, { inp, out }]) => ({
+      .map(([model, detail]) => ({
         model,
-        input_tokens: inp,
-        output_tokens: out,
-        total_tokens: inp + out,
-        percentage: grand > 0 ? ((inp + out) / grand) * 100 : 0,
+        input_tokens: detail.input_tokens,
+        output_tokens: detail.output_tokens,
+        total_tokens: detail.total_tokens,
+        percentage: grand > 0 ? (detail.total_tokens / grand) * 100 : 0,
       }))
       .sort((a, b) => b.total_tokens - a.total_tokens);
   }, [stats, range]);
@@ -496,7 +519,7 @@ function OverviewTab({ stats, range }: { stats: ClaudeStats; range: TimeRange })
         favorite_model: stats.favorite_model,
       };
     }
-    // Re-derive from daily data for filtered ranges
+    const modelBreakdowns = accumulateBreakdowns(stats.daily_model_data, cutoff);
     const days = stats.daily_model_data.filter((d) => d.date >= cutoff);
     const activeDaysSet = new Set(days.map((d) => d.date));
     const total = days.reduce(
@@ -526,6 +549,10 @@ function OverviewTab({ stats, range }: { stats: ClaudeStats; range: TimeRange })
       const prev2 = isoDate(new Date(new Date(checkDay).getTime() - 86400000));
       checkDay = prev2;
     }
+
+    const favoriteModel = Object.entries(modelBreakdowns)
+      .sort(([, a], [, b]) => b.total_tokens - a.total_tokens)[0]?.[0] ?? null;
+
     return {
       sessions: stats.sessions,
       messages: stats.messages,
@@ -534,7 +561,7 @@ function OverviewTab({ stats, range }: { stats: ClaudeStats; range: TimeRange })
       current_streak: curStreak,
       longest_streak: longestStreak,
       peak_hour: stats.peak_hour,
-      favorite_model: stats.favorite_model,
+      favorite_model: favoriteModel,
     };
   }, [stats, cutoff]);
 
@@ -618,7 +645,7 @@ function ModelsTab({
               style={{ background: modelColors[m.model] ?? BLUES[6] }}
             />
             <span className="text-sm font-medium text-gray-800 dark:text-gray-200 min-w-0 truncate flex-1">
-              {m.model}
+              {fmtModelName(m.model)}
             </span>
             <span className="text-xs text-gray-500 dark:text-gray-400 shrink-0 whitespace-nowrap">
               {fmtTokens(m.input_tokens)} in · {fmtTokens(m.output_tokens)} out

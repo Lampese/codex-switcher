@@ -57,7 +57,13 @@ export interface ImportAccountsSummary {
   skipped_count: number;
 }
 
-// ── Claude Code usage stats ───────────────────────────────────────────────────
+// ── Codex usage stats ────────────────────────────────────────────────────────
+
+export interface ModelTokenBreakdown {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+}
 
 export interface HeatmapDay {
   date: string; // "YYYY-MM-DD"
@@ -67,6 +73,7 @@ export interface HeatmapDay {
 export interface DailyModelData {
   date: string; // "YYYY-MM-DD"
   models: Record<string, number>; // model → total tokens
+  details: Record<string, ModelTokenBreakdown>; // model → exact token split
 }
 
 export interface ModelTotals {

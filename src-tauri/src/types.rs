@@ -306,10 +306,17 @@ pub struct CreditStatusDetails {
 }
 
 // ============================================================================
-// Claude Code usage stats
+// Codex usage stats
 // ============================================================================
 
-/// Aggregated stats from ~/.claude/projects JSONL files
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelTokenBreakdown {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+}
+
+/// Aggregated stats from Codex local telemetry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaudeStats {
     pub sessions: u64,
@@ -368,6 +375,9 @@ pub struct DailyModelData {
     pub date: String,
     /// model name → total tokens
     pub models: HashMap<String, u64>,
+    /// model name → exact token split for the day
+    #[serde(default)]
+    pub details: HashMap<String, ModelTokenBreakdown>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

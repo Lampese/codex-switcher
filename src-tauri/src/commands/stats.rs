@@ -1,275 +1,247 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::fs;
-use std::io::{BufRead, BufReader};
 
 use chrono::{DateTime, Duration, NaiveDate, Timelike, Utc};
-use serde::Deserialize;
+use rusqlite::Connection;
 
-use crate::types::{ClaudeStats, DailyModelData, HeatmapDay, ModelTotals};
+use crate::types::{ClaudeStats, DailyModelData, HeatmapDay, ModelTokenBreakdown, ModelTotals};
 
-// ── Minimal JSONL structures ──────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct RawEntry {
-    #[serde(rename = "type")]
-    entry_type: Option<String>,
-    #[serde(rename = "sessionId")]
-    session_id: Option<String>,
-    timestamp: Option<String>,
-    message: Option<RawMessage>,
-}
-
-#[derive(Deserialize)]
-struct RawMessage {
-    role: Option<String>,
-    model: Option<String>,
-    usage: Option<RawUsage>,
-}
-
-#[derive(Deserialize, Default)]
-struct RawUsage {
-    #[serde(default)]
+#[derive(Default)]
+struct DailyModelAccumulator {
     input_tokens: u64,
-    #[serde(default)]
     output_tokens: u64,
-    #[serde(default)]
-    cache_creation_input_tokens: u64,
-    #[serde(default)]
-    cache_read_input_tokens: u64,
 }
 
-// ── Command ───────────────────────────────────────────────────────────────────
+impl DailyModelAccumulator {
+    fn total_tokens(&self) -> u64 {
+        self.input_tokens + self.output_tokens
+    }
+}
+
+#[derive(Default)]
+struct ModelAccumulator {
+    input_tokens: u64,
+    output_tokens: u64,
+}
+
+impl ModelAccumulator {
+    fn total_tokens(&self) -> u64 {
+        self.input_tokens + self.output_tokens
+    }
+}
 
 #[tauri::command]
 pub async fn get_claude_stats() -> Result<ClaudeStats, String> {
     let home = dirs::home_dir().ok_or_else(|| "Cannot find home directory".to_string())?;
-    let projects_dir = home.join(".claude").join("projects");
+    let logs_path = home.join(".codex").join("logs_2.sqlite");
 
-    if !projects_dir.exists() {
+    if !logs_path.exists() {
         return Ok(ClaudeStats::empty());
     }
+
+    let conn = Connection::open(&logs_path).map_err(|e| e.to_string())?;
 
     let mut session_ids: HashSet<String> = HashSet::new();
+    let mut submission_ids: HashSet<String> = HashSet::new();
+    let mut completion_ids: HashSet<String> = HashSet::new();
     let mut message_count = 0u64;
     let mut hour_counts: HashMap<u8, u64> = HashMap::new();
-
-    // date → model → total_tokens
-    let mut daily_model: HashMap<NaiveDate, HashMap<String, u64>> = HashMap::new();
-    // model → (input, output)
-    let mut model_input: HashMap<String, u64> = HashMap::new();
-    let mut model_output: HashMap<String, u64> = HashMap::new();
-    // all dates with any activity
+    let mut daily_model: HashMap<NaiveDate, HashMap<String, DailyModelAccumulator>> =
+        HashMap::new();
+    let mut model_totals_acc: HashMap<String, ModelAccumulator> = HashMap::new();
     let mut active_dates: BTreeSet<NaiveDate> = BTreeSet::new();
 
-    let Ok(project_entries) = fs::read_dir(&projects_dir) else {
-        return Ok(ClaudeStats::empty());
-    };
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT ts, feedback_log_body
+                 FROM logs
+                 WHERE target = 'codex_otel.log_only'
+                   AND feedback_log_body IS NOT NULL
+                   AND feedback_log_body LIKE '%event.name=\"codex.sse_event\" event.kind=response.completed%'
+                 ORDER BY ts ASC, ts_nanos ASC, id ASC",
+            )
+            .map_err(|e| e.to_string())?;
 
-    for project_entry in project_entries.flatten() {
-        let project_path = project_entry.path();
-        if !project_path.is_dir() {
-            continue;
-        }
+        let rows = stmt
+            .query_map([], |row| {
+                let ts: i64 = row.get(0)?;
+                let body: String = row.get(1)?;
+                Ok((ts, body))
+            })
+            .map_err(|e| e.to_string())?;
 
-        let Ok(file_entries) = fs::read_dir(&project_path) else {
-            continue;
-        };
+        for row in rows {
+            let (ts, body) = row.map_err(|e| e.to_string())?;
+            let model = extract_value(&body, "model")
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "unknown".to_string());
+            let conversation_id = extract_value(&body, "conversation.id");
+            let input_tokens = extract_u64(&body, "input_token_count").unwrap_or(0);
+            let output_tokens = extract_u64(&body, "output_token_count").unwrap_or(0);
+            let dedupe_key = format!(
+                "{}|{}|{}|{}|{}",
+                extract_value(&body, "event.timestamp").unwrap_or_else(|| ts.to_string()),
+                conversation_id.clone().unwrap_or_default(),
+                model,
+                input_tokens,
+                output_tokens
+            );
 
-        for file_entry in file_entries.flatten() {
-            let file_path = file_entry.path();
-            if file_path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            if !completion_ids.insert(dedupe_key) {
                 continue;
             }
 
-            let Ok(file) = fs::File::open(&file_path) else {
+            if let Some(sid) = conversation_id {
+                session_ids.insert(sid);
+            }
+
+            let event_time = extract_value(&body, "event.timestamp")
+                .and_then(|value| {
+                    DateTime::parse_from_rfc3339(&value)
+                        .ok()
+                        .map(|dt| dt.with_timezone(&Utc))
+                })
+                .or_else(|| DateTime::<Utc>::from_timestamp(ts, 0));
+
+            let Some(event_time) = event_time else {
                 continue;
             };
-            let reader = BufReader::new(file);
 
-            for line in reader.lines().flatten() {
-                let line = line.trim().to_string();
-                if line.is_empty() {
-                    continue;
-                }
+            let date = event_time.date_naive();
+            active_dates.insert(date);
 
-                let Ok(entry) = serde_json::from_str::<RawEntry>(&line) else {
-                    continue;
-                };
+            let entry = daily_model
+                .entry(date)
+                .or_default()
+                .entry(model.clone())
+                .or_default();
+            entry.input_tokens += input_tokens;
+            entry.output_tokens += output_tokens;
 
-                if let Some(sid) = &entry.session_id {
-                    session_ids.insert(sid.clone());
-                }
+            let total_entry = model_totals_acc.entry(model).or_default();
+            total_entry.input_tokens += input_tokens;
+            total_entry.output_tokens += output_tokens;
+        }
+    }
 
-                let time_info = entry.timestamp.as_ref().and_then(|ts| {
-                    DateTime::parse_from_rfc3339(ts).ok().map(|dt| {
-                        let utc: DateTime<Utc> = dt.into();
-                        (utc.date_naive(), utc.hour() as u8)
-                    })
-                });
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT ts, feedback_log_body
+                 FROM logs
+                 WHERE target = 'codex_otel.log_only'
+                   AND feedback_log_body IS NOT NULL
+                   AND feedback_log_body LIKE '%otel.name=\"op.dispatch.user_input\"%'
+                   AND feedback_log_body LIKE '%submission.id=%'
+                 ORDER BY ts ASC, ts_nanos ASC, id ASC",
+            )
+            .map_err(|e| e.to_string())?;
 
-                if let Some((date, _)) = time_info {
-                    active_dates.insert(date);
-                }
+        let rows = stmt
+            .query_map([], |row| {
+                let ts: i64 = row.get(0)?;
+                let body: String = row.get(1)?;
+                Ok((ts, body))
+            })
+            .map_err(|e| e.to_string())?;
 
-                match entry.entry_type.as_deref() {
-                    Some("user") => {
-                        message_count += 1;
-                        if let Some((_, hour)) = time_info {
-                            *hour_counts.entry(hour).or_insert(0) += 1;
-                        }
-                    }
-                    // assistant entries may have no outer "type" field
-                    Some("assistant") | None => {
-                        if let Some(msg) = &entry.message {
-                            if msg.role.as_deref() == Some("assistant") {
-                                if let Some(usage) = &msg.usage {
-                                    let inp = usage.input_tokens
-                                        + usage.cache_creation_input_tokens
-                                        + usage.cache_read_input_tokens;
-                                    let out = usage.output_tokens;
+        for row in rows {
+            let (ts, body) = row.map_err(|e| e.to_string())?;
+            let Some(submission_id) = extract_value(&body, "submission.id") else {
+                continue;
+            };
+            if !submission_ids.insert(submission_id) {
+                continue;
+            }
+            message_count += 1;
 
-                                    if let Some(model) = &msg.model {
-                                        *model_input.entry(model.clone()).or_insert(0) += inp;
-                                        *model_output.entry(model.clone()).or_insert(0) += out;
-
-                                        if let Some((date, _)) = time_info {
-                                            *daily_model
-                                                .entry(date)
-                                                .or_default()
-                                                .entry(model.clone())
-                                                .or_insert(0) += inp + out;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
+            if let Some(event_time) = DateTime::<Utc>::from_timestamp(ts, 0) {
+                *hour_counts.entry(event_time.hour() as u8).or_insert(0) += 1;
             }
         }
     }
 
-    // ── Heatmap (daily token totals) ─────────────────────────────────────────
-    let heatmap: Vec<HeatmapDay> = {
-        let mut day_tokens: HashMap<NaiveDate, u64> = HashMap::new();
-        for (date, models) in &daily_model {
-            let total: u64 = models.values().sum();
-            *day_tokens.entry(*date).or_insert(0) += total;
-        }
-        let mut v: Vec<HeatmapDay> = day_tokens
-            .into_iter()
-            .map(|(date, count)| HeatmapDay {
+    let mut heatmap: Vec<HeatmapDay> = daily_model
+        .iter()
+        .map(|(date, models)| HeatmapDay {
+            date: date.to_string(),
+            count: models
+                .values()
+                .map(DailyModelAccumulator::total_tokens)
+                .sum(),
+        })
+        .collect();
+    heatmap.sort_by(|a, b| a.date.cmp(&b.date));
+
+    let mut daily_model_data: Vec<DailyModelData> = daily_model
+        .into_iter()
+        .map(|(date, models)| {
+            let details = models
+                .iter()
+                .map(|(model, acc)| {
+                    (
+                        model.clone(),
+                        ModelTokenBreakdown {
+                            input_tokens: acc.input_tokens,
+                            output_tokens: acc.output_tokens,
+                            total_tokens: acc.total_tokens(),
+                        },
+                    )
+                })
+                .collect::<HashMap<_, _>>();
+
+            let combined = details
+                .iter()
+                .map(|(model, detail)| (model.clone(), detail.total_tokens))
+                .collect::<HashMap<_, _>>();
+
+            DailyModelData {
                 date: date.to_string(),
-                count,
-            })
-            .collect();
-        v.sort_by(|a, b| a.date.cmp(&b.date));
-        v
-    };
+                models: combined,
+                details,
+            }
+        })
+        .collect();
+    daily_model_data.sort_by(|a, b| a.date.cmp(&b.date));
 
-    // ── Daily model data (for bar chart) ─────────────────────────────────────
-    let daily_model_data: Vec<DailyModelData> = {
-        let mut v: Vec<DailyModelData> = daily_model
-            .into_iter()
-            .map(|(date, models)| DailyModelData {
-                date: date.to_string(),
-                models,
-            })
-            .collect();
-        v.sort_by(|a, b| a.date.cmp(&b.date));
-        v
-    };
+    let grand_total: u64 = model_totals_acc
+        .values()
+        .map(ModelAccumulator::total_tokens)
+        .sum();
+    let mut model_totals: Vec<ModelTotals> = model_totals_acc
+        .into_iter()
+        .map(|(model, acc)| {
+            let total_tokens = acc.total_tokens();
+            ModelTotals {
+                model,
+                input_tokens: acc.input_tokens,
+                output_tokens: acc.output_tokens,
+                total_tokens,
+                percentage: if grand_total > 0 {
+                    (total_tokens as f64 / grand_total as f64) * 100.0
+                } else {
+                    0.0
+                },
+            }
+        })
+        .collect();
+    model_totals.sort_by(|a, b| {
+        b.total_tokens
+            .cmp(&a.total_tokens)
+            .then_with(|| a.model.cmp(&b.model))
+    });
 
-    // ── Per-model aggregates ─────────────────────────────────────────────────
-    let grand_total: u64 = model_input.values().sum::<u64>() + model_output.values().sum::<u64>();
-    let model_totals: Vec<ModelTotals> = {
-        let mut all_models: Vec<String> = model_input.keys().cloned().collect();
-        all_models.sort();
-        let mut v: Vec<ModelTotals> = all_models
-            .into_iter()
-            .map(|model| {
-                let inp = *model_input.get(&model).unwrap_or(&0);
-                let out = *model_output.get(&model).unwrap_or(&0);
-                let total = inp + out;
-                ModelTotals {
-                    model,
-                    input_tokens: inp,
-                    output_tokens: out,
-                    total_tokens: total,
-                    percentage: if grand_total > 0 {
-                        (total as f64 / grand_total as f64) * 100.0
-                    } else {
-                        0.0
-                    },
-                }
-            })
-            .collect();
-        v.sort_by(|a, b| b.total_tokens.cmp(&a.total_tokens));
-        v
-    };
-
-    // ── Streaks ──────────────────────────────────────────────────────────────
     let today = Utc::now().date_naive();
-
-    let current_streak: u64 = {
-        let start = if active_dates.contains(&today) {
-            Some(today)
-        } else {
-            today
-                .checked_sub_signed(Duration::days(1))
-                .filter(|d| active_dates.contains(d))
-        };
-
-        match start {
-            None => 0,
-            Some(mut day) => {
-                let mut streak = 0u64;
-                loop {
-                    if active_dates.contains(&day) {
-                        streak += 1;
-                        match day.checked_sub_signed(Duration::days(1)) {
-                            Some(prev) => day = prev,
-                            None => break,
-                        }
-                    } else {
-                        break;
-                    }
-                }
-                streak
-            }
-        }
-    };
-
-    let longest_streak: u64 = {
-        let mut max = 0u64;
-        let mut run = 0u64;
-        let mut prev: Option<NaiveDate> = None;
-        for &date in &active_dates {
-            match prev {
-                Some(p) if date == p + Duration::days(1) => run += 1,
-                _ => run = 1,
-            }
-            if run > max {
-                max = run;
-            }
-            prev = Some(date);
-        }
-        max
-    };
-
-    // ── Derived scalars ──────────────────────────────────────────────────────
+    let current_streak = current_streak(&active_dates, today);
+    let longest_streak = longest_streak(&active_dates);
     let peak_hour = hour_counts
         .into_iter()
-        .max_by_key(|(_, c)| *c)
-        .map(|(h, _)| h);
-
-    let favorite_model = model_totals.first().map(|m| m.model.clone());
-    let active_days = active_dates.len() as u64;
-    let total_input_tokens: u64 = model_input.values().sum();
-    let total_output_tokens: u64 = model_output.values().sum();
+        .max_by_key(|(_, count)| *count)
+        .map(|(hour, _)| hour);
+    let favorite_model = model_totals.first().map(|item| item.model.clone());
+    let total_input_tokens: u64 = model_totals.iter().map(|item| item.input_tokens).sum();
+    let total_output_tokens: u64 = model_totals.iter().map(|item| item.output_tokens).sum();
     let total_tokens = total_input_tokens + total_output_tokens;
-    let fun_fact = make_fun_fact(total_tokens);
 
     Ok(ClaudeStats {
         sessions: session_ids.len() as u64,
@@ -277,7 +249,7 @@ pub async fn get_claude_stats() -> Result<ClaudeStats, String> {
         total_input_tokens,
         total_output_tokens,
         total_tokens,
-        active_days,
+        active_days: active_dates.len() as u64,
         current_streak,
         longest_streak,
         peak_hour,
@@ -285,17 +257,85 @@ pub async fn get_claude_stats() -> Result<ClaudeStats, String> {
         heatmap,
         daily_model_data,
         model_totals,
-        fun_fact,
+        fun_fact: make_fun_fact(total_tokens),
     })
 }
 
-// ── Fun-fact helper ───────────────────────────────────────────────────────────
+fn extract_value(body: &str, key: &str) -> Option<String> {
+    let quoted_marker = format!("{key}=\"");
+    if let Some(start) = body.find(&quoted_marker) {
+        let value_start = start + quoted_marker.len();
+        let value_end = body[value_start..].find('"')?;
+        return Some(body[value_start..value_start + value_end].to_string());
+    }
+
+    let marker = format!("{key}=");
+    let start = body.find(&marker)?;
+    let value_start = start + marker.len();
+    let value = body[value_start..]
+        .split_whitespace()
+        .next()?
+        .trim_end_matches(',')
+        .trim_end_matches('}')
+        .trim_end_matches(']')
+        .to_string();
+    Some(value)
+}
+
+fn extract_u64(body: &str, key: &str) -> Option<u64> {
+    extract_value(body, key)?.parse().ok()
+}
+
+fn current_streak(active_dates: &BTreeSet<NaiveDate>, today: NaiveDate) -> u64 {
+    let start = if active_dates.contains(&today) {
+        Some(today)
+    } else {
+        today
+            .checked_sub_signed(Duration::days(1))
+            .filter(|date| active_dates.contains(date))
+    };
+
+    let Some(mut day) = start else {
+        return 0;
+    };
+
+    let mut streak = 0u64;
+    loop {
+        if active_dates.contains(&day) {
+            streak += 1;
+            match day.checked_sub_signed(Duration::days(1)) {
+                Some(prev) => day = prev,
+                None => break,
+            }
+        } else {
+            break;
+        }
+    }
+    streak
+}
+
+fn longest_streak(active_dates: &BTreeSet<NaiveDate>) -> u64 {
+    let mut longest = 0u64;
+    let mut run = 0u64;
+    let mut previous: Option<NaiveDate> = None;
+
+    for &date in active_dates {
+        match previous {
+            Some(prev) if date == prev + Duration::days(1) => run += 1,
+            _ => run = 1,
+        }
+        longest = longest.max(run);
+        previous = Some(date);
+    }
+
+    longest
+}
 
 fn make_fun_fact(total: u64) -> Option<String> {
     if total == 0 {
         return None;
     }
-    // Approximate token counts for well-known texts
+
     const BOOKS: &[(&str, u64)] = &[
         ("Animal Farm", 39_000),
         ("The Great Gatsby", 74_000),
@@ -308,7 +348,6 @@ fn make_fun_fact(total: u64) -> Option<String> {
         ("a complete Encyclopedia Britannica", 44_000_000),
     ];
 
-    // Pick the largest book whose multiplier ≥ 2
     let best = BOOKS
         .iter()
         .rev()
@@ -318,7 +357,7 @@ fn make_fun_fact(total: u64) -> Option<String> {
     match best {
         Some((book, tokens)) => {
             let mult = total / tokens;
-            Some(format!("You've used ~{}× more tokens than {}.", mult, book))
+            Some(format!("You've used ~{}x more tokens than {}.", mult, book))
         }
         None => {
             let (book, tokens) = BOOKS[0];
