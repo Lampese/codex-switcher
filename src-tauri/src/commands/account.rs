@@ -2,10 +2,14 @@
 
 use crate::auth::{
     add_account, create_chatgpt_account_from_refresh_token, get_active_account,
-    import_from_auth_json, import_from_auth_json_contents, load_accounts, remove_account,
-    save_accounts, set_active_account, switch_to_account, touch_account,
+    import_from_auth_json, import_from_auth_json_contents, load_accounts,
+    normalized_priority_account_ids, remove_account, save_accounts, set_active_account,
+    switch_to_account, touch_account,
 };
-use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
+use crate::types::{
+    AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount,
+    UsageAutomationSettings,
+};
 
 use anyhow::Context;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -18,7 +22,7 @@ use futures::{stream, StreamExt};
 use pbkdf2::pbkdf2_hmac;
 use rand::RngCore;
 use sha2::Sha256;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 
@@ -71,10 +75,26 @@ struct SlimAccountPayload {
 pub async fn list_accounts() -> Result<Vec<AccountInfo>, String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
     let active_id = store.active_account_id.as_deref();
-
-    let accounts: Vec<AccountInfo> = store
-        .accounts
+    let priority_account_ids = normalized_priority_account_ids(
+        &store.accounts,
+        &store.usage_automation.priority_account_ids,
+    );
+    let priority_index: HashMap<&str, usize> = priority_account_ids
         .iter()
+        .enumerate()
+        .map(|(index, account_id)| (account_id.as_str(), index))
+        .collect();
+
+    let mut accounts = store.accounts.iter().collect::<Vec<_>>();
+    accounts.sort_by_key(|account| {
+        priority_index
+            .get(account.id.as_str())
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
+
+    let accounts: Vec<AccountInfo> = accounts
+        .into_iter()
         .map(|a| AccountInfo::from_stored(a, active_id))
         .collect();
 
@@ -482,6 +502,10 @@ async fn build_store_from_slim_payload(
         accounts,
         active_account_id,
         masked_account_ids: Vec::new(),
+        usage_automation: UsageAutomationSettings {
+            priority_account_ids: Vec::new(),
+            ..UsageAutomationSettings::default()
+        },
     })
 }
 
@@ -678,8 +702,10 @@ fn merge_accounts_store(
     mut current: AccountsStore,
     imported: AccountsStore,
 ) -> (AccountsStore, ImportAccountsSummary) {
+    let current_was_empty = current.accounts.is_empty();
     let imported_version = imported.version;
     let imported_active_id = imported.active_account_id;
+    let imported_usage_automation = imported.usage_automation;
     let total_in_payload = imported.accounts.len();
     let mut imported_count = 0usize;
     let mut existing_ids: HashSet<String> = current.accounts.iter().map(|a| a.id.clone()).collect();
@@ -697,6 +723,13 @@ fn merge_accounts_store(
     }
 
     current.version = current.version.max(imported_version).max(1);
+    if current_was_empty {
+        current.usage_automation = imported_usage_automation;
+    }
+    current.usage_automation.priority_account_ids = normalized_priority_account_ids(
+        &current.accounts,
+        &current.usage_automation.priority_account_ids,
+    );
 
     let current_active_is_valid = current
         .active_account_id
@@ -735,4 +768,18 @@ pub async fn get_masked_account_ids() -> Result<Vec<String>, String> {
 #[tauri::command]
 pub async fn set_masked_account_ids(ids: Vec<String>) -> Result<(), String> {
     crate::auth::storage::set_masked_account_ids(ids).map_err(|e| e.to_string())
+}
+
+/// Get usage warning and automatic switching settings
+#[tauri::command]
+pub async fn get_usage_automation_settings() -> Result<UsageAutomationSettings, String> {
+    crate::auth::storage::get_usage_automation_settings().map_err(|e| e.to_string())
+}
+
+/// Set usage warning and automatic switching settings
+#[tauri::command]
+pub async fn set_usage_automation_settings(
+    settings: UsageAutomationSettings,
+) -> Result<(), String> {
+    crate::auth::storage::set_usage_automation_settings(settings).map_err(|e| e.to_string())
 }

@@ -1,6 +1,7 @@
 // Types matching the Rust backend
 
 export type AuthMode = "api_key" | "chat_g_p_t";
+export type AutoSwitchStrategy = "remaining_desc" | "reset_time_asc";
 
 export interface AccountInfo {
   id: string;
@@ -37,6 +38,15 @@ export interface OAuthLoginInfo {
 export interface AccountWithUsage extends AccountInfo {
   usage?: UsageInfo;
   usageLoading?: boolean;
+}
+
+export interface UsageAutomationSettings {
+  warning_remaining_percent: number;
+  auto_switch_remaining_percent: number;
+  auto_switch_enabled: boolean;
+  auto_close_codex_on_switch: boolean;
+  auto_switch_strategy: AutoSwitchStrategy;
+  priority_account_ids: string[];
 }
 
 export interface CodexProcessInfo {

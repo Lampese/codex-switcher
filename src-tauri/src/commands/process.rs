@@ -1,6 +1,8 @@
 //! Process detection commands
 
 use std::process::Command;
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 use anyhow::Context;
@@ -52,6 +54,80 @@ pub async fn check_codex_processes() -> Result<CodexProcessInfo, String> {
         can_switch: count == 0,
         pids,
     })
+}
+
+/// Close active Codex desktop or CLI processes and verify they are gone.
+#[tauri::command]
+pub async fn close_codex_processes() -> Result<CodexProcessInfo, String> {
+    close_active_codex_processes().map_err(|e| e.to_string())
+}
+
+fn close_active_codex_processes() -> anyhow::Result<CodexProcessInfo> {
+    let (pids, _) = find_codex_processes()?;
+
+    for pid in &pids {
+        terminate_process(*pid, false);
+    }
+
+    let (mut remaining_pids, mut background_count) =
+        wait_for_active_codex_exit(Duration::from_secs(4))?;
+
+    if !remaining_pids.is_empty() {
+        for pid in &remaining_pids {
+            terminate_process(*pid, true);
+        }
+        (remaining_pids, background_count) = wait_for_active_codex_exit(Duration::from_secs(8))?;
+    }
+
+    if !remaining_pids.is_empty() {
+        anyhow::bail!(
+            "Timed out while closing Codex processes: {}",
+            remaining_pids
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    Ok(CodexProcessInfo {
+        count: 0,
+        background_count,
+        can_switch: true,
+        pids: Vec::new(),
+    })
+}
+
+fn wait_for_active_codex_exit(timeout: Duration) -> anyhow::Result<(Vec<u32>, usize)> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let (pids, background_count) = find_codex_processes()?;
+        if pids.is_empty() || Instant::now() >= deadline {
+            return Ok((pids, background_count));
+        }
+        sleep(Duration::from_millis(250));
+    }
+}
+
+fn terminate_process(pid: u32, force: bool) {
+    #[cfg(unix)]
+    {
+        let signal = if force { "-KILL" } else { "-TERM" };
+        let _ = Command::new("kill")
+            .args([signal, &pid.to_string()])
+            .output();
+    }
+
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("taskkill");
+        command.creation_flags(CREATE_NO_WINDOW);
+        command.args(["/PID", &pid.to_string(), "/T"]);
+        if force {
+            command.arg("/F");
+        }
+        let _ = command.output();
+    }
 }
 
 /// Find all running codex processes. Returns (active_pids, background_count)
