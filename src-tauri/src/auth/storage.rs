@@ -1,11 +1,12 @@
 //! Account storage module - manages reading and writing accounts.json
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::types::{AccountsStore, AuthData, StoredAccount};
+use crate::types::{AccountsStore, AuthData, StoredAccount, UsageAutomationSettings};
 
 /// Get the path to the codex-switcher config directory
 pub fn get_config_dir() -> Result<PathBuf> {
@@ -62,6 +63,37 @@ pub fn save_accounts(store: &AccountsStore) -> Result<()> {
     Ok(())
 }
 
+/// Return a priority list containing each current account exactly once.
+pub fn normalized_priority_account_ids(
+    accounts: &[StoredAccount],
+    priority_account_ids: &[String],
+) -> Vec<String> {
+    let account_ids: HashSet<&str> = accounts.iter().map(|account| account.id.as_str()).collect();
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::with_capacity(accounts.len());
+
+    for account_id in priority_account_ids {
+        if account_ids.contains(account_id.as_str()) && seen.insert(account_id.as_str()) {
+            normalized.push(account_id.clone());
+        }
+    }
+
+    for account in accounts {
+        if seen.insert(account.id.as_str()) {
+            normalized.push(account.id.clone());
+        }
+    }
+
+    normalized
+}
+
+fn sync_usage_automation_priority(store: &mut AccountsStore) {
+    store.usage_automation.priority_account_ids = normalized_priority_account_ids(
+        &store.accounts,
+        &store.usage_automation.priority_account_ids,
+    );
+}
+
 /// Add a new account to the store
 pub fn add_account(account: StoredAccount) -> Result<StoredAccount> {
     let mut store = load_accounts()?;
@@ -73,6 +105,7 @@ pub fn add_account(account: StoredAccount) -> Result<StoredAccount> {
 
     let account_clone = account.clone();
     store.accounts.push(account);
+    sync_usage_automation_priority(&mut store);
 
     // If this is the first account, make it active
     if store.accounts.len() == 1 {
@@ -98,6 +131,7 @@ pub fn remove_account(account_id: &str) -> Result<()> {
     if store.active_account_id.as_deref() == Some(account_id) {
         store.active_account_id = store.accounts.first().map(|a| a.id.clone());
     }
+    sync_usage_automation_priority(&mut store);
 
     save_accounts(&store)?;
     Ok(())
@@ -250,4 +284,80 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
     store.masked_account_ids = ids;
     save_accounts(&store)?;
     Ok(())
+}
+
+/// Get usage warning and automatic switching settings.
+pub fn get_usage_automation_settings() -> Result<UsageAutomationSettings> {
+    let store = load_accounts()?;
+    let mut settings = store.usage_automation.clone();
+    settings.priority_account_ids =
+        normalized_priority_account_ids(&store.accounts, &settings.priority_account_ids);
+    Ok(settings)
+}
+
+/// Set usage warning and automatic switching settings.
+pub fn set_usage_automation_settings(mut settings: UsageAutomationSettings) -> Result<()> {
+    if !settings.warning_remaining_percent.is_finite()
+        || !settings.auto_switch_remaining_percent.is_finite()
+    {
+        anyhow::bail!("Usage thresholds must be finite numbers");
+    }
+
+    if !(0.0..=100.0).contains(&settings.warning_remaining_percent)
+        || !(0.0..=100.0).contains(&settings.auto_switch_remaining_percent)
+    {
+        anyhow::bail!("Usage thresholds must be between 0 and 100");
+    }
+
+    if settings.warning_remaining_percent < settings.auto_switch_remaining_percent {
+        anyhow::bail!("Warning threshold must be greater than or equal to auto-switch threshold");
+    }
+
+    let mut store = load_accounts()?;
+    settings.priority_account_ids =
+        normalized_priority_account_ids(&store.accounts, &settings.priority_account_ids);
+    store.usage_automation = settings;
+    save_accounts(&store)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalized_priority_account_ids;
+    use crate::types::StoredAccount;
+
+    fn account_with_id(id: &str) -> StoredAccount {
+        let mut account = StoredAccount::new_api_key(id.to_string(), format!("key-{id}"));
+        account.id = id.to_string();
+        account
+    }
+
+    #[test]
+    fn normalized_priority_removes_invalid_and_duplicate_ids() {
+        let accounts = vec![
+            account_with_id("first"),
+            account_with_id("second"),
+            account_with_id("third"),
+        ];
+
+        let normalized = normalized_priority_account_ids(
+            &accounts,
+            &[
+                "missing".to_string(),
+                "second".to_string(),
+                "second".to_string(),
+                "first".to_string(),
+            ],
+        );
+
+        assert_eq!(normalized, vec!["second", "first", "third"]);
+    }
+
+    #[test]
+    fn normalized_priority_preserves_account_order_when_empty() {
+        let accounts = vec![account_with_id("first"), account_with_id("second")];
+        let normalized = normalized_priority_account_ids(&accounts, &[]);
+
+        assert_eq!(normalized, vec!["first", "second"]);
+    }
 }

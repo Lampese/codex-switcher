@@ -14,7 +14,20 @@
 - **Multi-Account Management** – Add and manage multiple Codex accounts in one place
 - **Quick Switching** – Switch between accounts with a single click
 - **Usage Monitoring** – View real-time usage for both 5-hour and weekly limits
+- **Usage Automation** – Configure low-usage warnings, automatic switching, and manual account priority
 - **Dual Login Mode** – OAuth authentication or import existing `auth.json` files
+
+## Usage Automation
+
+Codex Switcher can warn you when the active account is running low on 5-hour quota and can optionally switch to another account automatically.
+
+- Warning threshold defaults to `10%` remaining.
+- Auto-switch threshold defaults to `5%` remaining.
+- Auto-switch is disabled by default.
+- When auto-switch is enabled, choose either **Usage first** or **Reset first**.
+- When auto-switch is disabled, adjust the manual account priority and switch accounts yourself.
+
+Automatic switching only uses 5-hour limit data. If Codex is currently running, the app will pause automatic switching and show a reminder instead of changing `~/.codex/auth.json`.
 
 ## Installation
 

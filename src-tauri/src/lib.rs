@@ -9,9 +9,11 @@ pub mod web;
 use commands::{
     add_account_from_file, cancel_login, check_codex_processes, complete_login, delete_account,
     export_accounts_full_encrypted_file, export_accounts_slim_text, get_active_account_info,
-    get_masked_account_ids, get_usage, import_accounts_full_encrypted_file,
-    import_accounts_slim_text, list_accounts, refresh_all_accounts_usage, rename_account,
-    set_masked_account_ids, start_login, switch_account, warmup_account, warmup_all_accounts,
+    get_masked_account_ids, get_usage, get_usage_automation_settings,
+    import_accounts_full_encrypted_file, import_accounts_slim_text, list_accounts,
+    refresh_all_accounts_usage, rename_account, set_masked_account_ids,
+    set_usage_automation_settings, start_login, switch_account, warmup_account,
+    warmup_all_accounts,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -41,6 +43,9 @@ pub fn run() {
             // Masked accounts
             get_masked_account_ids,
             set_masked_account_ids,
+            // Usage automation
+            get_usage_automation_settings,
+            set_usage_automation_settings,
             // OAuth
             start_login,
             complete_login,
