@@ -333,6 +333,8 @@ pub struct CodexStats {
     pub favorite_model: Option<String>,
     /// Per-day token counts for the heatmap
     pub heatmap: Vec<HeatmapDay>,
+    /// Per-day session/message counts used for filtered overview cards
+    pub daily_overview_data: Vec<DailyOverviewData>,
     /// Per-day, per-model token breakdowns for the chart
     pub daily_model_data: Vec<DailyModelData>,
     /// Aggregated per-model totals
@@ -354,11 +356,23 @@ impl CodexStats {
             peak_hour: None,
             favorite_model: None,
             heatmap: Vec::new(),
+            daily_overview_data: Vec::new(),
             daily_model_data: Vec::new(),
             model_totals: Vec::new(),
             fun_fact: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DailyOverviewData {
+    /// "YYYY-MM-DD"
+    pub date: String,
+    pub sessions: u64,
+    pub messages: u64,
+    /// Message counts for each hour bucket (0-23)
+    #[serde(default)]
+    pub hourly_messages: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

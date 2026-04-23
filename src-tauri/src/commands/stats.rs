@@ -7,7 +7,9 @@ use chrono::{DateTime, Duration, Local, NaiveDate, Timelike, Utc};
 use rusqlite::Connection;
 use serde_json::Value;
 
-use crate::types::{CodexStats, DailyModelData, HeatmapDay, ModelTokenBreakdown, ModelTotals};
+use crate::types::{
+    CodexStats, DailyModelData, DailyOverviewData, HeatmapDay, ModelTokenBreakdown, ModelTotals,
+};
 
 #[derive(Default)]
 struct DailyModelAccumulator {
@@ -33,91 +35,170 @@ impl ModelAccumulator {
     }
 }
 
+#[derive(Default)]
+struct StatsAccumulator {
+    sessions: u64,
+    messages: u64,
+    hour_counts: HashMap<u8, u64>,
+    daily_activity: HashMap<NaiveDate, u64>,
+    daily_sessions: HashMap<NaiveDate, u64>,
+    daily_messages: HashMap<NaiveDate, u64>,
+    daily_hour_counts: HashMap<NaiveDate, [u64; 24]>,
+    daily_model: HashMap<NaiveDate, HashMap<String, DailyModelAccumulator>>,
+    model_totals: HashMap<String, ModelAccumulator>,
+    active_dates: BTreeSet<NaiveDate>,
+}
+
+impl StatsAccumulator {
+    fn is_empty(&self) -> bool {
+        self.sessions == 0
+            && self.messages == 0
+            && self.daily_model.is_empty()
+            && self.active_dates.is_empty()
+    }
+
+    fn record_session(&mut self, date: NaiveDate, mark_activity: bool) {
+        self.sessions += 1;
+        *self.daily_sessions.entry(date).or_insert(0) += 1;
+        self.active_dates.insert(date);
+
+        if mark_activity {
+            *self.daily_activity.entry(date).or_insert(0) += 1;
+        }
+    }
+
+    fn record_message(&mut self, date: NaiveDate, hour: Option<u8>) {
+        self.messages += 1;
+        *self.daily_messages.entry(date).or_insert(0) += 1;
+        *self.daily_activity.entry(date).or_insert(0) += 1;
+        self.active_dates.insert(date);
+
+        if let Some(hour) = hour.filter(|hour| *hour < 24) {
+            *self.hour_counts.entry(hour).or_insert(0) += 1;
+            self.daily_hour_counts.entry(date).or_insert([0; 24])[hour as usize] += 1;
+        }
+    }
+
+    fn record_tokens(
+        &mut self,
+        date: NaiveDate,
+        model: String,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) {
+        if input_tokens == 0 && output_tokens == 0 {
+            return;
+        }
+
+        let entry = self
+            .daily_model
+            .entry(date)
+            .or_default()
+            .entry(model.clone())
+            .or_default();
+        entry.input_tokens += input_tokens;
+        entry.output_tokens += output_tokens;
+
+        let total_entry = self.model_totals.entry(model).or_default();
+        total_entry.input_tokens += input_tokens;
+        total_entry.output_tokens += output_tokens;
+
+        self.active_dates.insert(date);
+    }
+
+    fn merge(&mut self, other: StatsAccumulator) {
+        self.sessions += other.sessions;
+        self.messages += other.messages;
+
+        for (hour, count) in other.hour_counts {
+            *self.hour_counts.entry(hour).or_insert(0) += count;
+        }
+
+        for (date, count) in other.daily_activity {
+            *self.daily_activity.entry(date).or_insert(0) += count;
+        }
+
+        for (date, count) in other.daily_sessions {
+            *self.daily_sessions.entry(date).or_insert(0) += count;
+        }
+
+        for (date, count) in other.daily_messages {
+            *self.daily_messages.entry(date).or_insert(0) += count;
+        }
+
+        for (date, buckets) in other.daily_hour_counts {
+            let entry = self.daily_hour_counts.entry(date).or_insert([0; 24]);
+            for (index, count) in buckets.into_iter().enumerate() {
+                entry[index] += count;
+            }
+        }
+
+        for (date, models) in other.daily_model {
+            let day_entry = self.daily_model.entry(date).or_default();
+            for (model, acc) in models {
+                let model_entry = day_entry.entry(model).or_default();
+                model_entry.input_tokens += acc.input_tokens;
+                model_entry.output_tokens += acc.output_tokens;
+            }
+        }
+
+        for (model, acc) in other.model_totals {
+            let total_entry = self.model_totals.entry(model).or_default();
+            total_entry.input_tokens += acc.input_tokens;
+            total_entry.output_tokens += acc.output_tokens;
+        }
+
+        self.active_dates.extend(other.active_dates);
+    }
+}
+
 #[tauri::command]
 pub async fn get_codex_stats() -> Result<CodexStats, String> {
     let home = dirs::home_dir().ok_or_else(|| "Cannot find home directory".to_string())?;
     let codex_dir = home.join(".codex");
     let sessions_root = codex_dir.join("sessions");
+    let logs_path = codex_dir.join("logs_2.sqlite");
+    let mut stats = StatsAccumulator::default();
 
     if sessions_root.exists() {
-        let stats = load_session_history_stats(&sessions_root)?;
-        if stats.sessions > 0
-            || stats.messages > 0
-            || stats.total_tokens > 0
-            || !stats.heatmap.is_empty()
-        {
-            return Ok(stats);
-        }
+        stats.merge(load_session_history_stats(&sessions_root)?);
     }
 
-    let logs_path = codex_dir.join("logs_2.sqlite");
     if logs_path.exists() {
-        return load_sqlite_stats(&logs_path);
+        stats.merge(load_sqlite_stats(&logs_path)?);
     }
 
-    Ok(CodexStats::empty())
+    if stats.is_empty() {
+        return Ok(CodexStats::empty());
+    }
+
+    Ok(build_stats(stats))
 }
 
-fn load_session_history_stats(root: &Path) -> Result<CodexStats, String> {
+fn load_session_history_stats(root: &Path) -> Result<StatsAccumulator, String> {
     let mut session_files = Vec::new();
     collect_session_files(root, &mut session_files).map_err(|e| e.to_string())?;
     session_files.sort();
 
     if session_files.is_empty() {
-        return Ok(CodexStats::empty());
+        return Ok(StatsAccumulator::default());
     }
 
-    let mut message_count = 0u64;
-    let mut hour_counts: HashMap<u8, u64> = HashMap::new();
-    let mut daily_activity: HashMap<NaiveDate, u64> = HashMap::new();
-    let mut daily_model: HashMap<NaiveDate, HashMap<String, DailyModelAccumulator>> =
-        HashMap::new();
-    let mut model_totals_acc: HashMap<String, ModelAccumulator> = HashMap::new();
-    let mut active_dates: BTreeSet<NaiveDate> = BTreeSet::new();
-    let mut session_count = 0u64;
+    let mut stats = StatsAccumulator::default();
 
     for path in session_files {
         let Some(session_date) = session_date_from_path(&path) else {
             continue;
         };
 
-        session_count += 1;
-        active_dates.insert(session_date);
-        *daily_activity.entry(session_date).or_insert(0) += 1;
-
-        ingest_session_file(
-            &path,
-            session_date,
-            &mut message_count,
-            &mut hour_counts,
-            &mut daily_activity,
-            &mut daily_model,
-            &mut model_totals_acc,
-            &mut active_dates,
-        );
+        stats.record_session(session_date, true);
+        ingest_session_file(&path, session_date, &mut stats);
     }
 
-    Ok(build_stats(
-        session_count,
-        message_count,
-        hour_counts,
-        daily_activity,
-        daily_model,
-        model_totals_acc,
-        active_dates,
-    ))
+    Ok(stats)
 }
 
-fn ingest_session_file(
-    path: &Path,
-    session_date: NaiveDate,
-    message_count: &mut u64,
-    hour_counts: &mut HashMap<u8, u64>,
-    daily_activity: &mut HashMap<NaiveDate, u64>,
-    daily_model: &mut HashMap<NaiveDate, HashMap<String, DailyModelAccumulator>>,
-    model_totals_acc: &mut HashMap<String, ModelAccumulator>,
-    active_dates: &mut BTreeSet<NaiveDate>,
-) {
+fn ingest_session_file(path: &Path, session_date: NaiveDate, stats: &mut StatsAccumulator) {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(_) => return,
@@ -156,13 +237,7 @@ fn ingest_session_file(
 
         match value.pointer("/payload/type").and_then(Value::as_str) {
             Some("user_message") => {
-                *message_count += 1;
-                *daily_activity.entry(session_date).or_insert(0) += 1;
-                active_dates.insert(session_date);
-
-                if let Some(hour) = extract_local_hour(&value) {
-                    *hour_counts.entry(hour).or_insert(0) += 1;
-                }
+                stats.record_message(session_date, extract_local_hour(&value));
             }
             Some("token_count") => {
                 let Some((input_tokens, output_tokens)) = extract_total_token_usage(&value) else {
@@ -174,46 +249,23 @@ fn ingest_session_file(
                 last_input_tokens = input_tokens;
                 last_output_tokens = output_tokens;
 
-                if delta_input == 0 && delta_output == 0 {
-                    continue;
-                }
-
                 let model = current_model
                     .clone()
                     .unwrap_or_else(|| "unknown".to_string());
-
-                let entry = daily_model
-                    .entry(session_date)
-                    .or_default()
-                    .entry(model.clone())
-                    .or_default();
-                entry.input_tokens += delta_input;
-                entry.output_tokens += delta_output;
-
-                let total_entry = model_totals_acc.entry(model).or_default();
-                total_entry.input_tokens += delta_input;
-                total_entry.output_tokens += delta_output;
-
-                active_dates.insert(session_date);
+                stats.record_tokens(session_date, model, delta_input, delta_output);
             }
             _ => {}
         }
     }
 }
 
-fn load_sqlite_stats(logs_path: &Path) -> Result<CodexStats, String> {
+fn load_sqlite_stats(logs_path: &Path) -> Result<StatsAccumulator, String> {
     let conn = Connection::open(logs_path).map_err(|e| e.to_string())?;
 
-    let mut session_ids: HashSet<String> = HashSet::new();
+    let mut stats = StatsAccumulator::default();
+    let mut session_first_dates: HashMap<String, NaiveDate> = HashMap::new();
     let mut submission_ids: HashSet<String> = HashSet::new();
     let mut completion_ids: HashSet<String> = HashSet::new();
-    let mut message_count = 0u64;
-    let mut hour_counts: HashMap<u8, u64> = HashMap::new();
-    let mut daily_activity: HashMap<NaiveDate, u64> = HashMap::new();
-    let mut daily_model: HashMap<NaiveDate, HashMap<String, DailyModelAccumulator>> =
-        HashMap::new();
-    let mut model_totals_acc: HashMap<String, ModelAccumulator> = HashMap::new();
-    let mut active_dates: BTreeSet<NaiveDate> = BTreeSet::new();
 
     {
         let mut stmt = conn
@@ -256,10 +308,6 @@ fn load_sqlite_stats(logs_path: &Path) -> Result<CodexStats, String> {
                 continue;
             }
 
-            if let Some(sid) = conversation_id {
-                session_ids.insert(sid);
-            }
-
             let event_time = extract_value(&body, "event.timestamp")
                 .and_then(parse_rfc3339_local)
                 .or_else(|| {
@@ -271,21 +319,25 @@ fn load_sqlite_stats(logs_path: &Path) -> Result<CodexStats, String> {
             };
 
             let date = event_time.date_naive();
-            active_dates.insert(date);
-            *daily_activity.entry(date).or_insert(0) += 1;
+            stats.active_dates.insert(date);
+            *stats.daily_activity.entry(date).or_insert(0) += 1;
+            stats.record_tokens(date, model, input_tokens, output_tokens);
 
-            let entry = daily_model
-                .entry(date)
-                .or_default()
-                .entry(model.clone())
-                .or_default();
-            entry.input_tokens += input_tokens;
-            entry.output_tokens += output_tokens;
-
-            let total_entry = model_totals_acc.entry(model).or_default();
-            total_entry.input_tokens += input_tokens;
-            total_entry.output_tokens += output_tokens;
+            if let Some(sid) = conversation_id {
+                session_first_dates
+                    .entry(sid)
+                    .and_modify(|existing| {
+                        if date < *existing {
+                            *existing = date;
+                        }
+                    })
+                    .or_insert(date);
+            }
         }
+    }
+
+    for first_date in session_first_dates.into_values() {
+        stats.record_session(first_date, false);
     }
 
     {
@@ -318,38 +370,30 @@ fn load_sqlite_stats(logs_path: &Path) -> Result<CodexStats, String> {
                 continue;
             }
 
-            message_count += 1;
-
             if let Some(event_time) = DateTime::<Utc>::from_timestamp(ts, 0) {
                 let local_time = event_time.with_timezone(&Local);
-                *hour_counts.entry(local_time.hour() as u8).or_insert(0) += 1;
-                let date = local_time.date_naive();
-                active_dates.insert(date);
-                *daily_activity.entry(date).or_insert(0) += 1;
+                stats.record_message(local_time.date_naive(), Some(local_time.hour() as u8));
             }
         }
     }
 
-    Ok(build_stats(
-        session_ids.len() as u64,
-        message_count,
-        hour_counts,
-        daily_activity,
-        daily_model,
-        model_totals_acc,
-        active_dates,
-    ))
+    Ok(stats)
 }
 
-fn build_stats(
-    sessions: u64,
-    messages: u64,
-    hour_counts: HashMap<u8, u64>,
-    daily_activity: HashMap<NaiveDate, u64>,
-    daily_model: HashMap<NaiveDate, HashMap<String, DailyModelAccumulator>>,
-    model_totals_acc: HashMap<String, ModelAccumulator>,
-    active_dates: BTreeSet<NaiveDate>,
-) -> CodexStats {
+fn build_stats(stats: StatsAccumulator) -> CodexStats {
+    let StatsAccumulator {
+        sessions,
+        messages,
+        hour_counts,
+        daily_activity,
+        daily_sessions,
+        daily_messages,
+        daily_hour_counts,
+        daily_model,
+        model_totals,
+        active_dates,
+    } = stats;
+
     let mut heatmap: Vec<HeatmapDay> = active_dates
         .iter()
         .map(|date| {
@@ -375,6 +419,21 @@ fn build_stats(
         })
         .collect();
     heatmap.sort_by(|a, b| a.date.cmp(&b.date));
+
+    let mut daily_overview_data: Vec<DailyOverviewData> = active_dates
+        .iter()
+        .map(|date| DailyOverviewData {
+            date: date.to_string(),
+            sessions: daily_sessions.get(date).copied().unwrap_or(0),
+            messages: daily_messages.get(date).copied().unwrap_or(0),
+            hourly_messages: daily_hour_counts
+                .get(date)
+                .copied()
+                .unwrap_or([0; 24])
+                .to_vec(),
+        })
+        .collect();
+    daily_overview_data.sort_by(|a, b| a.date.cmp(&b.date));
 
     let mut daily_model_data: Vec<DailyModelData> = daily_model
         .into_iter()
@@ -407,11 +466,11 @@ fn build_stats(
         .collect();
     daily_model_data.sort_by(|a, b| a.date.cmp(&b.date));
 
-    let grand_total: u64 = model_totals_acc
+    let grand_total: u64 = model_totals
         .values()
         .map(ModelAccumulator::total_tokens)
         .sum();
-    let mut model_totals: Vec<ModelTotals> = model_totals_acc
+    let mut model_totals: Vec<ModelTotals> = model_totals
         .into_iter()
         .map(|(model, acc)| {
             let total_tokens = acc.total_tokens();
@@ -458,6 +517,7 @@ fn build_stats(
         peak_hour,
         favorite_model,
         heatmap,
+        daily_overview_data,
         daily_model_data,
         model_totals,
         fun_fact: make_fun_fact(total_tokens),
@@ -628,5 +688,52 @@ fn make_fun_fact(total: u64) -> Option<String> {
                 pct, book
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn date(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).unwrap()
+    }
+
+    #[test]
+    fn build_stats_preserves_daily_overview_after_merging_sources() {
+        let mut session_history = StatsAccumulator::default();
+        let day_one = date(2026, 4, 1);
+        session_history.record_session(day_one, true);
+        session_history.record_message(day_one, Some(10));
+        session_history.record_message(day_one, Some(10));
+        session_history.record_tokens(day_one, "gpt-5".to_string(), 120, 80);
+
+        let mut sqlite = StatsAccumulator::default();
+        let day_two = date(2026, 4, 2);
+        sqlite.record_session(day_two, false);
+        sqlite.record_message(day_two, Some(16));
+        sqlite.record_tokens(day_two, "gpt-4.1".to_string(), 30, 20);
+
+        session_history.merge(sqlite);
+        let stats = build_stats(session_history);
+
+        assert_eq!(stats.sessions, 2);
+        assert_eq!(stats.messages, 3);
+        assert_eq!(stats.total_tokens, 250);
+        assert_eq!(stats.active_days, 2);
+        assert_eq!(stats.peak_hour, Some(10));
+        assert_eq!(stats.daily_overview_data.len(), 2);
+
+        let first_day = &stats.daily_overview_data[0];
+        assert_eq!(first_day.date, "2026-04-01");
+        assert_eq!(first_day.sessions, 1);
+        assert_eq!(first_day.messages, 2);
+        assert_eq!(first_day.hourly_messages[10], 2);
+
+        let second_day = &stats.daily_overview_data[1];
+        assert_eq!(second_day.date, "2026-04-02");
+        assert_eq!(second_day.sessions, 1);
+        assert_eq!(second_day.messages, 1);
+        assert_eq!(second_day.hourly_messages[16], 1);
     }
 }

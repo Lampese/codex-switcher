@@ -70,6 +70,13 @@ export interface HeatmapDay {
   count: number;
 }
 
+export interface DailyOverviewData {
+  date: string; // "YYYY-MM-DD"
+  sessions: number;
+  messages: number;
+  hourly_messages: number[]; // 24 hourly buckets
+}
+
 export interface DailyModelData {
   date: string; // "YYYY-MM-DD"
   models: Record<string, number>; // model → total tokens
@@ -96,6 +103,7 @@ export interface CodexStats {
   peak_hour: number | null;
   favorite_model: string | null;
   heatmap: HeatmapDay[];
+  daily_overview_data: DailyOverviewData[];
   daily_model_data: DailyModelData[];
   model_totals: ModelTotals[];
   fun_fact: string | null;

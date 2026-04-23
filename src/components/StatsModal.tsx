@@ -89,6 +89,70 @@ function cutoffDate(range: TimeRange): string | null {
   return isoDate(d);
 }
 
+function longestStreakForDates(sortedDates: string[]): number {
+  let longestStreak = 0;
+  let streak = 0;
+  let previous = "";
+
+  for (const date of sortedDates) {
+    if (previous) {
+      const diff = (new Date(date).getTime() - new Date(previous).getTime()) / 86400000;
+      streak = diff === 1 ? streak + 1 : 1;
+    } else {
+      streak = 1;
+    }
+
+    if (streak > longestStreak) {
+      longestStreak = streak;
+    }
+
+    previous = date;
+  }
+
+  return longestStreak;
+}
+
+function currentStreakForDates(activeDaysSet: Set<string>): number {
+  const today = isoDate(new Date());
+  const yesterday = isoDate(new Date(Date.now() - 86400000));
+  let streak = 0;
+  let checkDay = activeDaysSet.has(today)
+    ? today
+    : activeDaysSet.has(yesterday)
+      ? yesterday
+      : null;
+
+  while (checkDay && activeDaysSet.has(checkDay)) {
+    streak++;
+    checkDay = isoDate(new Date(new Date(checkDay).getTime() - 86400000));
+  }
+
+  return streak;
+}
+
+function peakHourForOverviewDays(
+  overviewDays: CodexStats["daily_overview_data"]
+): number | null {
+  const hourlyCounts = Array.from({ length: 24 }, () => 0);
+
+  for (const day of overviewDays) {
+    day.hourly_messages.forEach((count, hour) => {
+      hourlyCounts[hour] += count ?? 0;
+    });
+  }
+
+  let bestHour: number | null = null;
+  let bestCount = 0;
+  hourlyCounts.forEach((count, hour) => {
+    if (count > bestCount) {
+      bestCount = count;
+      bestHour = hour;
+    }
+  });
+
+  return bestHour;
+}
+
 type TimeRange = "all" | "30d" | "7d";
 type TabId = "overview" | "models";
 
@@ -508,7 +572,6 @@ export function StatsModal({ isOpen, onClose }: StatsModalProps) {
 // ── Overview tab ──────────────────────────────────────────────────────────────
 
 function OverviewTab({ stats, range }: { stats: CodexStats; range: TimeRange }) {
-  // For filtered ranges, recalculate the scalar stats from daily data
   const cutoff = cutoffDate(range);
   const heatmapFiltered = cutoff
     ? stats.heatmap.filter((d) => d.date >= cutoff)
@@ -527,51 +590,33 @@ function OverviewTab({ stats, range }: { stats: CodexStats; range: TimeRange }) 
         favorite_model: stats.favorite_model,
       };
     }
+
+    const overviewDays = stats.daily_overview_data.filter((day) => day.date >= cutoff);
     const modelBreakdowns = accumulateBreakdowns(stats.daily_model_data, cutoff);
-    const days = stats.daily_model_data.filter((d) => d.date >= cutoff);
-    const activeDaysSet = new Set(days.map((d) => d.date));
-    const total = days.reduce(
+    const tokenDays = stats.daily_model_data.filter((d) => d.date >= cutoff);
+    const activeDaysSet = new Set(
+      heatmapFiltered
+        .filter((day) => day.count > 0)
+        .map((day) => day.date)
+    );
+    const total = tokenDays.reduce(
       (s, d) => s + Object.values(d.models).reduce((a, b) => a + b, 0),
       0
     );
-    // Streaks within filtered range
-    const sortedDates = Array.from(activeDaysSet).sort();
-    let curStreak = 0, longestStreak = 0, streak = 0;
-    let prev = "";
-    for (const d of sortedDates) {
-      if (prev) {
-        const diff = (new Date(d).getTime() - new Date(prev).getTime()) / 86400000;
-        streak = diff === 1 ? streak + 1 : 1;
-      } else {
-        streak = 1;
-      }
-      if (streak > longestStreak) longestStreak = streak;
-      prev = d;
-    }
-    const today = isoDate(new Date());
-    const yesterday = isoDate(new Date(Date.now() - 86400000));
-    curStreak = 0;
-    let checkDay = activeDaysSet.has(today) ? today : activeDaysSet.has(yesterday) ? yesterday : null;
-    while (checkDay && activeDaysSet.has(checkDay)) {
-      curStreak++;
-      const prev2 = isoDate(new Date(new Date(checkDay).getTime() - 86400000));
-      checkDay = prev2;
-    }
-
     const favoriteModel = Object.entries(modelBreakdowns)
       .sort(([, a], [, b]) => b.total_tokens - a.total_tokens)[0]?.[0] ?? null;
 
     return {
-      sessions: stats.sessions,
-      messages: stats.messages,
+      sessions: overviewDays.reduce((sum, day) => sum + day.sessions, 0),
+      messages: overviewDays.reduce((sum, day) => sum + day.messages, 0),
       total_tokens: total,
       active_days: activeDaysSet.size,
-      current_streak: curStreak,
-      longest_streak: longestStreak,
-      peak_hour: stats.peak_hour,
+      current_streak: currentStreakForDates(activeDaysSet),
+      longest_streak: longestStreakForDates(Array.from(activeDaysSet).sort()),
+      peak_hour: peakHourForOverviewDays(overviewDays),
       favorite_model: favoriteModel,
     };
-  }, [stats, cutoff]);
+  }, [stats, cutoff, heatmapFiltered]);
 
   const cards = [
     { label: "Sessions", value: fmtNum(filteredTotals.sessions) },
