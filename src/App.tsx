@@ -2,7 +2,12 @@ import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAccounts } from "./hooks/useAccounts";
 import { AccountCard, AddAccountModal, UpdateChecker } from "./components";
-import type { CodexProcessInfo } from "./types";
+import type {
+  AutoSwitchStrategy,
+  CodexProcessInfo,
+  UsageAutomationSettings,
+  UsageInfo,
+} from "./types";
 import {
   exportFullBackupFile,
   importFullBackupFile,
@@ -13,10 +18,37 @@ import "./App.css";
 
 const THEME_STORAGE_KEY = "codex-switcher-theme";
 type ThemeMode = "light" | "dark";
+type OtherAccountsSort =
+  | "priority"
+  | "deadline_asc"
+  | "deadline_desc"
+  | "remaining_desc"
+  | "remaining_asc";
+
+const DEFAULT_USAGE_AUTOMATION_SETTINGS: UsageAutomationSettings = {
+  warning_remaining_percent: 10,
+  auto_switch_remaining_percent: 5,
+  auto_switch_enabled: false,
+  auto_switch_strategy: "remaining_desc",
+  priority_account_ids: [],
+};
+
 const appWindow = getCurrentWindow();
 const isMacOs =
   typeof navigator !== "undefined" &&
   /(Mac|iPhone|iPod|iPad)/i.test(navigator.userAgent);
+
+function getPrimaryRemainingPercent(usage: UsageInfo | undefined): number | null {
+  if (!usage || usage.error) return null;
+  if (usage.primary_used_percent === null || usage.primary_used_percent === undefined) {
+    return null;
+  }
+  return Math.max(0, 100 - usage.primary_used_percent);
+}
+
+function formatThreshold(value: number): string {
+  return Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1);
+}
 
 function App() {
   const {
@@ -39,9 +71,12 @@ function App() {
     cancelOAuthLogin,
     loadMaskedAccountIds,
     saveMaskedAccountIds,
+    loadUsageAutomationSettings,
+    saveUsageAutomationSettings,
   } = useAccounts();
 
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [isConfigModalOpen, setIsConfigModalOpen] = useState(false);
   const [configModalMode, setConfigModalMode] = useState<"slim_export" | "slim_import">(
     "slim_export"
@@ -65,11 +100,18 @@ function App() {
     isError: boolean;
   } | null>(null);
   const [maskedAccounts, setMaskedAccounts] = useState<Set<string>>(new Set());
-  const [otherAccountsSort, setOtherAccountsSort] = useState<
-    "deadline_asc" | "deadline_desc" | "remaining_desc" | "remaining_asc"
-  >("deadline_asc");
+  const [usageAutomationSettings, setUsageAutomationSettings] =
+    useState<UsageAutomationSettings>(DEFAULT_USAGE_AUTOMATION_SETTINGS);
+  const [settingsDraft, setSettingsDraft] =
+    useState<UsageAutomationSettings>(DEFAULT_USAGE_AUTOMATION_SETTINGS);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [otherAccountsSort, setOtherAccountsSort] =
+    useState<OtherAccountsSort>("priority");
   const [isActionsMenuOpen, setIsActionsMenuOpen] = useState(false);
   const actionsMenuRef = useRef<HTMLDivElement | null>(null);
+  const lastAutomationActionRef = useRef<string | null>(null);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
     if (typeof window === "undefined") return "light";
     try {
@@ -80,6 +122,61 @@ function App() {
     }
   });
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
+
+  const accountIds = useMemo(() => accounts.map((account) => account.id), [accounts]);
+
+  const normalizePriorityAccountIds = useCallback(
+    (priorityAccountIds: string[]) => {
+      const validIds = new Set(accountIds);
+      const seen = new Set<string>();
+      const normalized: string[] = [];
+
+      priorityAccountIds.forEach((accountId) => {
+        if (validIds.has(accountId) && !seen.has(accountId)) {
+          seen.add(accountId);
+          normalized.push(accountId);
+        }
+      });
+
+      accountIds.forEach((accountId) => {
+        if (!seen.has(accountId)) {
+          seen.add(accountId);
+          normalized.push(accountId);
+        }
+      });
+
+      return normalized;
+    },
+    [accountIds]
+  );
+
+  const effectiveUsageAutomationSettings = useMemo<UsageAutomationSettings>(
+    () => ({
+      ...usageAutomationSettings,
+      priority_account_ids: normalizePriorityAccountIds(
+        usageAutomationSettings.priority_account_ids
+      ),
+    }),
+    [normalizePriorityAccountIds, usageAutomationSettings]
+  );
+
+  const priorityIndex = useMemo(() => {
+    return new Map(
+      effectiveUsageAutomationSettings.priority_account_ids.map((accountId, index) => [
+        accountId,
+        index,
+      ])
+    );
+  }, [effectiveUsageAutomationSettings.priority_account_ids]);
+
+  const accountsById = useMemo(() => {
+    return new Map(accounts.map((account) => [account.id, account]));
+  }, [accounts]);
+
+  const settingsDraftPriorityAccountIds = useMemo(
+    () => normalizePriorityAccountIds(settingsDraft.priority_account_ids),
+    [normalizePriorityAccountIds, settingsDraft.priority_account_ids]
+  );
 
   const handleTitlebarDrag = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
@@ -157,6 +254,30 @@ function App() {
       }
     });
   }, [loadMaskedAccountIds]);
+
+  // Load usage automation settings from storage on mount
+  useEffect(() => {
+    let cancelled = false;
+
+    loadUsageAutomationSettings()
+      .then((settings) => {
+        if (cancelled) return;
+        setUsageAutomationSettings(settings);
+        setSettingsDraft(settings);
+      })
+      .catch((err) => {
+        console.error("Failed to load usage automation settings:", err);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setSettingsLoaded(true);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [loadUsageAutomationSettings]);
 
   useEffect(() => {
     if (!isActionsMenuOpen) return;
@@ -257,12 +378,12 @@ function App() {
     }
   };
 
-  const showWarmupToast = (message: string, isError = false) => {
+  const showWarmupToast = useCallback((message: string, isError = false) => {
     setWarmupToast({ message, isError });
     setTimeout(() => setWarmupToast(null), 2500);
-  };
+  }, []);
 
-  const formatWarmupError = (err: unknown) => {
+  const formatWarmupError = useCallback((err: unknown) => {
     if (!err) return "Unknown error";
     if (err instanceof Error && err.message) return err.message;
     if (typeof err === "string") return err;
@@ -270,6 +391,107 @@ function App() {
       return JSON.stringify(err);
     } catch {
       return "Unknown error";
+    }
+  }, []);
+
+  const openSettingsModal = () => {
+    setSettingsDraft({
+      ...effectiveUsageAutomationSettings,
+      priority_account_ids: normalizePriorityAccountIds(
+        effectiveUsageAutomationSettings.priority_account_ids
+      ),
+    });
+    setSettingsError(null);
+    setIsSettingsModalOpen(true);
+  };
+
+  const updateSettingsDraftPercent = (
+    key: "warning_remaining_percent" | "auto_switch_remaining_percent",
+    value: string
+  ) => {
+    const parsed = Number(value);
+    setSettingsDraft((prev) => ({
+      ...prev,
+      [key]: Number.isFinite(parsed) ? parsed : 0,
+    }));
+  };
+
+  const movePriorityAccount = (accountId: string, direction: -1 | 1) => {
+    setSettingsDraft((prev) => {
+      const priorityIds = normalizePriorityAccountIds(prev.priority_account_ids);
+      const currentIndex = priorityIds.indexOf(accountId);
+      const nextIndex = currentIndex + direction;
+
+      if (
+        currentIndex < 0 ||
+        nextIndex < 0 ||
+        nextIndex >= priorityIds.length
+      ) {
+        return prev;
+      }
+
+      const nextPriorityIds = [...priorityIds];
+      const [moved] = nextPriorityIds.splice(currentIndex, 1);
+      nextPriorityIds.splice(nextIndex, 0, moved);
+
+      return {
+        ...prev,
+        priority_account_ids: nextPriorityIds,
+      };
+    });
+  };
+
+  const handleSaveSettings = async () => {
+    const nextSettings: UsageAutomationSettings = {
+      ...settingsDraft,
+      warning_remaining_percent: Number(settingsDraft.warning_remaining_percent),
+      auto_switch_remaining_percent: Number(
+        settingsDraft.auto_switch_remaining_percent
+      ),
+      priority_account_ids: normalizePriorityAccountIds(
+        settingsDraft.priority_account_ids
+      ),
+    };
+
+    if (
+      !Number.isFinite(nextSettings.warning_remaining_percent) ||
+      !Number.isFinite(nextSettings.auto_switch_remaining_percent)
+    ) {
+      setSettingsError("Thresholds must be valid numbers.");
+      return;
+    }
+
+    if (
+      nextSettings.warning_remaining_percent < 0 ||
+      nextSettings.warning_remaining_percent > 100 ||
+      nextSettings.auto_switch_remaining_percent < 0 ||
+      nextSettings.auto_switch_remaining_percent > 100
+    ) {
+      setSettingsError("Thresholds must be between 0 and 100.");
+      return;
+    }
+
+    if (
+      nextSettings.warning_remaining_percent <
+      nextSettings.auto_switch_remaining_percent
+    ) {
+      setSettingsError("Warning threshold must be greater than or equal to auto-switch threshold.");
+      return;
+    }
+
+    try {
+      setIsSavingSettings(true);
+      setSettingsError(null);
+      await saveUsageAutomationSettings(nextSettings);
+      setUsageAutomationSettings(nextSettings);
+      setSettingsDraft(nextSettings);
+      setIsSettingsModalOpen(false);
+      showWarmupToast("Usage automation settings saved.");
+    } catch (err) {
+      console.error("Failed to save usage automation settings:", err);
+      setSettingsError(formatWarmupError(err));
+    } finally {
+      setIsSavingSettings(false);
     }
   };
 
@@ -410,6 +632,137 @@ function App() {
   const activeAccount = accounts.find((a) => a.is_active);
   const otherAccounts = accounts.filter((a) => !a.is_active);
   const hasRunningProcesses = processInfo && processInfo.count > 0;
+  const activeRemainingPercent = getPrimaryRemainingPercent(activeAccount?.usage);
+
+  const usageWarningMessage =
+    activeAccount &&
+    activeRemainingPercent !== null &&
+    activeRemainingPercent < effectiveUsageAutomationSettings.warning_remaining_percent
+      ? `${activeAccount.name} has ${formatThreshold(activeRemainingPercent)}% 5h usage remaining.`
+      : null;
+
+  useEffect(() => {
+    if (!settingsLoaded || !activeAccount) return;
+    if (switchingId || accounts.some((account) => account.usageLoading)) return;
+
+    const remainingPercent = getPrimaryRemainingPercent(activeAccount.usage);
+    if (
+      remainingPercent === null ||
+      remainingPercent >=
+        effectiveUsageAutomationSettings.auto_switch_remaining_percent
+    ) {
+      lastAutomationActionRef.current = null;
+      return;
+    }
+
+    if (!effectiveUsageAutomationSettings.auto_switch_enabled) return;
+
+    const accountUsageSnapshot = accounts
+      .map((account) => {
+        const remaining = getPrimaryRemainingPercent(account.usage);
+        return [
+          account.id,
+          remaining === null ? "unknown" : formatThreshold(remaining),
+          account.usage?.primary_resets_at ?? "no-reset",
+        ].join("/");
+      })
+      .join("|");
+
+    const actionKey = [
+      activeAccount.id,
+      formatThreshold(remainingPercent),
+      effectiveUsageAutomationSettings.auto_switch_remaining_percent,
+      effectiveUsageAutomationSettings.auto_switch_strategy,
+      effectiveUsageAutomationSettings.priority_account_ids.join(","),
+      processInfo?.count ?? "unknown",
+      accountUsageSnapshot,
+    ].join(":");
+
+    if (lastAutomationActionRef.current === actionKey) return;
+    lastAutomationActionRef.current = actionKey;
+
+    let cancelled = false;
+
+    const runAutoSwitch = async () => {
+      const latestProcessInfo = await checkProcesses();
+      if (cancelled) return;
+
+      if (latestProcessInfo && !latestProcessInfo.can_switch) {
+        showWarmupToast(
+          "Auto-switch paused. Close all Codex processes before switching.",
+          true
+        );
+        return;
+      }
+
+      const switchThreshold =
+        effectiveUsageAutomationSettings.auto_switch_remaining_percent;
+      const priorityRank = (accountId: string) =>
+        priorityIndex.get(accountId) ?? Number.MAX_SAFE_INTEGER;
+      const candidates = accounts
+        .filter((account) => {
+          if (account.id === activeAccount.id) return false;
+          const accountRemaining = getPrimaryRemainingPercent(account.usage);
+          return accountRemaining !== null && accountRemaining >= switchThreshold;
+        })
+        .sort((a, b) => {
+          const aRemaining = getPrimaryRemainingPercent(a.usage) ?? -1;
+          const bRemaining = getPrimaryRemainingPercent(b.usage) ?? -1;
+
+          if (
+            effectiveUsageAutomationSettings.auto_switch_strategy ===
+            "remaining_desc"
+          ) {
+            const remainingDiff = bRemaining - aRemaining;
+            if (remainingDiff !== 0) return remainingDiff;
+          } else {
+            const aReset = a.usage?.primary_resets_at ?? Number.POSITIVE_INFINITY;
+            const bReset = b.usage?.primary_resets_at ?? Number.POSITIVE_INFINITY;
+            const resetDiff = aReset - bReset;
+            if (resetDiff !== 0) return resetDiff;
+          }
+
+          const priorityDiff = priorityRank(a.id) - priorityRank(b.id);
+          if (priorityDiff !== 0) return priorityDiff;
+          return a.name.localeCompare(b.name);
+        });
+
+      const nextAccount = candidates[0];
+      if (!nextAccount) {
+        showWarmupToast("Auto-switch skipped. No eligible account is available.", true);
+        return;
+      }
+
+      try {
+        setSwitchingId(nextAccount.id);
+        await switchAccount(nextAccount.id);
+        showWarmupToast(`Auto-switched to ${nextAccount.name}.`);
+      } catch (err) {
+        console.error("Failed to auto-switch account:", err);
+        showWarmupToast(`Auto-switch failed: ${formatWarmupError(err)}`, true);
+      } finally {
+        setSwitchingId(null);
+      }
+    };
+
+    void runAutoSwitch();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    accounts,
+    activeAccount,
+    checkProcesses,
+    effectiveUsageAutomationSettings,
+    formatWarmupError,
+    priorityIndex,
+    processInfo?.count,
+    settingsLoaded,
+    showWarmupToast,
+    switchingId,
+    switchAccount,
+  ]);
 
   const sortedOtherAccounts = useMemo(() => {
     const getResetDeadline = (resetAt: number | null | undefined) =>
@@ -423,6 +776,14 @@ function App() {
     };
 
     return [...otherAccounts].sort((a, b) => {
+      if (otherAccountsSort === "priority") {
+        const priorityDiff =
+          (priorityIndex.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
+          (priorityIndex.get(b.id) ?? Number.MAX_SAFE_INTEGER);
+        if (priorityDiff !== 0) return priorityDiff;
+        return a.name.localeCompare(b.name);
+      }
+
       if (otherAccountsSort === "deadline_asc" || otherAccountsSort === "deadline_desc") {
         const deadlineDiff =
           getResetDeadline(a.usage?.primary_resets_at) -
@@ -452,7 +813,7 @@ function App() {
       if (deadlineDiff !== 0) return deadlineDiff;
       return a.name.localeCompare(b.name);
     });
-  }, [otherAccounts, otherAccountsSort]);
+  }, [otherAccounts, otherAccountsSort, priorityIndex]);
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
@@ -584,6 +945,24 @@ function App() {
                 <span className={isWarmingAll ? "animate-pulse" : ""}>⚡</span>
               </button>
               <button
+                onClick={openSettingsModal}
+                className="flex h-10 w-10 items-center justify-center rounded-lg bg-gray-100 text-gray-700 transition-colors hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700 shrink-0"
+                title="Usage automation settings"
+              >
+                <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                  <path
+                    d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z"
+                    strokeWidth="2"
+                  />
+                  <path
+                    d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.05.05a2.1 2.1 0 0 1-2.97 2.97l-.05-.05a1.8 1.8 0 0 0-1.98-.36 1.8 1.8 0 0 0-1.1 1.66V21a2.1 2.1 0 0 1-4.2 0v-.07a1.8 1.8 0 0 0-1.1-1.66 1.8 1.8 0 0 0-1.98.36l-.05.05a2.1 2.1 0 1 1-2.97-2.97l.05-.05A1.8 1.8 0 0 0 3.6 15a1.8 1.8 0 0 0-1.66-1.1H2a2.1 2.1 0 0 1 0-4.2h.07a1.8 1.8 0 0 0 1.66-1.1 1.8 1.8 0 0 0-.36-1.98l-.05-.05A2.1 2.1 0 1 1 6.3 3.6l.05.05a1.8 1.8 0 0 0 1.98.36 1.8 1.8 0 0 0 1.1-1.66V2a2.1 2.1 0 0 1 4.2 0v.07a1.8 1.8 0 0 0 1.1 1.66 1.8 1.8 0 0 0 1.98-.36l.05-.05a2.1 2.1 0 1 1 2.97 2.97l-.05.05a1.8 1.8 0 0 0-.36 1.98 1.8 1.8 0 0 0 1.66 1.1H22a2.1 2.1 0 0 1 0 4.2h-.07A1.8 1.8 0 0 0 19.4 15Z"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+              <button
                 onClick={() => setThemeMode((prev) => (prev === "dark" ? "light" : "dark"))}
                 className="flex h-10 w-10 items-center justify-center rounded-lg bg-gray-100 text-lg text-gray-700 transition-colors hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700 shrink-0"
                 title={themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"}
@@ -695,6 +1074,14 @@ function App() {
                 <h2 className="text-sm font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-4">
                   Active Account
                 </h2>
+                {usageWarningMessage && (
+                  <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-200">
+                    {usageWarningMessage}
+                    {effectiveUsageAutomationSettings.auto_switch_enabled
+                      ? " Auto-switch is enabled."
+                      : " Auto-switch is off."}
+                  </div>
+                )}
                 <AccountCard
                   account={activeAccount}
                   onSwitch={() => { }}
@@ -729,16 +1116,11 @@ function App() {
                         id="other-accounts-sort"
                         value={otherAccountsSort}
                         onChange={(e) =>
-                          setOtherAccountsSort(
-                            e.target.value as
-                              | "deadline_asc"
-                              | "deadline_desc"
-                              | "remaining_desc"
-                              | "remaining_asc"
-                          )
+                          setOtherAccountsSort(e.target.value as OtherAccountsSort)
                         }
                         className="appearance-none font-sans text-xs sm:text-sm font-medium pl-3 pr-9 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-gradient-to-b from-white to-gray-50 dark:from-gray-900 dark:to-gray-800 text-gray-700 dark:text-gray-200 shadow-sm hover:border-gray-400 dark:hover:border-gray-600 hover:shadow focus:outline-none focus:ring-2 focus:ring-gray-300 dark:focus:ring-gray-600 focus:border-gray-400 dark:focus:border-gray-600 transition-all"
                       >
+                        <option value="priority">Manual priority</option>
                         <option value="deadline_asc">Reset: earliest to latest</option>
                         <option value="deadline_desc">Reset: latest to earliest</option>
                         <option value="remaining_desc">
@@ -822,6 +1204,231 @@ function App() {
         onCompleteOAuth={completeOAuthLogin}
         onCancelOAuth={cancelOAuthLogin}
       />
+
+      {/* Usage Automation Settings Modal */}
+      {isSettingsModalOpen && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-2xl mx-4 shadow-xl max-h-[88vh] overflow-hidden flex flex-col">
+            <div className="flex items-center justify-between p-5 border-b border-gray-100 dark:border-gray-800">
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+                Usage Automation
+              </h2>
+              <button
+                onClick={() => setIsSettingsModalOpen(false)}
+                className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-5 space-y-5 overflow-y-auto">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <label className="space-y-1">
+                  <span className="text-sm font-medium text-gray-700 dark:text-gray-200">
+                    Warning threshold
+                  </span>
+                  <div className="relative">
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="0.1"
+                      value={settingsDraft.warning_remaining_percent}
+                      onChange={(event) =>
+                        updateSettingsDraftPercent(
+                          "warning_remaining_percent",
+                          event.target.value
+                        )
+                      }
+                      className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 pr-9 text-sm text-gray-900 focus:border-gray-400 focus:outline-none focus:ring-1 focus:ring-gray-400 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:focus:border-gray-500 dark:focus:ring-gray-500"
+                    />
+                    <span className="absolute inset-y-0 right-3 flex items-center text-sm text-gray-400">
+                      %
+                    </span>
+                  </div>
+                </label>
+
+                <label className="space-y-1">
+                  <span className="text-sm font-medium text-gray-700 dark:text-gray-200">
+                    Auto-switch threshold
+                  </span>
+                  <div className="relative">
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="0.1"
+                      value={settingsDraft.auto_switch_remaining_percent}
+                      onChange={(event) =>
+                        updateSettingsDraftPercent(
+                          "auto_switch_remaining_percent",
+                          event.target.value
+                        )
+                      }
+                      className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 pr-9 text-sm text-gray-900 focus:border-gray-400 focus:outline-none focus:ring-1 focus:ring-gray-400 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:focus:border-gray-500 dark:focus:ring-gray-500"
+                    />
+                    <span className="absolute inset-y-0 right-3 flex items-center text-sm text-gray-400">
+                      %
+                    </span>
+                  </div>
+                </label>
+              </div>
+
+              <div className="flex items-center justify-between gap-4 rounded-lg border border-gray-200 px-4 py-3 dark:border-gray-700">
+                <div>
+                  <div className="text-sm font-medium text-gray-800 dark:text-gray-100">
+                    Auto-switch
+                  </div>
+                  <div className="text-xs text-gray-500 dark:text-gray-400">
+                    {settingsDraft.auto_switch_enabled ? "Enabled" : "Disabled"}
+                  </div>
+                </div>
+                <button
+                  onClick={() =>
+                    setSettingsDraft((prev) => ({
+                      ...prev,
+                      auto_switch_enabled: !prev.auto_switch_enabled,
+                    }))
+                  }
+                  className={`relative h-7 w-12 rounded-full transition-colors ${
+                    settingsDraft.auto_switch_enabled
+                      ? "bg-emerald-500"
+                      : "bg-gray-300 dark:bg-gray-700"
+                  }`}
+                  aria-pressed={settingsDraft.auto_switch_enabled}
+                  title={
+                    settingsDraft.auto_switch_enabled
+                      ? "Disable auto-switch"
+                      : "Enable auto-switch"
+                  }
+                >
+                  <span
+                    className={`absolute left-1 top-1 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                      settingsDraft.auto_switch_enabled
+                        ? "translate-x-5"
+                        : "translate-x-0"
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {settingsDraft.auto_switch_enabled ? (
+                <div className="space-y-2">
+                  <div className="text-sm font-medium text-gray-700 dark:text-gray-200">
+                    Auto-switch strategy
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 rounded-lg bg-gray-100 p-1 dark:bg-gray-800">
+                    {(
+                      [
+                        ["remaining_desc", "Usage first"],
+                        ["reset_time_asc", "Reset first"],
+                      ] as Array<[AutoSwitchStrategy, string]>
+                    ).map(([strategy, label]) => (
+                      <button
+                        key={strategy}
+                        onClick={() =>
+                          setSettingsDraft((prev) => ({
+                            ...prev,
+                            auto_switch_strategy: strategy,
+                          }))
+                        }
+                        className={`rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+                          settingsDraft.auto_switch_strategy === strategy
+                            ? "bg-white text-gray-900 shadow-sm dark:bg-gray-950 dark:text-gray-100"
+                            : "text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-100"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <div className="text-sm font-medium text-gray-700 dark:text-gray-200">
+                    Manual priority
+                  </div>
+                  <div className="space-y-2">
+                    {settingsDraftPriorityAccountIds.length === 0 ? (
+                      <div className="rounded-lg border border-dashed border-gray-200 px-4 py-6 text-center text-sm text-gray-400 dark:border-gray-700 dark:text-gray-500">
+                        No accounts
+                      </div>
+                    ) : (
+                      settingsDraftPriorityAccountIds.map((accountId, index) => {
+                        const account = accountsById.get(accountId);
+                        if (!account) return null;
+
+                        return (
+                          <div
+                            key={accountId}
+                            className="flex items-center gap-3 rounded-lg border border-gray-200 px-3 py-2 dark:border-gray-700"
+                          >
+                            <div className="flex h-7 w-7 items-center justify-center rounded-md bg-gray-100 text-xs font-semibold text-gray-500 dark:bg-gray-800 dark:text-gray-300">
+                              {index + 1}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate text-sm font-medium text-gray-800 dark:text-gray-100">
+                                {account.name}
+                              </div>
+                              {account.email && (
+                                <div className="truncate text-xs text-gray-500 dark:text-gray-400">
+                                  {account.email}
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <button
+                                onClick={() => movePriorityAccount(accountId, -1)}
+                                disabled={index === 0}
+                                className="flex h-8 w-8 items-center justify-center rounded-md bg-gray-100 text-gray-600 transition-colors hover:bg-gray-200 disabled:opacity-40 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
+                                title="Move up"
+                              >
+                                ↑
+                              </button>
+                              <button
+                                onClick={() => movePriorityAccount(accountId, 1)}
+                                disabled={
+                                  index === settingsDraftPriorityAccountIds.length - 1
+                                }
+                                className="flex h-8 w-8 items-center justify-center rounded-md bg-gray-100 text-gray-600 transition-colors hover:bg-gray-200 disabled:opacity-40 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
+                                title="Move down"
+                              >
+                                ↓
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {settingsError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600 dark:border-red-700 dark:bg-red-900/20 dark:text-red-300">
+                  {settingsError}
+                </div>
+              )}
+            </div>
+
+            <div className="flex gap-3 p-5 border-t border-gray-100 dark:border-gray-800">
+              <button
+                onClick={() => setIsSettingsModalOpen(false)}
+                className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors"
+              >
+                Close
+              </button>
+              <button
+                onClick={handleSaveSettings}
+                disabled={isSavingSettings}
+                className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors disabled:opacity-50"
+              >
+                {isSavingSettings ? "Saving..." : "Save Settings"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Import/Export Config Modal */}
       {isConfigModalOpen && (

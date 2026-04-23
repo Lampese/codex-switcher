@@ -16,6 +16,9 @@ pub struct AccountsStore {
     /// Set of account IDs that are masked (hidden)
     #[serde(default)]
     pub masked_account_ids: Vec<String>,
+    /// Usage warning and auto-switch settings
+    #[serde(default)]
+    pub usage_automation: UsageAutomationSettings,
 }
 
 impl Default for AccountsStore {
@@ -25,6 +28,46 @@ impl Default for AccountsStore {
             accounts: Vec::new(),
             active_account_id: None,
             masked_account_ids: Vec::new(),
+            usage_automation: UsageAutomationSettings::default(),
+        }
+    }
+}
+
+/// Strategy used when choosing an automatic switch target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoSwitchStrategy {
+    /// Choose the account with the most remaining 5h usage.
+    RemainingDesc,
+    /// Choose the account whose 5h usage window resets soonest.
+    ResetTimeAsc,
+}
+
+impl Default for AutoSwitchStrategy {
+    fn default() -> Self {
+        Self::RemainingDesc
+    }
+}
+
+/// Configurable usage warning and automatic switching behavior.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageAutomationSettings {
+    pub warning_remaining_percent: f64,
+    pub auto_switch_remaining_percent: f64,
+    pub auto_switch_enabled: bool,
+    pub auto_switch_strategy: AutoSwitchStrategy,
+    #[serde(default)]
+    pub priority_account_ids: Vec<String>,
+}
+
+impl Default for UsageAutomationSettings {
+    fn default() -> Self {
+        Self {
+            warning_remaining_percent: 10.0,
+            auto_switch_remaining_percent: 5.0,
+            auto_switch_enabled: false,
+            auto_switch_strategy: AutoSwitchStrategy::default(),
+            priority_account_ids: Vec::new(),
         }
     }
 }

@@ -5,6 +5,7 @@ import type {
   AccountWithUsage,
   WarmupSummary,
   ImportAccountsSummary,
+  UsageAutomationSettings,
 } from "../types";
 import { invokeBackend, type FileSource } from "../lib/platform";
 
@@ -353,6 +354,18 @@ export function useAccounts() {
     }
   }, []);
 
+  const loadUsageAutomationSettings = useCallback(async () => {
+    return await invokeBackend<UsageAutomationSettings>("get_usage_automation_settings");
+  }, []);
+
+  const saveUsageAutomationSettings = useCallback(
+    async (settings: UsageAutomationSettings) => {
+      await invokeBackend("set_usage_automation_settings", { settings });
+      await loadAccounts(true);
+    },
+    [loadAccounts]
+  );
+
   useEffect(() => {
     loadAccounts().then((accountList) => refreshUsage(accountList));
     
@@ -386,5 +399,7 @@ export function useAccounts() {
     cancelOAuthLogin,
     loadMaskedAccountIds,
     saveMaskedAccountIds,
+    loadUsageAutomationSettings,
+    saveUsageAutomationSettings,
   };
 }

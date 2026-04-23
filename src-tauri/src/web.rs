@@ -13,10 +13,12 @@ use crate::commands::{
     add_account_from_auth_json_text, add_account_from_file, cancel_login, check_codex_processes,
     complete_login, delete_account, export_accounts_full_encrypted_bytes,
     export_accounts_slim_text, get_active_account_info, get_masked_account_ids, get_usage,
-    import_accounts_full_encrypted_bytes, import_accounts_slim_text, list_accounts,
-    refresh_all_accounts_usage, rename_account, set_masked_account_ids, start_login,
-    switch_account, warmup_account, warmup_all_accounts,
+    get_usage_automation_settings, import_accounts_full_encrypted_bytes, import_accounts_slim_text,
+    list_accounts, refresh_all_accounts_usage, rename_account, set_masked_account_ids,
+    set_usage_automation_settings, start_login, switch_account, warmup_account,
+    warmup_all_accounts,
 };
+use crate::types::UsageAutomationSettings;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,6 +51,11 @@ struct ImportSlimArgs {
 #[derive(Debug, Deserialize)]
 struct MaskedIdsArgs {
     ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageAutomationSettingsArgs {
+    settings: UsageAutomationSettings,
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,6 +192,11 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
         "set_masked_account_ids" => {
             let args: MaskedIdsArgs = parse_args(payload)?;
             to_json(set_masked_account_ids(args.ids).await?)
+        }
+        "get_usage_automation_settings" => to_json(get_usage_automation_settings().await?),
+        "set_usage_automation_settings" => {
+            let args: UsageAutomationSettingsArgs = parse_args(payload)?;
+            to_json(set_usage_automation_settings(args.settings).await?)
         }
         "check_codex_processes" => to_json(check_codex_processes().await?),
         _ => Err(format!("Unsupported web command: {command}")),
