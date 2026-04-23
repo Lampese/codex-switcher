@@ -135,8 +135,10 @@ function App() {
         }
         return info;
       });
+      return info;
     } catch (err) {
       console.error("Failed to check processes:", err);
+      return null;
     }
   }, []);
 
@@ -213,8 +215,8 @@ function App() {
 
   const handleSwitch = async (accountId: string) => {
     // Check processes before switching
-    await checkProcesses();
-    if (processInfo && !processInfo.can_switch) {
+    const latestProcessInfo = await checkProcesses();
+    if (latestProcessInfo && !latestProcessInfo.can_switch) {
       return;
     }
 
