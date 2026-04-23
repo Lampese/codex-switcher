@@ -56,3 +56,55 @@ export interface ImportAccountsSummary {
   imported_count: number;
   skipped_count: number;
 }
+
+// ── Codex usage stats ────────────────────────────────────────────────────────
+
+export interface ModelTokenBreakdown {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+}
+
+export interface HeatmapDay {
+  date: string; // "YYYY-MM-DD"
+  count: number;
+}
+
+export interface DailyOverviewData {
+  date: string; // "YYYY-MM-DD"
+  sessions: number;
+  messages: number;
+  hourly_messages: number[]; // 24 hourly buckets
+}
+
+export interface DailyModelData {
+  date: string; // "YYYY-MM-DD"
+  models: Record<string, number>; // model → total tokens
+  details: Record<string, ModelTokenBreakdown>; // model → exact token split
+}
+
+export interface ModelTotals {
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  percentage: number;
+}
+
+export interface CodexStats {
+  sessions: number;
+  messages: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_tokens: number;
+  active_days: number;
+  current_streak: number;
+  longest_streak: number;
+  peak_hour: number | null;
+  favorite_model: string | null;
+  heatmap: HeatmapDay[];
+  daily_overview_data: DailyOverviewData[];
+  daily_model_data: DailyModelData[];
+  model_totals: ModelTotals[];
+  fun_fact: string | null;
+}

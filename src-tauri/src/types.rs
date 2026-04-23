@@ -1,5 +1,7 @@
 //! Core types for Codex Switcher
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -301,4 +303,102 @@ pub struct CreditStatusDetails {
     pub unlimited: bool,
     #[serde(default)]
     pub balance: Option<String>,
+}
+
+// ============================================================================
+// Codex usage stats
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelTokenBreakdown {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+}
+
+/// Aggregated stats from Codex local telemetry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodexStats {
+    pub sessions: u64,
+    pub messages: u64,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub total_tokens: u64,
+    pub active_days: u64,
+    pub current_streak: u64,
+    pub longest_streak: u64,
+    /// Most common hour of day for user messages (0–23)
+    pub peak_hour: Option<u8>,
+    /// Model name with the most total tokens
+    pub favorite_model: Option<String>,
+    /// Per-day token counts for the heatmap
+    pub heatmap: Vec<HeatmapDay>,
+    /// Per-day session/message counts used for filtered overview cards
+    pub daily_overview_data: Vec<DailyOverviewData>,
+    /// Per-day, per-model token breakdowns for the chart
+    pub daily_model_data: Vec<DailyModelData>,
+    /// Aggregated per-model totals
+    pub model_totals: Vec<ModelTotals>,
+    pub fun_fact: Option<String>,
+}
+
+impl CodexStats {
+    pub fn empty() -> Self {
+        Self {
+            sessions: 0,
+            messages: 0,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_tokens: 0,
+            active_days: 0,
+            current_streak: 0,
+            longest_streak: 0,
+            peak_hour: None,
+            favorite_model: None,
+            heatmap: Vec::new(),
+            daily_overview_data: Vec::new(),
+            daily_model_data: Vec::new(),
+            model_totals: Vec::new(),
+            fun_fact: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DailyOverviewData {
+    /// "YYYY-MM-DD"
+    pub date: String,
+    pub sessions: u64,
+    pub messages: u64,
+    /// Message counts for each hour bucket (0-23)
+    #[serde(default)]
+    pub hourly_messages: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeatmapDay {
+    /// "YYYY-MM-DD"
+    pub date: String,
+    /// Total tokens for the day
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DailyModelData {
+    /// "YYYY-MM-DD"
+    pub date: String,
+    /// model name → total tokens
+    pub models: HashMap<String, u64>,
+    /// model name → exact token split for the day
+    #[serde(default)]
+    pub details: HashMap<String, ModelTokenBreakdown>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelTotals {
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub percentage: f64,
 }
