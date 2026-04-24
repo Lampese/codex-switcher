@@ -81,7 +81,7 @@ jobs:
         with:
           tagName: ${{ steps.tag.outputs.tag }}
           releaseName: ${{ steps.tag.outputs.tag }}
-          releaseBody: ''
+          generateReleaseNotes: true
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true

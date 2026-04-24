@@ -3,6 +3,9 @@
 use std::process::Command;
 
 #[cfg(windows)]
+use anyhow::Context;
+
+#[cfg(windows)]
 use std::collections::HashSet;
 
 #[cfg(windows)]
@@ -58,50 +61,81 @@ fn find_codex_processes() -> anyhow::Result<(Vec<u32>, usize)> {
         let mut pids = Vec::new();
         let mut bg_count = 0;
 
-        // Use ps with custom format to get the pid and full command line
-        let output = Command::new("ps").args(["-eo", "pid,command"]).output();
+        // Include TTY so we can distinguish interactive CLI sessions from
+        // background helper processes such as lingering app-server instances.
+        let output = Command::new("ps")
+            .args(["-axo", "pid=,tty=,command="])
+            .output();
 
         if let Ok(output) = output {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines().skip(1) {
-                // Skip header
+            for line in stdout.lines() {
                 let line = line.trim();
                 if line.is_empty() {
                     continue;
                 }
 
-                // The first part is PID, the rest is the command string
-                if let Some((pid_str, command)) = line.split_once(' ') {
-                    let command = command.trim();
+                let mut parts = line.split_whitespace();
+                let Some(pid_str) = parts.next() else {
+                    continue;
+                };
+                let Some(tty) = parts.next() else {
+                    continue;
+                };
+                let command = parts.collect::<Vec<_>>().join(" ");
+                if command.is_empty() {
+                    continue;
+                }
 
-                    // Get the executable path/name (first word of the command string before args)
-                    let executable = command.split_whitespace().next().unwrap_or("");
+                let lowercase_command = command.to_ascii_lowercase();
+                let is_switcher = lowercase_command.contains("codex-switcher");
 
-                    // Check if the executable is exactly "codex" or ends with "/codex"
-                    let is_codex = executable == "codex" || executable.ends_with("/codex");
+                if is_switcher {
+                    continue;
+                }
 
-                    // Exclude if it's running from an extension or IDE integration (like Antigravity)
-                    // These are expected background processes we shouldn't block on
-                    let is_ide_plugin = is_ide_plugin_process(command);
+                // macOS app bundle paths can contain spaces (`Codex Helper.app`), so
+                // splitting on whitespace can turn helper processes into false
+                // positives for the main `Codex` app. Detect by full command shape
+                // instead of relying on the first token.
+                let first_token = command.split_whitespace().next().unwrap_or("");
+                let is_codex_cli = first_token == "codex" || first_token.ends_with("/codex");
+                let is_codex_desktop = command.contains(".app/Contents/MacOS/Codex")
+                    && !command.contains("Codex Helper")
+                    && !command.contains("CodexBar");
 
-                    // Skip our own app
-                    let is_switcher =
-                        command.contains("codex-switcher") || command.contains("Codex Switcher");
+                if !is_codex_cli && !is_codex_desktop {
+                    continue;
+                }
 
-                    if is_codex && !is_switcher {
-                        if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                            if pid != std::process::id() && !pids.contains(&pid) {
-                                if is_ide_plugin {
-                                    bg_count += 1;
-                                } else {
-                                    pids.push(pid);
-                                }
-                            }
-                        }
-                    }
+                let Ok(pid) = pid_str.parse::<u32>() else {
+                    continue;
+                };
+
+                if pid == std::process::id() || pids.contains(&pid) {
+                    continue;
+                }
+
+                let is_ide_plugin = is_ide_plugin_process(&lowercase_command);
+                let is_app_server = lowercase_command.contains("codex app-server");
+                let has_tty = tty != "??" && tty != "?";
+
+                if is_ide_plugin || is_app_server {
+                    bg_count += 1;
+                    continue;
+                }
+
+                if is_codex_desktop || has_tty {
+                    pids.push(pid);
+                } else {
+                    // Headless or orphaned codex processes should not block switching.
+                    bg_count += 1;
                 }
             }
         }
+
+        pids.sort_unstable();
+        pids.dedup();
 
         return Ok((pids, bg_count));
     }

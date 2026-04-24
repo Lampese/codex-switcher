@@ -251,7 +251,7 @@ async fn warmup_with_api_key(api_key: &str) -> Result<()> {
 
 fn build_warmup_payload(stream: bool, include_max_output_tokens: bool) -> serde_json::Value {
     let mut payload = json!({
-        "model": "gpt-5.3-codex",
+        "model": "gpt-5.4-mini",
         "instructions": "You are Codex.",
         "input": [
             {

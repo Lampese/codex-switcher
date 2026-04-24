@@ -1,7 +1,7 @@
 {
   "name": "codex-switcher",
   "private": true,
-  "version": "0.1.7",
+  "version": "0.2.2",
   "description": "A multi-account manager for Codex CLI",
   "type": "module",
   "scripts": {
@@ -13,7 +13,11 @@
     "version:bump": "node scripts/bump-version.mjs",
     "version:patch": "node scripts/bump-version.mjs patch",
     "version:minor": "node scripts/bump-version.mjs minor",
-    "version:major": "node scripts/bump-version.mjs major"
+    "version:major": "node scripts/bump-version.mjs major",
+    "release": "node scripts/release.mjs",
+    "release:patch": "node scripts/release.mjs patch",
+    "release:minor": "node scripts/release.mjs minor",
+    "release:major": "node scripts/release.mjs major"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.0",

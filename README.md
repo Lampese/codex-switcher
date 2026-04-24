@@ -77,10 +77,18 @@ Use the version bump helper to keep app versions in sync across Tauri, Cargo, an
 
 ```bash
 # Exact version
-pnpm version:bump 0.1.7
+pnpm version:bump 0.2.1
 
 # Semver bumps
 pnpm version:patch
 pnpm version:minor
 pnpm version:major
+
+# Prepare a release commit and tag
+# This automatically runs the version bump first.
+pnpm release patch
+
+# Prepare and push a release
+# This automatically runs the version bump first.
+pnpm release patch -- --push
 ```

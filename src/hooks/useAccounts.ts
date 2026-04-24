@@ -93,70 +93,73 @@ export function useAccounts() {
       accountList?: AccountInfo[] | AccountWithUsage[],
       options?: { refreshMetadata?: boolean }
     ) => {
-    try {
-      let list = accountList ?? accountsRef.current;
-      if (list.length === 0) {
-        return;
-      }
+      try {
+        let list = accountList ?? accountsRef.current;
+        if (list.length === 0) {
+          return;
+        }
 
-      let accountIds = list.map((account) => account.id);
-      const accountIdSet = new Set(accountIds);
+        if (options?.refreshMetadata) {
+          await runWithConcurrency(
+            list,
+            async (account) => {
+              await invokeBackend<AccountInfo>("refresh_account_metadata", {
+                accountId: account.id,
+              });
+            },
+            maxConcurrentUsageRequests
+          );
 
-      if (options?.refreshMetadata) {
+          list = await loadAccounts(true);
+        }
+
+        const accountIds = list.map((account) => account.id);
+        const accountIdSet = new Set(accountIds);
+        const usageResults = new Map<string, UsageInfo>();
+
+        setAccounts((prev) =>
+          prev.map((account) =>
+            accountIdSet.has(account.id)
+              ? { ...account, usageLoading: true }
+              : account
+          )
+        );
+
         await runWithConcurrency(
-          accountIds,
-          async (accountId) => {
-            await invokeBackend<AccountInfo>("refresh_account_metadata", { accountId });
+          list,
+          async (account) => {
+            try {
+              const usage = await invokeBackend<UsageInfo>("get_usage", {
+                accountId: account.id,
+              });
+              usageResults.set(account.id, usage);
+            } catch (err) {
+              console.error("Failed to refresh usage:", err);
+              const message = err instanceof Error ? err.message : String(err);
+              usageResults.set(
+                account.id,
+                buildUsageError(account.id, message, account.plan_type ?? null)
+              );
+            }
           },
           maxConcurrentUsageRequests
         );
 
-        list = await loadAccounts(true);
-        accountIds = list.map((account) => account.id);
+        setAccounts((prev) =>
+          prev.map((account) => {
+            const usage = usageResults.get(account.id);
+            if (!usage) return account;
+            return {
+              ...account,
+              usage,
+              usageLoading: false,
+            };
+          })
+        );
+      } catch (err) {
+        console.error("Failed to refresh usage:", err);
+        throw err;
       }
-
-      setAccounts((prev) =>
-        prev.map((account) =>
-          accountIdSet.has(account.id)
-            ? { ...account, usageLoading: true }
-            : account
-        )
-      );
-
-      await runWithConcurrency(
-        accountIds,
-        async (accountId) => {
-          try {
-            const usage = await invokeBackend<UsageInfo>("get_usage", { accountId });
-            setAccounts((prev) =>
-              prev.map((account) =>
-                account.id === accountId
-                  ? { ...account, usage, usageLoading: false }
-                  : account
-              )
-            );
-          } catch (err) {
-            console.error("Failed to refresh usage:", err);
-            const message = err instanceof Error ? err.message : String(err);
-            setAccounts((prev) =>
-              prev.map((account) =>
-                account.id === accountId
-                  ? {
-                      ...account,
-                      usage: buildUsageError(accountId, message, account.plan_type ?? null),
-                      usageLoading: false,
-                    }
-                  : account
-              )
-            );
-          }
-        },
-        maxConcurrentUsageRequests
-      );
-    } catch (err) {
-      console.error("Failed to refresh usage:", err);
-      throw err;
-    }
     },
     [buildUsageError, loadAccounts, maxConcurrentUsageRequests, runWithConcurrency]
   );
