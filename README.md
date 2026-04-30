@@ -59,6 +59,20 @@ Optional environment variables:
 
 The browser dashboard serves the same UI and backend actions through `/api/invoke/*`, which makes it usable over LAN, Tailscale, or a remote host tunnel when you expose the chosen port safely.
 
+## Environment Variables
+
+Codex Switcher loads optional environment variables from `~/.codex-switcher/.env` on startup. This is useful for settings that must be available when the macOS app is launched from Finder or the Dock, where shell startup files are not inherited.
+
+Example proxy configuration:
+
+```env
+HTTPS_PROXY=http://127.0.0.1:7890
+HTTP_PROXY=http://127.0.0.1:7890
+NO_PROXY=localhost,127.0.0.1
+```
+
+Values already present in the process environment take precedence over values from this file.
+
 ## Disclaimer
 
 This tool is designed **exclusively for individuals who personally own multiple OpenAI/ChatGPT accounts**. It is intended to help users manage their own accounts more conveniently.

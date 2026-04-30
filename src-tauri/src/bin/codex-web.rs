@@ -6,6 +6,8 @@ fn main() {
 }
 
 fn run() -> anyhow::Result<()> {
+    codex_switcher_lib::load_config_env()?;
+
     let host = std::env::var("CODEX_SWITCHER_WEB_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port = std::env::var("CODEX_SWITCHER_WEB_PORT")
         .ok()
