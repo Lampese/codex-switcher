@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAccounts } from "./hooks/useAccounts";
+import { useForceCloseCodexProcesses } from "./hooks/useForceCloseCodexProcesses";
 import { AccountCard, AddAccountModal, UpdateChecker } from "./components";
 import type { CodexProcessInfo } from "./types";
 import {
@@ -277,6 +278,18 @@ function App() {
       return "Unknown error";
     }
   };
+
+  const {
+    forceCloseConfirmOpen,
+    setForceCloseConfirmOpen,
+    isForceClosingCodex,
+    forceCloseCodexProcesses,
+  } = useForceCloseCodexProcesses({
+    processCount: processInfo?.count ?? 0,
+    checkProcesses,
+    showToast: showWarmupToast,
+    formatError: formatWarmupError,
+  });
 
   const handleWarmupAccount = async (accountId: string, accountName: string) => {
     try {
@@ -567,22 +580,34 @@ function App() {
                     Codex Switcher
                   </h1>
                   {processInfo && (
-                    <span
-                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs border ${hasRunningProcesses
-                          ? "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-700"
-                          : "bg-green-50 text-green-700 border-green-200 dark:bg-green-900/30 dark:text-green-300 dark:border-green-700"
-                        }`}
-                    >
+                    <div className="inline-flex items-center gap-1">
                       <span
-                        className={`inline-block w-1.5 h-1.5 rounded-full ${hasRunningProcesses ? "bg-amber-500" : "bg-green-500"
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs border ${hasRunningProcesses
+                            ? "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-700"
+                            : "bg-green-50 text-green-700 border-green-200 dark:bg-green-900/30 dark:text-green-300 dark:border-green-700"
                           }`}
-                      ></span>
-                      <span>
-                        {hasRunningProcesses
-                          ? `${processInfo.count} Codex running`
-                          : "0 Codex running"}
+                      >
+                        <span
+                          className={`inline-block w-1.5 h-1.5 rounded-full ${hasRunningProcesses ? "bg-amber-500" : "bg-green-500"
+                            }`}
+                        ></span>
+                        <span>
+                          {hasRunningProcesses
+                            ? `${processInfo.count} Codex running`
+                            : "0 Codex running"}
+                        </span>
                       </span>
-                    </span>
+                      {hasRunningProcesses && (
+                        <button
+                          onClick={() => setForceCloseConfirmOpen(true)}
+                          disabled={isForceClosingCodex}
+                          className="inline-flex items-center rounded-md border border-red-200 bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700 transition-colors hover:bg-red-100 disabled:opacity-50 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300 dark:hover:bg-red-900/30"
+                          title="Force close running Codex processes"
+                        >
+                          Force close
+                        </button>
+                      )}
+                    </div>
                   )}
                 </div>
                 <p className="text-xs text-gray-500 dark:text-gray-400">
@@ -868,6 +893,48 @@ function App() {
       {deleteConfirmId && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-3 bg-red-600 text-white rounded-lg shadow-lg text-sm">
           Click delete again to confirm removal
+        </div>
+      )}
+
+      {forceCloseConfirmOpen && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-md mx-4 shadow-xl">
+            <div className="p-5 border-b border-gray-100 dark:border-gray-800">
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+                Force close running Codex processes?
+              </h2>
+            </div>
+            <div className="p-5 space-y-3">
+              <p className="text-sm text-gray-600 dark:text-gray-300">
+                This will force close {processInfo?.count ?? 0} Codex process
+                {(processInfo?.count ?? 0) === 1 ? "" : "es"} that currently
+                block account switching.
+              </p>
+              <p className="text-sm text-red-600 dark:text-red-300">
+                Unsaved Codex work may be lost.
+              </p>
+            </div>
+            <div className="flex justify-end gap-3 p-5 border-t border-gray-100 dark:border-gray-800">
+              <button
+                onClick={() => setForceCloseConfirmOpen(false)}
+                disabled={isForceClosingCodex}
+                className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  void forceCloseCodexProcesses();
+                }}
+                disabled={isForceClosingCodex}
+                className="px-4 py-2.5 text-sm font-medium rounded-lg bg-red-600 hover:bg-red-700 text-white transition-colors disabled:opacity-50"
+              >
+                {isForceClosingCodex
+                  ? "Force closing..."
+                  : "Force close running Codex processes"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
