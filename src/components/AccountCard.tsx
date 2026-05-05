@@ -7,13 +7,17 @@ interface AccountCardProps {
   onSwitch: () => void;
   onWarmup: () => Promise<void>;
   onDelete: () => void;
-  onRefresh: () => Promise<void>;
+  onRefresh: () => Promise<unknown>;
   onRename: (newName: string) => Promise<void>;
   switching?: boolean;
   switchDisabled?: boolean;
   warmingUp?: boolean;
   masked?: boolean;
   onToggleMask?: () => void;
+  autoWarmupEnabled?: boolean;
+  autoWarmupManagedByAll?: boolean;
+  autoWarmupLabel?: string;
+  onToggleAutoWarmup?: () => void;
 }
 
 function formatLastRefresh(date: Date | null): string {
@@ -96,6 +100,10 @@ export function AccountCard({
   warmingUp,
   masked = false,
   onToggleMask,
+  autoWarmupEnabled = false,
+  autoWarmupManagedByAll = false,
+  autoWarmupLabel,
+  onToggleAutoWarmup,
 }: AccountCardProps) {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(
@@ -298,6 +306,26 @@ export function AccountCard({
         >
           ⚡
         </button>
+        {onToggleAutoWarmup && (
+          <button
+            onClick={onToggleAutoWarmup}
+            disabled={autoWarmupManagedByAll}
+            className={`px-3 py-2 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
+              autoWarmupEnabled
+                ? "bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-300"
+                : "bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300"
+            } disabled:opacity-60`}
+            title={
+              autoWarmupManagedByAll
+                ? "Auto warm-up is enabled for all accounts"
+                : autoWarmupEnabled
+                  ? "Disable auto warm-up for this account"
+                : "Enable auto warm-up for this account"
+            }
+          >
+            {autoWarmupLabel ?? `Auto: ${autoWarmupEnabled ? "on" : "off"}`}
+          </button>
+        )}
         <button
           onClick={handleRefresh}
           disabled={isRefreshing}
