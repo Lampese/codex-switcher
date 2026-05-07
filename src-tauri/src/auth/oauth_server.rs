@@ -79,14 +79,14 @@ fn build_authorize_url(
 
 /// Token response from the OAuth server
 #[derive(Debug, Clone, serde::Deserialize)]
-struct TokenResponse {
-    id_token: String,
-    access_token: String,
-    refresh_token: String,
+pub(crate) struct TokenResponse {
+    pub id_token: String,
+    pub access_token: String,
+    pub refresh_token: String,
 }
 
 /// Exchange authorization code for tokens
-async fn exchange_code_for_tokens(
+pub(crate) async fn exchange_code_for_tokens(
     issuer: &str,
     client_id: &str,
     redirect_uri: &str,

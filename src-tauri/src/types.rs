@@ -331,6 +331,19 @@ pub struct OAuthLoginInfo {
     pub callback_port: u16,
 }
 
+/// Device-code login information returned to frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceLoginInfo {
+    /// The URL where the user enters the one-time code.
+    pub verification_url: String,
+    /// One-time user code displayed to the user.
+    pub user_code: String,
+    /// Number of seconds before this code expires.
+    pub expires_in_seconds: u64,
+    /// Suggested polling interval in seconds.
+    pub interval_seconds: u64,
+}
+
 // ============================================================================
 // API Response types (from Codex backend)
 // ============================================================================

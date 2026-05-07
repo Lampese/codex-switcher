@@ -34,6 +34,13 @@ export interface OAuthLoginInfo {
   callback_port: number;
 }
 
+export interface DeviceLoginInfo {
+  verification_url: string;
+  user_code: string;
+  expires_in_seconds: number;
+  interval_seconds: number;
+}
+
 export interface AccountWithUsage extends AccountInfo {
   usage?: UsageInfo;
   usageLoading?: boolean;

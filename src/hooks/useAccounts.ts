@@ -5,6 +5,7 @@ import type {
   AccountWithUsage,
   WarmupSummary,
   ImportAccountsSummary,
+  DeviceLoginInfo,
 } from "../types";
 import { invokeBackend, type FileSource } from "../lib/platform";
 
@@ -301,6 +302,25 @@ export function useAccounts() {
     }
   }, [loadAccounts, refreshUsage]);
 
+  const startDeviceLogin = useCallback(async (accountName: string) => {
+    try {
+      return await invokeBackend<DeviceLoginInfo>("start_device_login", { accountName });
+    } catch (err) {
+      throw err;
+    }
+  }, []);
+
+  const completeDeviceLogin = useCallback(async () => {
+    try {
+      const account = await invokeBackend<AccountInfo>("complete_device_login");
+      const accountList = await loadAccounts();
+      await refreshUsage(accountList);
+      return account;
+    } catch (err) {
+      throw err;
+    }
+  }, [loadAccounts, refreshUsage]);
+
   const exportAccountsSlimText = useCallback(async () => {
     try {
       return await invokeBackend<string>("export_accounts_slim_text");
@@ -408,6 +428,8 @@ export function useAccounts() {
     importAccountsFullEncryptedFile,
     startOAuthLogin,
     completeOAuthLogin,
+    startDeviceLogin,
+    completeDeviceLogin,
     cancelOAuthLogin,
     loadMaskedAccountIds,
     saveMaskedAccountIds,

@@ -36,6 +36,8 @@ function App() {
     importAccountsSlimText,
     startOAuthLogin,
     completeOAuthLogin,
+    startDeviceLogin,
+    completeDeviceLogin,
     cancelOAuthLogin,
     loadMaskedAccountIds,
     saveMaskedAccountIds,
@@ -878,6 +880,8 @@ function App() {
         onImportFile={importFromFile}
         onStartOAuth={startOAuthLogin}
         onCompleteOAuth={completeOAuthLogin}
+        onStartDevice={startDeviceLogin}
+        onCompleteDevice={completeDeviceLogin}
         onCancelOAuth={cancelOAuthLogin}
       />
 

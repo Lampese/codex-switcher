@@ -6,6 +6,7 @@ import {
   pickAuthJsonFile,
   type FileSource,
 } from "../lib/platform";
+import type { DeviceLoginInfo } from "../types";
 
 interface AddAccountModalProps {
   isOpen: boolean;
@@ -13,10 +14,13 @@ interface AddAccountModalProps {
   onImportFile: (source: FileSource, name: string) => Promise<void>;
   onStartOAuth: (name: string) => Promise<{ auth_url: string }>;
   onCompleteOAuth: () => Promise<unknown>;
+  onStartDevice: (name: string) => Promise<DeviceLoginInfo>;
+  onCompleteDevice: () => Promise<unknown>;
   onCancelOAuth: () => Promise<void>;
 }
 
 type Tab = "oauth" | "import";
+type LoginMethod = "browser" | "device";
 
 export function AddAccountModal({
   isOpen,
@@ -24,15 +28,19 @@ export function AddAccountModal({
   onImportFile,
   onStartOAuth,
   onCompleteOAuth,
+  onStartDevice,
+  onCompleteDevice,
   onCancelOAuth,
 }: AddAccountModalProps) {
   const [activeTab, setActiveTab] = useState<Tab>("oauth");
+  const [loginMethod, setLoginMethod] = useState<LoginMethod>("browser");
   const [name, setName] = useState("");
   const [fileSource, setFileSource] = useState<FileSource | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [oauthPending, setOauthPending] = useState(false);
   const [authUrl, setAuthUrl] = useState<string>("");
+  const [deviceInfo, setDeviceInfo] = useState<DeviceLoginInfo | null>(null);
   const [copied, setCopied] = useState<boolean>(false);
   const isPrimaryDisabled = loading || (activeTab === "oauth" && oauthPending);
   const tauriRuntime = isTauriRuntime();
@@ -44,6 +52,8 @@ export function AddAccountModal({
     setLoading(false);
     setOauthPending(false);
     setAuthUrl("");
+    setDeviceInfo(null);
+    setCopied(false);
   };
 
   const handleClose = () => {
@@ -63,13 +73,24 @@ export function AddAccountModal({
     try {
       setLoading(true);
       setError(null);
-      const info = await onStartOAuth(name.trim());
-      setAuthUrl(info.auth_url);
+      if (loginMethod === "browser") {
+        const info = await onStartOAuth(name.trim());
+        setAuthUrl(info.auth_url);
+        setDeviceInfo(null);
+      } else {
+        const info = await onStartDevice(name.trim());
+        setDeviceInfo(info);
+        setAuthUrl("");
+      }
       setOauthPending(true);
       setLoading(false);
 
       // Wait for completion
-      await onCompleteOAuth();
+      if (loginMethod === "browser") {
+        await onCompleteOAuth();
+      } else {
+        await onCompleteDevice();
+      }
       handleClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -168,61 +189,142 @@ export function AddAccountModal({
 
           {/* Tab-specific content */}
           {activeTab === "oauth" && (
-            <div className="text-sm text-gray-500 dark:text-gray-400">
+            <div className="text-sm text-gray-500 dark:text-gray-400 space-y-4">
+              {!oauthPending && (
+                <div className="grid grid-cols-2 gap-2 p-1 bg-gray-100 dark:bg-gray-800 rounded-lg">
+                  {(["browser", "device"] as LoginMethod[]).map((method) => (
+                    <button
+                      key={method}
+                      onClick={() => {
+                        setLoginMethod(method);
+                        setError(null);
+                        setCopied(false);
+                      }}
+                      className={`px-3 py-2 rounded-md text-xs font-medium transition-colors ${
+                        loginMethod === method
+                          ? "bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 shadow-sm"
+                          : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
+                      }`}
+                    >
+                      {method === "browser" ? "Browser" : "Device code"}
+                    </button>
+                  ))}
+                </div>
+              )}
               {oauthPending ? (
                 <div className="text-center py-4">
                   <div className="animate-spin h-8 w-8 border-2 border-gray-900 dark:border-gray-100 border-t-transparent rounded-full mx-auto mb-3"></div>
-                  <p className="text-gray-700 dark:text-gray-300 font-medium mb-2">Waiting for browser login...</p>
-                  <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
-                    Please open the following link in your browser to proceed:
+                  <p className="text-gray-700 dark:text-gray-300 font-medium mb-2">
+                    {loginMethod === "browser"
+                      ? "Waiting for browser login..."
+                      : "Waiting for device approval..."}
                   </p>
-                  <div className="flex items-center gap-2 mb-2 bg-gray-50 dark:bg-gray-800 p-2 rounded-lg border border-gray-200 dark:border-gray-700">
-                    <input
-                      type="text"
-                      readOnly
-                      value={authUrl}
-                      className="flex-1 bg-transparent border-none text-xs text-gray-600 dark:text-gray-300 focus:outline-none focus:ring-0 truncate"
-                    />
-                    <button
-                      onClick={() => {
-                        void navigator.clipboard
-                          .writeText(authUrl)
-                          .then(() => {
-                            setCopied(true);
-                            setTimeout(() => setCopied(false), 2000);
-                          })
-                          .catch(() => {
-                            setError("Clipboard unavailable. Copy the link manually.");
-                          });
-                      }}
-                      className={`px-3 py-1.5 border rounded text-xs font-medium transition-colors shrink-0 
-                        ${copied
-                          ? "bg-green-50 dark:bg-green-900/30 border-green-200 dark:border-green-700 text-green-700 dark:text-green-300"
-                          : "bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-800"
-                        }`}
-                    >
-                      {copied ? "Copied!" : "Copy"}
-                    </button>
-                    <button
-                      onClick={() => {
-                        void openExternalUrl(authUrl);
-                      }}
-                      className="px-3 py-1.5 bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 border border-gray-900 dark:border-gray-100 rounded text-xs font-medium text-white dark:text-gray-900 transition-colors shrink-0"
-                    >
-                      Open
-                    </button>
-                  </div>
-                  {!tauriRuntime && (
-                    <p className="text-xs text-amber-600">
-                      OAuth login must finish on the same host machine because the callback
-                      redirects to `localhost`.
-                    </p>
+                  {loginMethod === "browser" ? (
+                    <>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
+                        Please open the following link in your browser to proceed:
+                      </p>
+                      <div className="flex items-center gap-2 mb-2 bg-gray-50 dark:bg-gray-800 p-2 rounded-lg border border-gray-200 dark:border-gray-700">
+                        <input
+                          type="text"
+                          readOnly
+                          value={authUrl}
+                          className="flex-1 bg-transparent border-none text-xs text-gray-600 dark:text-gray-300 focus:outline-none focus:ring-0 truncate"
+                        />
+                        <button
+                          onClick={() => {
+                            void navigator.clipboard
+                              .writeText(authUrl)
+                              .then(() => {
+                                setCopied(true);
+                                setTimeout(() => setCopied(false), 2000);
+                              })
+                              .catch(() => {
+                                setError("Clipboard unavailable. Copy the link manually.");
+                              });
+                          }}
+                          className={`px-3 py-1.5 border rounded text-xs font-medium transition-colors shrink-0
+                            ${
+                              copied
+                                ? "bg-green-50 dark:bg-green-900/30 border-green-200 dark:border-green-700 text-green-700 dark:text-green-300"
+                                : "bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-800"
+                            }`}
+                        >
+                          {copied ? "Copied!" : "Copy"}
+                        </button>
+                        <button
+                          onClick={() => {
+                            void openExternalUrl(authUrl);
+                          }}
+                          className="px-3 py-1.5 bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 border border-gray-900 dark:border-gray-100 rounded text-xs font-medium text-white dark:text-gray-900 transition-colors shrink-0"
+                        >
+                          Open
+                        </button>
+                      </div>
+                      {!tauriRuntime && (
+                        <p className="text-xs text-amber-600">
+                          OAuth login must finish on the same host machine because the callback
+                          redirects to `localhost`.
+                        </p>
+                      )}
+                    </>
+                  ) : (
+                    deviceInfo && (
+                      <>
+                        <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
+                          Open the link and enter this one-time code:
+                        </p>
+                        <div className="mb-3 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 p-3">
+                          <div className="mb-3 font-mono text-2xl font-semibold tracking-normal text-gray-900 dark:text-gray-100">
+                            {deviceInfo.user_code}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => {
+                                void navigator.clipboard
+                                  .writeText(deviceInfo.user_code)
+                                  .then(() => {
+                                    setCopied(true);
+                                    setTimeout(() => setCopied(false), 2000);
+                                  })
+                                  .catch(() => {
+                                    setError("Clipboard unavailable. Copy the code manually.");
+                                  });
+                              }}
+                              className={`flex-1 px-3 py-1.5 border rounded text-xs font-medium transition-colors
+                                ${
+                                  copied
+                                    ? "bg-green-50 dark:bg-green-900/30 border-green-200 dark:border-green-700 text-green-700 dark:text-green-300"
+                                    : "bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-800"
+                                }`}
+                            >
+                              {copied ? "Copied!" : "Copy Code"}
+                            </button>
+                            <button
+                              onClick={() => {
+                                void openExternalUrl(deviceInfo.verification_url);
+                              }}
+                              className="flex-1 px-3 py-1.5 bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 border border-gray-900 dark:border-gray-100 rounded text-xs font-medium text-white dark:text-gray-900 transition-colors"
+                            >
+                              Open Page
+                            </button>
+                          </div>
+                        </div>
+                        <p className="text-xs text-gray-500 dark:text-gray-400 break-all">
+                          {deviceInfo.verification_url}
+                        </p>
+                        <p className="mt-2 text-xs text-amber-600">
+                          Never share device codes. This code expires in 15 minutes.
+                        </p>
+                      </>
+                    )
                   )}
                 </div>
               ) : (
                 <p>
-                  Click the button below to generate a login link.
-                  You will need to open it in your browser to authenticate.
+                  {loginMethod === "browser"
+                    ? "Click the button below to generate a login link. You will need to open it in your browser to authenticate."
+                    : "Click the button below to generate a one-time code. You can approve it from any browser."}
                 </p>
               )}
             </div>
@@ -274,7 +376,9 @@ export function AddAccountModal({
             {loading
               ? "Adding..."
               : activeTab === "oauth"
-                ? "Generate Login Link"
+                ? loginMethod === "browser"
+                  ? "Generate Login Link"
+                  : "Generate Device Code"
                 : "Import"}
           </button>
         </div>
