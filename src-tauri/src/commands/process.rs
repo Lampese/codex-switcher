@@ -310,3 +310,292 @@ where
 
     false
 }
+
+/// Open the Codex desktop app if it is installed.
+#[tauri::command]
+pub async fn open_codex_app() -> Result<(), String> {
+    tokio::task::spawn_blocking(open_codex_app_blocking)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn open_codex_app_blocking() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        if command_succeeds(Command::new("open").args(["-b", "com.openai.codex"])) {
+            return Ok(());
+        }
+
+        if command_succeeds(Command::new("open").args(["-a", "Codex"])) {
+            return Ok(());
+        }
+
+        return Err("Codex app is not installed or could not be opened".to_string());
+    }
+
+    #[cfg(windows)]
+    {
+        if open_windows_registered_app() {
+            return Ok(());
+        }
+
+        if let Some(path) = find_windows_codex_app() {
+            if spawn_windows_codex_exe(&path) {
+                return Ok(());
+            }
+        }
+
+        for shortcut in find_windows_codex_shortcuts() {
+            if open_windows_shortcut(&shortcut) {
+                return Ok(());
+            }
+        }
+
+        return Err("Codex app is not installed or could not be opened".to_string());
+    }
+
+    #[allow(unreachable_code)]
+    Err("Opening Codex app is only supported on macOS and Windows".to_string())
+}
+
+fn command_succeeds(command: &mut Command) -> bool {
+    command
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn find_windows_codex_app() -> Option<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+
+    for key in ["LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(base) = std::env::var_os(key) {
+            let base = std::path::PathBuf::from(base);
+            candidates.push(base.join("Programs").join("Codex").join("Codex.exe"));
+            candidates.push(base.join("Programs").join("codex").join("Codex.exe"));
+            candidates.push(base.join("Codex").join("Codex.exe"));
+            candidates.push(base.join("OpenAI").join("Codex").join("Codex.exe"));
+            candidates.push(
+                base.join("OpenAI")
+                    .join("Codex")
+                    .join("bin")
+                    .join("codex.exe"),
+            );
+            candidates.push(base.join("OpenAI Codex").join("Codex.exe"));
+            candidates.push(base.join("Codex Desktop").join("Codex.exe"));
+        }
+    }
+
+    candidates.extend(find_windows_codex_apps_in_programs());
+    candidates.extend(find_windows_codex_apps_in_package_cache());
+
+    candidates
+        .into_iter()
+        .find(|path| path.is_file() && looks_like_windows_desktop_app(path))
+}
+
+#[cfg(windows)]
+fn looks_like_windows_desktop_app(path: &std::path::Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+
+    if is_windows_openai_codex_bin(path) {
+        return true;
+    }
+
+    parent.join("resources").join("app.asar").is_file()
+        || parent.join("resources").join("app").is_dir()
+        || parent.join("resources").is_dir()
+}
+
+#[cfg(windows)]
+fn is_windows_openai_codex_bin(path: &std::path::Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    if !file_name.eq_ignore_ascii_case("codex.exe") {
+        return false;
+    }
+
+    let normalized = path
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    normalized.contains("\\openai\\codex\\bin\\codex.exe")
+}
+
+#[cfg(windows)]
+fn spawn_windows_codex_exe(path: &std::path::Path) -> bool {
+    let mut command = Command::new(path);
+    command.creation_flags(CREATE_NO_WINDOW);
+    if let Some(parent) = path.parent() {
+        command.current_dir(parent);
+    }
+    command.spawn().is_ok()
+}
+
+#[cfg(windows)]
+fn open_windows_registered_app() -> bool {
+    let script = r#"
+$app = Get-StartApps |
+  Where-Object { $_.Name -like '*Codex*' -or $_.AppID -like '*Codex*' } |
+  Select-Object -First 1
+if ($null -eq $app) { exit 1 }
+Start-Process ("shell:AppsFolder\" + $app.AppID)
+"#;
+
+    let mut command = Command::new("powershell.exe");
+    command.creation_flags(CREATE_NO_WINDOW);
+    command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    command_succeeds(&mut command)
+}
+
+#[cfg(windows)]
+fn find_windows_codex_shortcuts() -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+
+    for key in ["APPDATA", "ProgramData"] {
+        if let Some(base) = std::env::var_os(key) {
+            let programs = std::path::PathBuf::from(base)
+                .join("Microsoft")
+                .join("Windows")
+                .join("Start Menu")
+                .join("Programs");
+            candidates.push(programs.join("Codex.lnk"));
+            candidates.push(programs.join("OpenAI").join("Codex.lnk"));
+            collect_windows_codex_shortcuts(&programs, &mut candidates, 0);
+        }
+    }
+
+    candidates
+        .into_iter()
+        .filter(|path| path.is_file())
+        .collect()
+}
+
+#[cfg(windows)]
+fn open_windows_shortcut(path: &std::path::Path) -> bool {
+    let mut command = Command::new("cmd.exe");
+    command.creation_flags(CREATE_NO_WINDOW);
+    command.arg("/C").arg("start").arg("").arg(path);
+    command_succeeds(&mut command)
+}
+
+#[cfg(windows)]
+fn find_windows_codex_apps_in_programs() -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+
+    let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") else {
+        return candidates;
+    };
+
+    let programs = std::path::PathBuf::from(local_app_data).join("Programs");
+    collect_windows_codex_apps(&programs, &mut candidates, 0);
+    candidates
+}
+
+#[cfg(windows)]
+fn find_windows_codex_apps_in_package_cache() -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+
+    let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") else {
+        return candidates;
+    };
+
+    let packages = std::path::PathBuf::from(local_app_data).join("Packages");
+    let Ok(entries) = std::fs::read_dir(packages) else {
+        return candidates;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(dir_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+
+        if !dir_name.to_ascii_lowercase().starts_with("openai.codex_") {
+            continue;
+        }
+
+        candidates.push(
+            path.join("LocalCache")
+                .join("Local")
+                .join("OpenAI")
+                .join("Codex")
+                .join("bin")
+                .join("codex.exe"),
+        );
+    }
+
+    candidates
+}
+
+#[cfg(windows)]
+fn collect_windows_codex_apps(
+    dir: &std::path::Path,
+    candidates: &mut Vec<std::path::PathBuf>,
+    depth: usize,
+) {
+    if depth > 2 {
+        return;
+    }
+
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_windows_codex_apps(&path, candidates, depth + 1);
+            continue;
+        }
+
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+
+        if file_name.eq_ignore_ascii_case("Codex.exe") {
+            candidates.push(path);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn collect_windows_codex_shortcuts(
+    dir: &std::path::Path,
+    candidates: &mut Vec<std::path::PathBuf>,
+    depth: usize,
+) {
+    if depth > 3 {
+        return;
+    }
+
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_windows_codex_shortcuts(&path, candidates, depth + 1);
+            continue;
+        }
+
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+
+        if file_name.to_ascii_lowercase().contains("codex")
+            && path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"))
+        {
+            candidates.push(path);
+        }
+    }
+}

@@ -53,6 +53,7 @@ function App() {
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [processInfo, setProcessInfo] = useState<CodexProcessInfo | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isOpeningCodex, setIsOpeningCodex] = useState(false);
   const [isExportingSlim, setIsExportingSlim] = useState(false);
   const [isImportingSlim, setIsImportingSlim] = useState(false);
   const [isExportingFull, setIsExportingFull] = useState(false);
@@ -412,6 +413,22 @@ function App() {
     }
   };
 
+  const handleOpenCodexApp = async () => {
+    try {
+      setIsOpeningCodex(true);
+      await invokeBackend("open_codex_app");
+      showWarmupToast("Codex app opened.");
+      setTimeout(() => {
+        void checkProcesses();
+      }, 1500);
+    } catch (err) {
+      console.error("Failed to open Codex app:", err);
+      showWarmupToast(`Open Codex failed: ${formatWarmupError(err)}`, true);
+    } finally {
+      setIsOpeningCodex(false);
+    }
+  };
+
   const activeAccount = accounts.find((a) => a.is_active);
   const otherAccounts = accounts.filter((a) => !a.is_active);
   const hasRunningProcesses = processInfo && processInfo.count > 0;
@@ -583,6 +600,16 @@ function App() {
                           : "0 Codex running"}
                       </span>
                     </span>
+                  )}
+                  {isTauriRuntime() && processInfo && !hasRunningProcesses && (
+                    <button
+                      onClick={handleOpenCodexApp}
+                      disabled={isOpeningCodex}
+                      className="inline-flex items-center rounded-md border border-green-200 bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700 transition-colors hover:bg-green-100 disabled:opacity-50 dark:border-green-800 dark:bg-green-900/20 dark:text-green-300 dark:hover:bg-green-900/30"
+                      title="Open Codex app"
+                    >
+                      {isOpeningCodex ? "Opening..." : "Open Codex"}
+                    </button>
                   )}
                 </div>
                 <p className="text-xs text-gray-500 dark:text-gray-400">

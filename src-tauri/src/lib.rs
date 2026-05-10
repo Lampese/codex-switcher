@@ -28,6 +28,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::open_codex_app,
             // Account management
             list_accounts,
             get_active_account_info,
