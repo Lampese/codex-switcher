@@ -63,7 +63,7 @@ export function useAccounts() {
       setLoading(true);
       setError(null);
       const accountList = await invokeBackend<AccountInfo[]>("list_accounts");
-      
+
       if (preserveUsage) {
         // Preserve existing usage data when just updating account info
         setAccounts((prev) => {
@@ -192,10 +192,10 @@ export function useAccounts() {
         prev.map((a) =>
           a.id === accountId
             ? {
-                ...a,
-                usage: buildUsageError(accountId, message, a.plan_type ?? null),
-                usageLoading: false,
-              }
+              ...a,
+              usage: buildUsageError(accountId, message, a.plan_type ?? null),
+              usageLoading: false,
+            }
             : a
         )
       );
@@ -380,13 +380,37 @@ export function useAccounts() {
 
   useEffect(() => {
     loadAccounts().then((accountList) => refreshUsage(accountList));
-    
-    // Auto-refresh usage every 60 seconds (same as official Codex CLI)
-    const interval = setInterval(() => {
-      refreshUsage().catch(() => {});
-    }, 60000);
-    
-    return () => clearInterval(interval);
+
+    // Start backend auto-poll and listen for events instead of frontend setInterval
+    let unlisten: (() => void) | undefined;
+    let mounted = true;
+
+    (async () => {
+      try {
+        await invokeBackend("start_auto_usage_poll", { intervalMinutes: 1 });
+
+        // Dynamic import to avoid issues in non-Tauri environments
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlistenFn = await listen("usage-auto-refreshed", () => {
+          if (mounted) {
+            refreshUsage().catch(() => { });
+          }
+        });
+        unlisten = unlistenFn;
+      } catch {
+        // Fallback: if backend poll fails, use frontend interval
+        const interval = setInterval(() => {
+          refreshUsage().catch(() => { });
+        }, 60000);
+        unlisten = () => clearInterval(interval);
+      }
+    })();
+
+    return () => {
+      mounted = false;
+      unlisten?.();
+      invokeBackend("stop_auto_usage_poll").catch(() => { });
+    };
   }, [loadAccounts, refreshUsage]);
 
   return {

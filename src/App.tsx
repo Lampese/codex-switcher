@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAccounts } from "./hooks/useAccounts";
-import { AccountCard, AddAccountModal, UpdateChecker } from "./components";
+import { useInstances } from "./hooks/useInstances";
+import { AccountCard, AddAccountModal, UpdateChecker, InstancePanel } from "./components";
 import type { CodexProcessInfo } from "./types";
 import {
   exportFullBackupFile,
@@ -19,6 +20,17 @@ const isMacOs =
   /(Mac|iPhone|iPod|iPad)/i.test(navigator.userAgent);
 
 function App() {
+  const {
+    instances,
+    activeInstance,
+    loading: instancesLoading,
+    createInstance,
+    createEmptyInstance,
+    switchInstance,
+    removeInstance,
+    bindAccount,
+  } = useInstances();
+
   const {
     accounts,
     loading,
@@ -305,8 +317,7 @@ function App() {
 
       if (summary.failed_account_ids.length === 0) {
         showWarmupToast(
-          `Warm-up sent for all ${summary.warmed_accounts} account${
-            summary.warmed_accounts === 1 ? "" : "s"
+          `Warm-up sent for all ${summary.warmed_accounts} account${summary.warmed_accounts === 1 ? "" : "s"
           }`
         );
       } else {
@@ -569,8 +580,8 @@ function App() {
                   {processInfo && (
                     <span
                       className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs border ${hasRunningProcesses
-                          ? "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-700"
-                          : "bg-green-50 text-green-700 border-green-200 dark:bg-green-900/30 dark:text-green-300 dark:border-green-700"
+                        ? "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-700"
+                        : "bg-green-50 text-green-700 border-green-200 dark:bg-green-900/30 dark:text-green-300 dark:border-green-700"
                         }`}
                     >
                       <span
@@ -761,6 +772,19 @@ function App() {
               </section>
             )}
 
+            {/* Instances */}
+            <InstancePanel
+              instances={instances}
+              activeInstance={activeInstance}
+              accounts={accounts.map((a) => ({ id: a.id, name: a.name }))}
+              loading={instancesLoading}
+              onCreateInstance={createInstance}
+              onCreateEmptyInstance={createEmptyInstance}
+              onSwitchInstance={switchInstance}
+              onRemoveInstance={removeInstance}
+              onBindAccount={bindAccount}
+            />
+
             {/* Other Accounts */}
             {otherAccounts.length > 0 && (
               <section>
@@ -779,12 +803,12 @@ function App() {
                         onChange={(e) =>
                           setOtherAccountsSort(
                             e.target.value as
-                              | "deadline_asc"
-                              | "deadline_desc"
-                              | "remaining_desc"
-                              | "remaining_asc"
-                              | "subscription_asc"
-                              | "subscription_desc"
+                            | "deadline_asc"
+                            | "deadline_desc"
+                            | "remaining_desc"
+                            | "remaining_asc"
+                            | "subscription_asc"
+                            | "subscription_desc"
                           )
                         }
                         className="appearance-none font-sans text-xs sm:text-sm font-medium pl-3 pr-9 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-gradient-to-b from-white to-gray-50 dark:from-gray-900 dark:to-gray-800 text-gray-700 dark:text-gray-200 shadow-sm hover:border-gray-400 dark:hover:border-gray-600 hover:shadow focus:outline-none focus:ring-2 focus:ring-gray-300 dark:focus:ring-gray-600 focus:border-gray-400 dark:focus:border-gray-600 transition-all"
@@ -854,11 +878,10 @@ function App() {
       {/* Warm-up Toast */}
       {warmupToast && (
         <div
-          className={`fixed bottom-20 left-1/2 -translate-x-1/2 px-4 py-3 rounded-lg shadow-lg text-sm ${
-            warmupToast.isError
+          className={`fixed bottom-20 left-1/2 -translate-x-1/2 px-4 py-3 rounded-lg shadow-lg text-sm ${warmupToast.isError
               ? "bg-red-600 text-white"
               : "bg-amber-100 text-amber-900 border border-amber-300 dark:bg-amber-900/30 dark:text-amber-200 dark:border-amber-700"
-          }`}
+            }`}
         >
           {warmupToast.message}
         </div>

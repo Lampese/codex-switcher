@@ -40,7 +40,8 @@ pub fn switch_to_account(account: &StoredAccount) -> Result<()> {
     let content =
         serde_json::to_string_pretty(&auth_json).context("Failed to serialize auth.json")?;
 
-    fs::write(&auth_path, content)
+    // Atomic write: temp file → rename, with auto .bak backup
+    super::atomic_write::write_string_atomic(&auth_path, &content)
         .with_context(|| format!("Failed to write auth.json: {}", auth_path.display()))?;
 
     // Set restrictive permissions on Unix

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 
+use super::atomic_write::{parse_json_with_auto_restore, write_string_atomic};
 use crate::types::{AccountsStore, AuthData, StoredAccount};
 
 /// Get the path to the codex-switcher config directory
@@ -30,7 +31,8 @@ pub fn load_accounts() -> Result<AccountsStore> {
     let content = fs::read_to_string(&path)
         .with_context(|| format!("Failed to read accounts file: {}", path.display()))?;
 
-    let store: AccountsStore = serde_json::from_str(&content)
+    // Auto-restore from .bak if JSON is corrupted
+    let store: AccountsStore = parse_json_with_auto_restore(&path, &content)
         .with_context(|| format!("Failed to parse accounts file: {}", path.display()))?;
 
     Ok(store)
@@ -49,7 +51,8 @@ pub fn save_accounts(store: &AccountsStore) -> Result<()> {
     let content =
         serde_json::to_string_pretty(store).context("Failed to serialize accounts store")?;
 
-    fs::write(&path, content)
+    // Atomic write: temp file → rename, with auto .bak backup
+    write_string_atomic(&path, &content)
         .with_context(|| format!("Failed to write accounts file: {}", path.display()))?;
 
     // Set restrictive permissions on Unix

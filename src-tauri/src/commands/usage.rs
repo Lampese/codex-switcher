@@ -99,3 +99,24 @@ pub async fn warmup_all_accounts() -> Result<WarmupSummary, String> {
         failed_account_ids,
     })
 }
+
+/// Start automatic usage polling in the background (interval in minutes)
+#[tauri::command]
+pub async fn start_auto_usage_poll(
+    app_handle: tauri::AppHandle,
+    interval_minutes: Option<u64>,
+) -> Result<bool, String> {
+    Ok(crate::api::usage_poller::start_polling(app_handle, interval_minutes).await)
+}
+
+/// Stop automatic usage polling
+#[tauri::command]
+pub async fn stop_auto_usage_poll() -> Result<bool, String> {
+    Ok(crate::api::usage_poller::stop_polling().await)
+}
+
+/// Check if automatic usage polling is active
+#[tauri::command]
+pub fn is_auto_usage_poll_active() -> bool {
+    crate::api::usage_poller::is_running()
+}
