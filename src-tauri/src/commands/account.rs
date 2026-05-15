@@ -28,6 +28,15 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+#[cfg(windows)]
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct WindowsRestartCandidate {
+    process_id: u32,
+    #[serde(default)]
+    command_line: String,
+}
+
 const SLIM_EXPORT_PREFIX: &str = "css1.";
 const SLIM_FORMAT_VERSION: u8 = 1;
 const SLIM_AUTH_API_KEY: u8 = 0;
@@ -174,6 +183,12 @@ pub async fn delete_account(account_id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Clear Codex's current auth.json without changing stored accounts.
+#[tauri::command]
+pub async fn clear_codex_auth() -> Result<(), String> {
+    crate::auth::clear_codex_auth().map_err(|e| e.to_string())
+}
+
 /// Rename an account
 #[tauri::command]
 pub async fn rename_account(account_id: String, new_name: String) -> Result<(), String> {
@@ -285,13 +300,7 @@ fn find_antigravity_processes() -> anyhow::Result<Vec<u32>> {
                 let pid_str = pid_str.trim();
                 let command = command.trim();
 
-                // Antigravity processes have a specific path format
-                let is_antigravity = (command.contains(".antigravity/extensions/openai.chatgpt")
-                    || command.contains(".vscode/extensions/openai.chatgpt"))
-                    && (command.ends_with("codex app-server --analytics-default-enabled")
-                        || command.contains("/codex app-server"));
-
-                if is_antigravity {
+                if is_restartable_antigravity_codex_command(command) {
                     if let Ok(pid) = pid_str.parse::<u32>() {
                         pids.push(pid);
                     }
@@ -302,30 +311,73 @@ fn find_antigravity_processes() -> anyhow::Result<Vec<u32>> {
 
     #[cfg(windows)]
     {
-        // Use tasklist on Windows
-        // For Windows we might need a more precise WMI query to get command line args,
-        // but for now we look for codex.exe PIDs and verify they're not ours
-        let output = std::process::Command::new("tasklist")
+        const POWERSHELL_SCRIPT: &str = r#"
+Get-CimInstance Win32_Process |
+  Where-Object { $_.Name -ieq 'codex.exe' } |
+  ForEach-Object {
+    [PSCustomObject]@{
+      ProcessId = [uint32]$_.ProcessId
+      CommandLine = if ($_.CommandLine) { $_.CommandLine } else { '' }
+    }
+  } |
+  ConvertTo-Json -Compress
+"#;
+
+        let output = std::process::Command::new("powershell.exe")
             .creation_flags(CREATE_NO_WINDOW)
-            .args(["/FI", "IMAGENAME eq codex.exe", "/FO", "CSV", "/NH"])
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                POWERSHELL_SCRIPT,
+            ])
             .output()?;
 
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("PowerShell process query failed: {}", stderr.trim());
+        }
+
         let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let parts: Vec<&str> = line.split(',').collect();
-            if parts.len() > 1 {
-                let name = parts[0].trim_matches('"').to_lowercase();
-                if name == "codex.exe" {
-                    let pid_str = parts[1].trim_matches('"');
-                    if let Ok(pid) = pid_str.parse::<u32>() {
-                        pids.push(pid);
-                    }
-                }
+        for process in parse_windows_restart_candidates(&stdout)? {
+            if is_restartable_antigravity_codex_command(&process.command_line) {
+                pids.push(process.process_id);
             }
         }
     }
 
     Ok(pids)
+}
+
+fn is_restartable_antigravity_codex_command(command: &str) -> bool {
+    let normalized = command.replace('\\', "/").to_ascii_lowercase();
+
+    normalized.contains(".antigravity/extensions/openai.chatgpt")
+        && normalized.contains("/codex")
+        && normalized.contains("app-server")
+}
+
+#[cfg(windows)]
+fn parse_windows_restart_candidates(stdout: &str) -> anyhow::Result<Vec<WindowsRestartCandidate>> {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let value: serde_json::Value =
+        serde_json::from_str(trimmed).context("failed to parse Windows restart process JSON")?;
+
+    match value {
+        serde_json::Value::Array(values) => values
+            .into_iter()
+            .map(|value| {
+                serde_json::from_value(value)
+                    .context("failed to deserialize Windows restart process entry")
+            })
+            .collect(),
+        value => Ok(vec![serde_json::from_value(value)
+            .context("failed to deserialize Windows restart process entry")?]),
+    }
 }
 
 fn encode_slim_payload_from_store(store: &AccountsStore) -> anyhow::Result<String> {
@@ -679,7 +731,6 @@ fn merge_accounts_store(
     imported: AccountsStore,
 ) -> (AccountsStore, ImportAccountsSummary) {
     let imported_version = imported.version;
-    let imported_active_id = imported.active_account_id;
     let total_in_payload = imported.accounts.len();
     let mut imported_count = 0usize;
     let mut existing_ids: HashSet<String> = current.accounts.iter().map(|a| a.id.clone()).collect();
@@ -704,15 +755,7 @@ fn merge_accounts_store(
         .is_some_and(|id| current.accounts.iter().any(|a| &a.id == id));
 
     if !current_active_is_valid {
-        if let Some(imported_active) = imported_active_id {
-            if current.accounts.iter().any(|a| a.id == imported_active) {
-                current.active_account_id = Some(imported_active);
-            } else {
-                current.active_account_id = current.accounts.first().map(|a| a.id.clone());
-            }
-        } else {
-            current.active_account_id = current.accounts.first().map(|a| a.id.clone());
-        }
+        current.active_account_id = None;
     }
 
     (
@@ -723,6 +766,78 @@ fn merge_accounts_store(
             skipped_count: total_in_payload.saturating_sub(imported_count),
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_restartable_antigravity_codex_command, merge_accounts_store};
+    use crate::types::{AccountsStore, StoredAccount};
+
+    #[test]
+    fn restart_filter_rejects_vscode_codex_extension_process() {
+        let command = r#"C:\Users\jeong\.vscode\extensions\openai.chatgpt-26.513.21555-win32-x64\bin\windows-x86_64\codex.exe app-server --analytics-default-enabled"#;
+
+        assert!(!is_restartable_antigravity_codex_command(command));
+    }
+
+    #[test]
+    fn restart_filter_accepts_antigravity_codex_app_server() {
+        let command = r#"C:\Users\jeong\.antigravity\extensions\openai.chatgpt-26.513.21555-win32-x64\bin\windows-x86_64\codex.exe app-server --analytics-default-enabled"#;
+
+        assert!(is_restartable_antigravity_codex_command(command));
+    }
+
+    #[test]
+    fn restart_filter_rejects_plain_codex_cli() {
+        let command = r#"C:\Users\jeong\AppData\Roaming\npm\codex.cmd"#;
+
+        assert!(!is_restartable_antigravity_codex_command(command));
+    }
+
+    #[test]
+    fn merge_imported_accounts_into_empty_store_does_not_mark_any_active() {
+        let first = StoredAccount::new_api_key("first".to_string(), "sk-first".to_string());
+        let first_id = first.id.clone();
+        let second = StoredAccount::new_api_key("second".to_string(), "sk-second".to_string());
+        let imported = AccountsStore {
+            accounts: vec![first, second],
+            active_account_id: Some(first_id),
+            ..AccountsStore::default()
+        };
+
+        let (merged, summary) = merge_accounts_store(AccountsStore::default(), imported);
+
+        assert_eq!(summary.imported_count, 2);
+        assert_eq!(merged.accounts.len(), 2);
+        assert_eq!(merged.active_account_id, None);
+    }
+
+    #[test]
+    fn merge_imported_accounts_preserves_valid_current_active_account() {
+        let active = StoredAccount::new_api_key("active".to_string(), "sk-active".to_string());
+        let active_id = active.id.clone();
+        let imported_account =
+            StoredAccount::new_api_key("imported".to_string(), "sk-imported".to_string());
+        let current = AccountsStore {
+            accounts: vec![active],
+            active_account_id: Some(active_id.clone()),
+            ..AccountsStore::default()
+        };
+        let imported = AccountsStore {
+            accounts: vec![imported_account],
+            active_account_id: None,
+            ..AccountsStore::default()
+        };
+
+        let (merged, summary) = merge_accounts_store(current, imported);
+
+        assert_eq!(summary.imported_count, 1);
+        assert_eq!(merged.accounts.len(), 2);
+        assert_eq!(
+            merged.active_account_id.as_deref(),
+            Some(active_id.as_str())
+        );
+    }
 }
 
 /// Get the list of masked account IDs

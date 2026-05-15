@@ -57,3 +57,12 @@ export interface ImportAccountsSummary {
   imported_count: number;
   skipped_count: number;
 }
+
+export interface InstanceProfile {
+  id: string;
+  name: string;
+  user_data_dir: string;
+  bind_account_id: string | null;
+  created_at: number;
+  last_used_at: number | null;
+}

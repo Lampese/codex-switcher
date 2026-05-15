@@ -10,6 +10,8 @@
     "preview": "vite preview",
     "tauri": "sh ./scripts/tauri.sh",
     "lan": "pnpm build && cargo run --manifest-path src-tauri/Cargo.toml --bin codex-web",
+    "desktop:update": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-desktop.ps1",
+    "desktop:update:no-launch": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-desktop.ps1 -NoLaunch",
     "version:bump": "node scripts/bump-version.mjs",
     "version:patch": "node scripts/bump-version.mjs patch",
     "version:minor": "node scripts/bump-version.mjs minor",

@@ -5,9 +5,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
 use crate::auth::oauth_server::{start_oauth_login, wait_for_oauth_login, OAuthLoginResult};
-use crate::auth::{
-    add_account, load_accounts, set_active_account, switch_to_account, touch_account,
-};
+use crate::auth::{add_account, load_accounts};
 use crate::types::{AccountInfo, OAuthLoginInfo};
 
 struct PendingOAuth {
@@ -58,11 +56,6 @@ pub async fn complete_login() -> Result<AccountInfo, String> {
 
     // Add the account to storage
     let stored = add_account(account).map_err(|e| e.to_string())?;
-
-    // Make it active and switch to it
-    set_active_account(&stored.id).map_err(|e| e.to_string())?;
-    switch_to_account(&stored).map_err(|e| e.to_string())?;
-    touch_account(&stored.id).map_err(|e| e.to_string())?;
 
     let store = load_accounts().map_err(|e| e.to_string())?;
     let active_id = store.active_account_id.as_deref();

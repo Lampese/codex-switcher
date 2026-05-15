@@ -106,7 +106,10 @@ pub async fn fetch_chatgpt_account_metadata(
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("Accounts check API error: {status} - {body}");
+        anyhow::bail!(
+            "{}",
+            format_chatgpt_api_error("Accounts check", status, &body)
+        );
     }
 
     let payload: AccountsCheckResponse = response
@@ -166,11 +169,9 @@ async fn parse_usage_response(
 
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        println!("[Usage] Error response: {body}");
-        return Ok(UsageInfo::error(
-            account_id.to_string(),
-            format!("API error: {status}"),
-        ));
+        let message = format_chatgpt_api_error("Usage", status, &body);
+        println!("[Usage] Error response: {}", truncate_text(&message, 300));
+        return Ok(UsageInfo::error(account_id.to_string(), message));
     }
 
     let body_text = response
@@ -395,6 +396,42 @@ fn truncate_text(text: &str, max_len: usize) -> String {
     out
 }
 
+fn format_chatgpt_api_error(operation: &str, status: StatusCode, body: &str) -> String {
+    if is_cloudflare_challenge(body) {
+        return format!(
+            "{operation} blocked by ChatGPT Cloudflare challenge ({status}). Open chatgpt.com, complete the browser check or sign in again, then retry."
+        );
+    }
+
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return format!("{operation} failed: {status}");
+    }
+
+    if looks_like_html(trimmed) {
+        return format!(
+            "{operation} failed: {status} (ChatGPT returned an HTML page instead of API JSON). Sign in again, then retry."
+        );
+    }
+
+    format!(
+        "{operation} failed: {status} - {}",
+        truncate_text(trimmed, 240)
+    )
+}
+
+fn is_cloudflare_challenge(body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
+    body.contains("__cf_chl")
+        || body.contains("challenge-platform")
+        || body.contains("enable javascript and cookies to continue")
+}
+
+fn looks_like_html(body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
+    body.starts_with("<!doctype html") || body.starts_with("<html") || body.contains("<body")
+}
+
 fn extract_text_from_sse(body: &str) -> Option<String> {
     let mut last_text: Option<String> = None;
     for line in body.lines() {
@@ -510,4 +547,23 @@ pub async fn refresh_all_usage(accounts: &[StoredAccount]) -> Vec<UsageInfo> {
 
     println!("[Usage] Refresh complete");
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_chatgpt_api_error;
+    use reqwest::StatusCode;
+
+    #[test]
+    fn cloudflare_challenge_error_is_short_and_actionable() {
+        let html = r#"<html><body><noscript>Enable JavaScript and cookies to continue</noscript><script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1"></script></body></html>"#;
+
+        let message = format_chatgpt_api_error("Accounts check", StatusCode::FORBIDDEN, html);
+
+        assert!(message.contains("Cloudflare challenge"));
+        assert!(message.contains("403 Forbidden"));
+        assert!(message.contains("sign in again"));
+        assert!(!message.contains("<html>"));
+        assert!(message.len() < 220);
+    }
 }

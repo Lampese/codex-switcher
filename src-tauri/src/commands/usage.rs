@@ -4,7 +4,9 @@ use crate::api::usage::{
     fetch_chatgpt_account_metadata, get_account_usage, refresh_all_usage,
     warmup_account as send_warmup,
 };
-use crate::auth::{get_account, load_accounts, refresh_chatgpt_tokens, update_account_metadata};
+use crate::auth::{
+    ensure_chatgpt_tokens_fresh, get_account, load_accounts, update_account_metadata,
+};
 use crate::types::{AccountInfo, AuthData, UsageInfo, WarmupSummary};
 use futures::{stream, StreamExt};
 
@@ -30,21 +32,26 @@ pub async fn refresh_account_metadata(account_id: String) -> Result<AccountInfo,
     let updated = match &account.auth_data {
         AuthData::ApiKey { .. } => account,
         AuthData::ChatGPT { .. } => {
-            let refreshed = refresh_chatgpt_tokens(&account)
+            let refreshed = ensure_chatgpt_tokens_fresh(&account)
                 .await
                 .map_err(|e| e.to_string())?;
-            let live_metadata = fetch_chatgpt_account_metadata(&refreshed)
-                .await
-                .map_err(|e| e.to_string())?;
-
-            update_account_metadata(
-                &account_id,
-                None,
-                None,
-                live_metadata.plan_type,
-                Some(live_metadata.subscription_expires_at),
-            )
-            .map_err(|e| e.to_string())?
+            match fetch_chatgpt_account_metadata(&refreshed).await {
+                Ok(live_metadata) => update_account_metadata(
+                    &account_id,
+                    None,
+                    None,
+                    live_metadata.plan_type,
+                    Some(live_metadata.subscription_expires_at),
+                )
+                .map_err(|e| e.to_string())?,
+                Err(err) => {
+                    println!(
+                        "[Usage] Metadata refresh skipped for {}: {err}",
+                        account.name
+                    );
+                    refreshed
+                }
+            }
         }
     };
 
@@ -98,4 +105,25 @@ pub async fn warmup_all_accounts() -> Result<WarmupSummary, String> {
         warmed_accounts,
         failed_account_ids,
     })
+}
+
+/// Start automatic usage polling in the background (interval in minutes)
+#[tauri::command]
+pub async fn start_auto_usage_poll(
+    app_handle: tauri::AppHandle,
+    interval_minutes: Option<u64>,
+) -> Result<bool, String> {
+    Ok(crate::api::usage_poller::start_polling(app_handle, interval_minutes).await)
+}
+
+/// Stop automatic usage polling
+#[tauri::command]
+pub async fn stop_auto_usage_poll() -> Result<bool, String> {
+    Ok(crate::api::usage_poller::stop_polling().await)
+}
+
+/// Check if automatic usage polling is active
+#[tauri::command]
+pub fn is_auto_usage_poll_active() -> bool {
+    crate::api::usage_poller::is_running()
 }

@@ -246,7 +246,11 @@ export function AccountCard({
 
       {/* Usage */}
       <div className="mb-3">
-        <UsageBar usage={account.usage} loading={isRefreshing || account.usageLoading} />
+        <UsageBar
+          usage={account.usage}
+          loading={isRefreshing || account.usageLoading}
+          onRetry={handleRefresh}
+        />
       </div>
 
       {/* Last refresh time */}
@@ -279,9 +283,9 @@ export function AccountCard({
                 ? "bg-gray-200 dark:bg-gray-800 text-gray-400 dark:text-gray-500 cursor-not-allowed"
                 : "bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900"
             }`}
-            title={switchDisabled ? "Close all Codex processes first" : undefined}
+            title={switchDisabled ? "Switching is temporarily unavailable" : undefined}
           >
-            {switching ? "Switching..." : switchDisabled ? "Codex Running" : "Switch"}
+            {switching ? "Switching..." : switchDisabled ? "Unavailable" : "Switch"}
           </button>
         )}
         <button

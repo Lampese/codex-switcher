@@ -3,14 +3,19 @@
 use anyhow::{Context, Result};
 use base64::Engine;
 use chrono::Utc;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 
-use super::{load_accounts, switch_to_account, update_account_chatgpt_tokens};
-use crate::types::{parse_chatgpt_id_token_claims, AuthData, StoredAccount};
+use super::{load_accounts, read_current_auth, switch_to_account, update_account_chatgpt_tokens};
+use crate::types::{parse_chatgpt_id_token_claims, AuthData, StoredAccount, TokenData};
 
 const DEFAULT_ISSUER: &str = "https://auth.openai.com";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const EXPIRY_SKEW_SECONDS: i64 = 60;
+
+static REFRESH_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
 
 #[derive(Debug, serde::Deserialize)]
 struct RefreshTokenResponse {
@@ -42,18 +47,39 @@ pub async fn ensure_chatgpt_tokens_fresh(account: &StoredAccount) -> Result<Stor
 
 /// Force-refresh ChatGPT OAuth tokens for an account.
 pub async fn refresh_chatgpt_tokens(account: &StoredAccount) -> Result<StoredAccount> {
-    let (current_id_token, current_refresh_token, current_account_id) = match &account.auth_data {
-        AuthData::ApiKey { .. } => return Ok(account.clone()),
-        AuthData::ChatGPT {
-            id_token,
-            refresh_token,
-            account_id,
-            ..
-        } => (id_token.clone(), refresh_token.clone(), account_id.clone()),
-    };
+    if matches!(account.auth_data, AuthData::ApiKey { .. }) {
+        return Ok(account.clone());
+    }
+
+    let refresh_lock = account_refresh_lock(&account.id).await;
+    let _guard = refresh_lock.lock().await;
+
+    let latest_account = load_accounts()?
+        .accounts
+        .into_iter()
+        .find(|candidate| candidate.id == account.id)
+        .unwrap_or_else(|| account.clone());
+    let latest_account = sync_account_from_current_auth_if_matching(&latest_account)?;
+
+    if chatgpt_refresh_token(&latest_account) != chatgpt_refresh_token(account)
+        && !chatgpt_access_token_expired_or_near_expiry(&latest_account)
+    {
+        return Ok(latest_account);
+    }
+
+    let (current_id_token, current_refresh_token, current_account_id) =
+        match &latest_account.auth_data {
+            AuthData::ApiKey { .. } => return Ok(account.clone()),
+            AuthData::ChatGPT {
+                id_token,
+                refresh_token,
+                account_id,
+                ..
+            } => (id_token.clone(), refresh_token.clone(), account_id.clone()),
+        };
 
     if current_refresh_token.is_empty() {
-        anyhow::bail!("Missing refresh token for account {}", account.name);
+        anyhow::bail!("Missing refresh token for account {}", latest_account.name);
     }
 
     let refreshed = refresh_tokens_with_refresh_token(&current_refresh_token).await?;
@@ -65,10 +91,11 @@ pub async fn refresh_chatgpt_tokens(account: &StoredAccount) -> Result<StoredAcc
     let claims = parse_chatgpt_id_token_claims(&next_id_token);
     let next_account_id = claims.account_id.or(current_account_id);
 
-    let is_active = load_accounts()?.active_account_id.as_deref() == Some(account.id.as_str());
+    let is_active =
+        load_accounts()?.active_account_id.as_deref() == Some(latest_account.id.as_str());
 
     let updated = update_account_chatgpt_tokens(
-        &account.id,
+        &latest_account.id,
         next_id_token,
         refreshed.access_token,
         next_refresh_token,
@@ -86,6 +113,90 @@ pub async fn refresh_chatgpt_tokens(account: &StoredAccount) -> Result<StoredAcc
     }
 
     Ok(updated)
+}
+
+async fn account_refresh_lock(account_id: &str) -> Arc<Mutex<()>> {
+    let locks = REFRESH_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = locks.lock().await;
+    map.entry(account_id.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+fn sync_account_from_current_auth_if_matching(account: &StoredAccount) -> Result<StoredAccount> {
+    let AuthData::ChatGPT {
+        id_token: stored_id_token,
+        access_token: stored_access_token,
+        refresh_token: stored_refresh_token,
+        account_id: stored_account_id,
+    } = &account.auth_data
+    else {
+        return Ok(account.clone());
+    };
+
+    let Some(auth) = read_current_auth()? else {
+        return Ok(account.clone());
+    };
+    let Some(tokens) = auth.tokens else {
+        return Ok(account.clone());
+    };
+
+    if !same_chatgpt_identity(account, &tokens) {
+        return Ok(account.clone());
+    }
+
+    if tokens.id_token == *stored_id_token
+        && tokens.access_token == *stored_access_token
+        && tokens.refresh_token == *stored_refresh_token
+    {
+        return Ok(account.clone());
+    }
+
+    let claims = parse_chatgpt_id_token_claims(&tokens.id_token);
+    let next_account_id = claims.account_id.or_else(|| stored_account_id.clone());
+
+    update_account_chatgpt_tokens(
+        &account.id,
+        tokens.id_token,
+        tokens.access_token,
+        tokens.refresh_token,
+        next_account_id,
+        claims.email,
+        claims.plan_type,
+        claims.subscription_expires_at,
+    )
+}
+
+fn same_chatgpt_identity(account: &StoredAccount, tokens: &TokenData) -> bool {
+    let claims = parse_chatgpt_id_token_claims(&tokens.id_token);
+    let stored_account_id = match &account.auth_data {
+        AuthData::ChatGPT { account_id, .. } => account_id.as_deref(),
+        AuthData::ApiKey { .. } => return false,
+    };
+
+    if let (Some(stored), Some(current)) = (stored_account_id, claims.account_id.as_deref()) {
+        return stored == current;
+    }
+
+    if let (Some(stored), Some(current)) = (account.email.as_deref(), claims.email.as_deref()) {
+        return stored.eq_ignore_ascii_case(current);
+    }
+
+    false
+}
+
+fn chatgpt_refresh_token(account: &StoredAccount) -> Option<&str> {
+    match &account.auth_data {
+        AuthData::ChatGPT { refresh_token, .. } => Some(refresh_token.as_str()),
+        AuthData::ApiKey { .. } => None,
+    }
+}
+
+fn chatgpt_access_token_expired_or_near_expiry(account: &StoredAccount) -> bool {
+    match &account.auth_data {
+        AuthData::ChatGPT { access_token, .. } => token_expired_or_near_expiry(access_token),
+        AuthData::ApiKey { .. } => false,
+    }
 }
 
 /// Build a new ChatGPT account from a refresh token.
@@ -187,4 +298,94 @@ async fn refresh_tokens_with_refresh_token(refresh_token: &str) -> Result<Refres
         .json::<RefreshTokenResponse>()
         .await
         .context("Failed to parse token refresh response")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_chatgpt_identity;
+    use crate::types::{StoredAccount, TokenData};
+    use base64::Engine;
+
+    #[test]
+    fn same_chatgpt_identity_matches_account_id() {
+        let account = StoredAccount::new_chatgpt(
+            "work".to_string(),
+            Some("user@example.com".to_string()),
+            None,
+            None,
+            id_token(Some("user@example.com"), Some("acc_123")),
+            "access".to_string(),
+            "refresh".to_string(),
+            Some("acc_123".to_string()),
+        );
+        let tokens = token_data(Some("other@example.com"), Some("acc_123"));
+
+        assert!(same_chatgpt_identity(&account, &tokens));
+    }
+
+    #[test]
+    fn same_chatgpt_identity_falls_back_to_email() {
+        let account = StoredAccount::new_chatgpt(
+            "work".to_string(),
+            Some("User@Example.com".to_string()),
+            None,
+            None,
+            id_token(Some("User@Example.com"), None),
+            "access".to_string(),
+            "refresh".to_string(),
+            None,
+        );
+        let tokens = token_data(Some("user@example.com"), None);
+
+        assert!(same_chatgpt_identity(&account, &tokens));
+    }
+
+    #[test]
+    fn same_chatgpt_identity_rejects_different_account() {
+        let account = StoredAccount::new_chatgpt(
+            "work".to_string(),
+            Some("user@example.com".to_string()),
+            None,
+            None,
+            id_token(Some("user@example.com"), Some("acc_123")),
+            "access".to_string(),
+            "refresh".to_string(),
+            Some("acc_123".to_string()),
+        );
+        let tokens = token_data(Some("user@example.com"), Some("acc_456"));
+
+        assert!(!same_chatgpt_identity(&account, &tokens));
+    }
+
+    fn token_data(email: Option<&str>, account_id: Option<&str>) -> TokenData {
+        TokenData {
+            id_token: id_token(email, account_id),
+            access_token: "next-access".to_string(),
+            refresh_token: "next-refresh".to_string(),
+            account_id: account_id.map(String::from),
+        }
+    }
+
+    fn id_token(email: Option<&str>, account_id: Option<&str>) -> String {
+        let mut payload = serde_json::Map::new();
+        if let Some(email) = email {
+            payload.insert("email".to_string(), serde_json::json!(email));
+        }
+
+        let mut auth = serde_json::Map::new();
+        if let Some(account_id) = account_id {
+            auth.insert(
+                "chatgpt_account_id".to_string(),
+                serde_json::json!(account_id),
+            );
+        }
+        payload.insert(
+            "https://api.openai.com/auth".to_string(),
+            serde_json::Value::Object(auth),
+        );
+
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::Value::Object(payload).to_string());
+        format!("header.{encoded}.signature")
+    }
 }

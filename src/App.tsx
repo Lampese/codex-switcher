@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAccounts } from "./hooks/useAccounts";
-import { AccountCard, AddAccountModal, UpdateChecker } from "./components";
+import { useInstances } from "./hooks/useInstances";
+import { AccountCard, AddAccountModal, UpdateChecker, InstancePanel } from "./components";
 import type { CodexProcessInfo } from "./types";
 import {
   exportFullBackupFile,
@@ -19,6 +20,19 @@ const isMacOs =
   /(Mac|iPhone|iPod|iPad)/i.test(navigator.userAgent);
 
 function App() {
+  const {
+    instances,
+    activeInstance,
+    loading: instancesLoading,
+    createInstance,
+    createEmptyInstance,
+    switchInstance,
+    removeInstance,
+    bindAccount,
+    getLaunchCommand,
+    launchCodex,
+  } = useInstances();
+
   const {
     accounts,
     loading,
@@ -50,7 +64,11 @@ function App() {
   const [configModalError, setConfigModalError] = useState<string | null>(null);
   const [configCopied, setConfigCopied] = useState(false);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
-  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [deleteDialog, setDeleteDialog] = useState<{
+    accountId: string;
+    clearCodexAuth: boolean;
+  } | null>(null);
+  const [isDeletingAccount, setIsDeletingAccount] = useState(false);
   const [processInfo, setProcessInfo] = useState<CodexProcessInfo | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isExportingSlim, setIsExportingSlim] = useState(false);
@@ -235,18 +253,29 @@ function App() {
     }
   };
 
-  const handleDelete = async (accountId: string) => {
-    if (deleteConfirmId !== accountId) {
-      setDeleteConfirmId(accountId);
-      setTimeout(() => setDeleteConfirmId(null), 3000);
-      return;
-    }
+  const openDeleteDialog = (accountId: string) => {
+    setDeleteDialog({ accountId, clearCodexAuth: false });
+  };
+
+  const handleDelete = async () => {
+    if (!deleteDialog) return;
 
     try {
-      await deleteAccount(accountId);
-      setDeleteConfirmId(null);
+      setIsDeletingAccount(true);
+      await deleteAccount(deleteDialog.accountId, {
+        clearCodexAuth: deleteDialog.clearCodexAuth,
+      });
+      setDeleteDialog(null);
+      showWarmupToast(
+        deleteDialog.clearCodexAuth
+          ? "Account removed and Codex auth.json cleared"
+          : "Account removed"
+      );
     } catch (err) {
       console.error("Failed to delete account:", err);
+      showWarmupToast(`Delete failed: ${formatWarmupError(err)}`, true);
+    } finally {
+      setIsDeletingAccount(false);
     }
   };
 
@@ -305,8 +334,7 @@ function App() {
 
       if (summary.failed_account_ids.length === 0) {
         showWarmupToast(
-          `Warm-up sent for all ${summary.warmed_accounts} account${
-            summary.warmed_accounts === 1 ? "" : "s"
+          `Warm-up sent for all ${summary.warmed_accounts} account${summary.warmed_accounts === 1 ? "" : "s"
           }`
         );
       } else {
@@ -414,7 +442,11 @@ function App() {
 
   const activeAccount = accounts.find((a) => a.is_active);
   const otherAccounts = accounts.filter((a) => !a.is_active);
+  const deleteDialogAccount = deleteDialog
+    ? accounts.find((a) => a.id === deleteDialog.accountId)
+    : null;
   const hasRunningProcesses = processInfo && processInfo.count > 0;
+  const switchBlocked = processInfo ? !processInfo.can_switch : false;
 
   const sortedOtherAccounts = useMemo(() => {
     const getResetDeadline = (resetAt: number | null | undefined) =>
@@ -569,8 +601,8 @@ function App() {
                   {processInfo && (
                     <span
                       className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs border ${hasRunningProcesses
-                          ? "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-700"
-                          : "bg-green-50 text-green-700 border-green-200 dark:bg-green-900/30 dark:text-green-300 dark:border-green-700"
+                        ? "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-700"
+                        : "bg-green-50 text-green-700 border-green-200 dark:bg-green-900/30 dark:text-green-300 dark:border-green-700"
                         }`}
                     >
                       <span
@@ -747,19 +779,34 @@ function App() {
                   onWarmup={() =>
                     handleWarmupAccount(activeAccount.id, activeAccount.name)
                   }
-                  onDelete={() => handleDelete(activeAccount.id)}
+                  onDelete={() => openDeleteDialog(activeAccount.id)}
                   onRefresh={() =>
                     refreshSingleUsage(activeAccount.id, { refreshMetadata: true })
                   }
                   onRename={(newName) => renameAccount(activeAccount.id, newName)}
                   switching={switchingId === activeAccount.id}
-                  switchDisabled={hasRunningProcesses ?? false}
+                  switchDisabled={switchBlocked}
                   warmingUp={isWarmingAll || warmingUpId === activeAccount.id}
                   masked={maskedAccounts.has(activeAccount.id)}
                   onToggleMask={() => toggleMask(activeAccount.id)}
                 />
               </section>
             )}
+
+            {/* Instances */}
+            <InstancePanel
+              instances={instances}
+              activeInstance={activeInstance}
+              accounts={accounts.map((a) => ({ id: a.id, name: a.name }))}
+              loading={instancesLoading}
+              onCreateInstance={createInstance}
+              onCreateEmptyInstance={createEmptyInstance}
+              onSwitchInstance={switchInstance}
+              onRemoveInstance={removeInstance}
+              onBindAccount={bindAccount}
+              onGetLaunchCommand={getLaunchCommand}
+              onLaunchCodex={launchCodex}
+            />
 
             {/* Other Accounts */}
             {otherAccounts.length > 0 && (
@@ -779,28 +826,28 @@ function App() {
                         onChange={(e) =>
                           setOtherAccountsSort(
                             e.target.value as
-                              | "deadline_asc"
-                              | "deadline_desc"
-                              | "remaining_desc"
-                              | "remaining_asc"
-                              | "subscription_asc"
-                              | "subscription_desc"
+                            | "deadline_asc"
+                            | "deadline_desc"
+                            | "remaining_desc"
+                            | "remaining_asc"
+                            | "subscription_asc"
+                            | "subscription_desc"
                           )
                         }
                         className="appearance-none font-sans text-xs sm:text-sm font-medium pl-3 pr-9 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-gradient-to-b from-white to-gray-50 dark:from-gray-900 dark:to-gray-800 text-gray-700 dark:text-gray-200 shadow-sm hover:border-gray-400 dark:hover:border-gray-600 hover:shadow focus:outline-none focus:ring-2 focus:ring-gray-300 dark:focus:ring-gray-600 focus:border-gray-400 dark:focus:border-gray-600 transition-all"
                       >
-                        <option value="deadline_asc">Reset: earliest to latest</option>
-                        <option value="deadline_desc">Reset: latest to earliest</option>
-                        <option value="remaining_desc">
+                        <option className="bg-white text-gray-900" value="deadline_asc">Reset: earliest to latest</option>
+                        <option className="bg-white text-gray-900" value="deadline_desc">Reset: latest to earliest</option>
+                        <option className="bg-white text-gray-900" value="remaining_desc">
                           % remaining: highest to lowest
                         </option>
-                        <option value="remaining_asc">
+                        <option className="bg-white text-gray-900" value="remaining_asc">
                           % remaining: lowest to highest
                         </option>
-                        <option value="subscription_asc">
+                        <option className="bg-white text-gray-900" value="subscription_asc">
                           Expiry: earliest to latest
                         </option>
-                        <option value="subscription_desc">
+                        <option className="bg-white text-gray-900" value="subscription_desc">
                           Expiry: latest to earliest
                         </option>
                       </select>
@@ -825,13 +872,13 @@ function App() {
                       account={account}
                       onSwitch={() => handleSwitch(account.id)}
                       onWarmup={() => handleWarmupAccount(account.id, account.name)}
-                      onDelete={() => handleDelete(account.id)}
+                      onDelete={() => openDeleteDialog(account.id)}
                       onRefresh={() =>
                         refreshSingleUsage(account.id, { refreshMetadata: true })
                       }
                       onRename={(newName) => renameAccount(account.id, newName)}
                       switching={switchingId === account.id}
-                      switchDisabled={hasRunningProcesses ?? false}
+                      switchDisabled={switchBlocked}
                       warmingUp={isWarmingAll || warmingUpId === account.id}
                       masked={maskedAccounts.has(account.id)}
                       onToggleMask={() => toggleMask(account.id)}
@@ -854,20 +901,72 @@ function App() {
       {/* Warm-up Toast */}
       {warmupToast && (
         <div
-          className={`fixed bottom-20 left-1/2 -translate-x-1/2 px-4 py-3 rounded-lg shadow-lg text-sm ${
-            warmupToast.isError
+          className={`fixed bottom-20 left-1/2 -translate-x-1/2 px-4 py-3 rounded-lg shadow-lg text-sm ${warmupToast.isError
               ? "bg-red-600 text-white"
               : "bg-amber-100 text-amber-900 border border-amber-300 dark:bg-amber-900/30 dark:text-amber-200 dark:border-amber-700"
-          }`}
+            }`}
         >
           {warmupToast.message}
         </div>
       )}
 
-      {/* Delete Confirmation Toast */}
-      {deleteConfirmId && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-3 bg-red-600 text-white rounded-lg shadow-lg text-sm">
-          Click delete again to confirm removal
+      {/* Delete Confirmation Modal */}
+      {deleteDialog && deleteDialogAccount && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+          <div className="w-full max-w-md rounded-2xl border border-gray-200 bg-white p-5 shadow-xl dark:border-gray-700 dark:bg-gray-900">
+            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+              Remove account?
+            </h2>
+            <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
+              {deleteDialogAccount.name} will be removed from Codex Switcher.
+            </p>
+            {deleteDialogAccount.is_active ? (
+              <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-200">
+                This is the active account. Removing it clears Active Account in the app, but
+                Codex can keep using the current auth.json until you switch another account or
+                clear it here.
+              </div>
+            ) : (
+              <div className="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-500 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400">
+                Codex auth.json will not be changed.
+              </div>
+            )}
+            {deleteDialogAccount.is_active && (
+              <label className="mt-4 flex items-start gap-3 text-sm text-gray-700 dark:text-gray-200">
+                <input
+                  type="checkbox"
+                  checked={deleteDialog.clearCodexAuth}
+                  onChange={(event) =>
+                    setDeleteDialog((prev) =>
+                      prev
+                        ? { ...prev, clearCodexAuth: event.currentTarget.checked }
+                        : prev
+                    )
+                  }
+                  className="mt-0.5 h-4 w-4 rounded border-gray-300 text-red-600 focus:ring-red-500"
+                />
+                <span>Clear Codex auth.json too</span>
+              </label>
+            )}
+            <div className="mt-5 flex justify-end gap-3">
+              <button
+                onClick={() => setDeleteDialog(null)}
+                disabled={isDeletingAccount}
+                className="rounded-lg bg-gray-100 px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  void handleDelete();
+                }}
+                disabled={isDeletingAccount}
+                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-50"
+              >
+                {isDeletingAccount ? "Removing..." : "Remove"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

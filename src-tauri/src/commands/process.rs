@@ -34,7 +34,11 @@ pub struct CodexProcessInfo {
     pub count: usize,
     /// Number of ignored background/stale Codex-related processes
     pub background_count: usize,
-    /// Whether switching is allowed (no active Codex app instances)
+    /// Whether switching is allowed.
+    ///
+    /// Running Codex sessions are reported for visibility, but they do not
+    /// block updating auth.json. Existing sessions may keep their current auth
+    /// until they are restarted.
     pub can_switch: bool,
     /// Process IDs of active Codex app instances
     pub pids: Vec<u32>,
@@ -44,14 +48,16 @@ pub struct CodexProcessInfo {
 #[tauri::command]
 pub async fn check_codex_processes() -> Result<CodexProcessInfo, String> {
     let (pids, bg_count) = find_codex_processes().map_err(|e| e.to_string())?;
-    let count = pids.len();
+    Ok(build_process_info(pids, bg_count))
+}
 
-    Ok(CodexProcessInfo {
-        count,
-        background_count: bg_count,
-        can_switch: count == 0,
+fn build_process_info(pids: Vec<u32>, background_count: usize) -> CodexProcessInfo {
+    CodexProcessInfo {
+        count: pids.len(),
+        background_count,
+        can_switch: true,
         pids,
-    })
+    }
 }
 
 /// Find all running codex processes. Returns (active_pids, background_count)
@@ -309,4 +315,19 @@ where
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_process_info;
+
+    #[test]
+    fn running_codex_processes_do_not_block_switching() {
+        let info = build_process_info(vec![101, 202], 3);
+
+        assert_eq!(info.count, 2);
+        assert_eq!(info.background_count, 3);
+        assert_eq!(info.pids, vec![101, 202]);
+        assert!(info.can_switch);
+    }
 }
