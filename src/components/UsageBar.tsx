@@ -1,8 +1,10 @@
 import type { UsageInfo } from "../types";
+import { openExternalUrl } from "../lib/platform";
 
 interface UsageBarProps {
   usage?: UsageInfo;
   loading?: boolean;
+  onRetry?: () => Promise<void>;
 }
 
 function formatResetTime(resetAt: number | null | undefined): string {
@@ -34,6 +36,10 @@ function formatWindowDuration(minutes: number | null | undefined): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h`;
   return `${Math.floor(hours / 24)}d`;
+}
+
+function isCloudflareChallengeError(error: string): boolean {
+  return error.toLowerCase().includes("cloudflare challenge");
 }
 
 function RateLimitBar({
@@ -82,7 +88,7 @@ function RateLimitBar({
   );
 }
 
-export function UsageBar({ usage, loading }: UsageBarProps) {
+export function UsageBar({ usage, loading, onRetry }: UsageBarProps) {
   if (loading && !usage) {
     return (
       <div className="space-y-2">
@@ -98,13 +104,44 @@ export function UsageBar({ usage, loading }: UsageBarProps) {
 
   if (!usage) {
     return (
-      <div className="text-xs text-gray-400 dark:text-gray-500 italic py-1 animate-pulse">
-        Fetching usage...
+      <div className="text-xs text-gray-400 dark:text-gray-500 italic py-1">
+        Usage not loaded
       </div>
     );
   }
 
   if (usage.error) {
+    if (isCloudflareChallengeError(usage.error)) {
+      return (
+        <div className="space-y-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-200">
+          <div>{usage.error}</div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                void openExternalUrl("https://chatgpt.com");
+              }}
+              className="rounded-md bg-amber-600 px-2.5 py-1 font-medium text-white transition-colors hover:bg-amber-700"
+            >
+              Open ChatGPT
+            </button>
+            {onRetry && (
+              <button
+                type="button"
+                onClick={() => {
+                  void onRetry();
+                }}
+                disabled={loading}
+                className="rounded-md border border-amber-300 px-2.5 py-1 font-medium text-amber-800 transition-colors hover:bg-amber-100 disabled:opacity-50 dark:border-amber-600 dark:text-amber-100 dark:hover:bg-amber-900/50"
+              >
+                {loading ? "Retrying..." : "Retry"}
+              </button>
+            )}
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="text-xs text-gray-400 dark:text-gray-500 italic py-1">
         {usage.error}

@@ -69,7 +69,15 @@ pub fn save_accounts(store: &AccountsStore) -> Result<()> {
 /// Add a new account to the store
 pub fn add_account(account: StoredAccount) -> Result<StoredAccount> {
     let mut store = load_accounts()?;
+    let added = add_account_to_store(&mut store, account)?;
+    save_accounts(&store)?;
+    Ok(added)
+}
 
+fn add_account_to_store(
+    store: &mut AccountsStore,
+    account: StoredAccount,
+) -> Result<StoredAccount> {
     // Check for duplicate names
     if store.accounts.iter().any(|a| a.name == account.name) {
         anyhow::bail!("An account with name '{}' already exists", account.name);
@@ -77,20 +85,18 @@ pub fn add_account(account: StoredAccount) -> Result<StoredAccount> {
 
     let account_clone = account.clone();
     store.accounts.push(account);
-
-    // If this is the first account, make it active
-    if store.accounts.len() == 1 {
-        store.active_account_id = Some(account_clone.id.clone());
-    }
-
-    save_accounts(&store)?;
     Ok(account_clone)
 }
 
 /// Remove an account by ID
 pub fn remove_account(account_id: &str) -> Result<()> {
     let mut store = load_accounts()?;
+    remove_account_from_store(&mut store, account_id)?;
+    save_accounts(&store)?;
+    Ok(())
+}
 
+fn remove_account_from_store(store: &mut AccountsStore, account_id: &str) -> Result<()> {
     let initial_len = store.accounts.len();
     store.accounts.retain(|a| a.id != account_id);
 
@@ -98,12 +104,12 @@ pub fn remove_account(account_id: &str) -> Result<()> {
         anyhow::bail!("Account not found: {account_id}");
     }
 
-    // If we removed the active account, clear it or set to first available
+    // If we removed the active account, clear it. Only an explicit switch should
+    // make another account active because switching also writes Codex auth.json.
     if store.active_account_id.as_deref() == Some(account_id) {
-        store.active_account_id = store.accounts.first().map(|a| a.id.clone());
+        store.active_account_id = None;
     }
 
-    save_accounts(&store)?;
     Ok(())
 }
 
@@ -265,4 +271,56 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
     store.masked_account_ids = ids;
     save_accounts(&store)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{add_account_to_store, remove_account_from_store};
+    use crate::types::{AccountsStore, StoredAccount};
+
+    #[test]
+    fn adding_first_account_does_not_mark_it_active() {
+        let mut store = AccountsStore::default();
+        let account = StoredAccount::new_api_key("new".to_string(), "sk-test".to_string());
+
+        let added = add_account_to_store(&mut store, account).expect("account should be added");
+
+        assert_eq!(store.accounts.len(), 1);
+        assert_eq!(store.accounts[0].id, added.id);
+        assert_eq!(store.active_account_id, None);
+    }
+
+    #[test]
+    fn adding_account_keeps_existing_active_account() {
+        let active = StoredAccount::new_api_key("active".to_string(), "sk-active".to_string());
+        let active_id = active.id.clone();
+        let mut store = AccountsStore {
+            accounts: vec![active],
+            active_account_id: Some(active_id.clone()),
+            ..AccountsStore::default()
+        };
+
+        let added = StoredAccount::new_api_key("new".to_string(), "sk-new".to_string());
+        add_account_to_store(&mut store, added).expect("account should be added");
+
+        assert_eq!(store.accounts.len(), 2);
+        assert_eq!(store.active_account_id.as_deref(), Some(active_id.as_str()));
+    }
+
+    #[test]
+    fn removing_active_account_clears_active_instead_of_selecting_another_account() {
+        let active = StoredAccount::new_api_key("active".to_string(), "sk-active".to_string());
+        let active_id = active.id.clone();
+        let other = StoredAccount::new_api_key("other".to_string(), "sk-other".to_string());
+        let mut store = AccountsStore {
+            accounts: vec![active, other],
+            active_account_id: Some(active_id.clone()),
+            ..AccountsStore::default()
+        };
+
+        remove_account_from_store(&mut store, &active_id).expect("account should be removed");
+
+        assert_eq!(store.accounts.len(), 1);
+        assert_eq!(store.active_account_id, None);
+    }
 }

@@ -76,6 +76,18 @@ export function useInstances() {
         [loadInstances]
     );
 
+    const getLaunchCommand = useCallback(async (instanceId: string) => {
+        return invokeBackend<string>("get_instance_launch_command", { instanceId });
+    }, []);
+
+    const launchCodex = useCallback(
+        async (instanceId: string) => {
+            await invokeBackend("launch_instance_codex", { instanceId });
+            await loadInstances();
+        },
+        [loadInstances]
+    );
+
     useEffect(() => {
         loadInstances();
     }, [loadInstances]);
@@ -90,5 +102,7 @@ export function useInstances() {
         switchInstance,
         removeInstance,
         bindAccount,
+        getLaunchCommand,
+        launchCodex,
     };
 }

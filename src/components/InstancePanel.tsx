@@ -11,6 +11,8 @@ interface InstancePanelProps {
     onSwitchInstance: (id: string) => Promise<void>;
     onRemoveInstance: (id: string, deleteData: boolean) => Promise<void>;
     onBindAccount: (instanceId: string, accountId: string | null) => Promise<void>;
+    onGetLaunchCommand: (id: string) => Promise<string>;
+    onLaunchCodex: (id: string) => Promise<void>;
 }
 
 export function InstancePanel({
@@ -23,6 +25,8 @@ export function InstancePanel({
     onSwitchInstance,
     onRemoveInstance,
     onBindAccount,
+    onGetLaunchCommand,
+    onLaunchCodex,
 }: InstancePanelProps) {
     const [isCreating, setIsCreating] = useState(false);
     const [newName, setNewName] = useState("");
@@ -30,6 +34,8 @@ export function InstancePanel({
     const [createEmpty, setCreateEmpty] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [switchingId, setSwitchingId] = useState<string | null>(null);
+    const [launchingId, setLaunchingId] = useState<string | null>(null);
+    const [copiedId, setCopiedId] = useState<string | null>(null);
     const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
     const handleCreate = async () => {
@@ -54,10 +60,37 @@ export function InstancePanel({
 
     const handleSwitch = async (id: string) => {
         try {
+            setError(null);
             setSwitchingId(id);
             await onSwitchInstance(id);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : String(err));
         } finally {
             setSwitchingId(null);
+        }
+    };
+
+    const handleLaunch = async (id: string) => {
+        try {
+            setError(null);
+            setLaunchingId(id);
+            await onLaunchCodex(id);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : String(err));
+        } finally {
+            setLaunchingId(null);
+        }
+    };
+
+    const handleCopyCommand = async (id: string) => {
+        try {
+            setError(null);
+            const command = await onGetLaunchCommand(id);
+            await navigator.clipboard.writeText(command);
+            setCopiedId(id);
+            window.setTimeout(() => setCopiedId(null), 1800);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : String(err));
         }
     };
 
@@ -69,6 +102,15 @@ export function InstancePanel({
         }
         await onRemoveInstance(id, false);
         setDeleteConfirmId(null);
+    };
+
+    const handleBindAccount = async (instanceId: string, accountId: string | null) => {
+        try {
+            setError(null);
+            await onBindAccount(instanceId, accountId);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : String(err));
+        }
     };
 
     if (loading && instances.length === 0) {
@@ -155,6 +197,11 @@ export function InstancePanel({
             )}
 
             {/* Instance List */}
+            {error && !isCreating && (
+                <p className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600 dark:border-red-900/60 dark:bg-red-900/20 dark:text-red-300">
+                    {error}
+                </p>
+            )}
             {instances.length === 0 ? (
                 <div className="text-center py-8 text-sm text-gray-500 dark:text-gray-400">
                     No instances yet. Each instance has its own isolated Codex config.
@@ -206,17 +253,32 @@ export function InstancePanel({
                                                 {switchingId === inst.id ? "..." : "Use"}
                                             </button>
                                         )}
+                                        <button
+                                            onClick={() => handleLaunch(inst.id)}
+                                            disabled={launchingId === inst.id}
+                                            className="text-xs px-2.5 py-1.5 rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700 transition-colors"
+                                            title="Open Codex with this instance's CODEX_HOME"
+                                        >
+                                            {launchingId === inst.id ? "..." : "Open"}
+                                        </button>
+                                        <button
+                                            onClick={() => handleCopyCommand(inst.id)}
+                                            className="text-xs px-2 py-1.5 rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700 transition-colors"
+                                            title="Copy launch command"
+                                        >
+                                            {copiedId === inst.id ? "Copied" : "Cmd"}
+                                        </button>
                                         <select
                                             value={inst.bind_account_id ?? ""}
                                             onChange={(e) =>
-                                                onBindAccount(inst.id, e.target.value || null)
+                                                handleBindAccount(inst.id, e.target.value || null)
                                             }
                                             className="text-xs px-1.5 py-1.5 rounded-lg border border-gray-300 bg-white dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 max-w-[100px]"
                                             title="Bind account"
                                         >
-                                            <option value="">No bind</option>
+                                            <option className="bg-white text-gray-900" value="">No bind</option>
                                             {accounts.map((a) => (
-                                                <option key={a.id} value={a.id}>
+                                                <option className="bg-white text-gray-900" key={a.id} value={a.id}>
                                                     {a.name}
                                                 </option>
                                             ))}

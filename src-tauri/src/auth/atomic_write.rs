@@ -36,7 +36,10 @@ fn build_temp_path(parent: &Path, target: &Path, suffix: &str) -> PathBuf {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("file");
-    parent.join(format!(".{base}.tmp.{}.{nanos}.{suffix}", std::process::id()))
+    parent.join(format!(
+        ".{base}.tmp.{}.{nanos}.{suffix}",
+        std::process::id()
+    ))
 }
 
 fn is_json_path(path: &Path) -> bool {
@@ -135,10 +138,7 @@ pub fn restore_from_backup(path: &Path) -> Result<bool> {
 
 /// Parse JSON from `content`. If parsing fails and a `.bak` file exists,
 /// automatically restore from backup and retry.
-pub fn parse_json_with_auto_restore<T: DeserializeOwned>(
-    path: &Path,
-    content: &str,
-) -> Result<T> {
+pub fn parse_json_with_auto_restore<T: DeserializeOwned>(path: &Path, content: &str) -> Result<T> {
     match serde_json::from_str::<T>(content) {
         Ok(value) => Ok(value),
         Err(parse_err) => {
@@ -148,9 +148,8 @@ pub fn parse_json_with_auto_restore<T: DeserializeOwned>(
             );
 
             if restore_from_backup(path)? {
-                let restored = fs::read_to_string(path).with_context(|| {
-                    format!("Failed to read restored file: {}", path.display())
-                })?;
+                let restored = fs::read_to_string(path)
+                    .with_context(|| format!("Failed to read restored file: {}", path.display()))?;
                 serde_json::from_str::<T>(&restored).with_context(|| {
                     format!(
                         "Original parse failed: {parse_err}; auto-restored from .bak but still failed"

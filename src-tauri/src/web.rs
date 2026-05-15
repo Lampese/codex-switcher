@@ -10,12 +10,15 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use tokio::runtime::Runtime;
 
 use crate::commands::{
-    add_account_from_auth_json_text, add_account_from_file, cancel_login, check_codex_processes,
-    complete_login, delete_account, export_accounts_full_encrypted_bytes,
-    export_accounts_slim_text, get_active_account_info, get_masked_account_ids, get_usage,
-    import_accounts_full_encrypted_bytes, import_accounts_slim_text, list_accounts,
-    refresh_account_metadata, refresh_all_accounts_usage, rename_account, set_masked_account_ids,
-    start_login, switch_account, warmup_account, warmup_all_accounts,
+    add_account_from_auth_json_text, add_account_from_file, bind_instance_account, cancel_login,
+    check_codex_processes, clear_codex_auth, complete_login, create_empty_instance,
+    create_instance, delete_account, export_accounts_full_encrypted_bytes,
+    export_accounts_slim_text, get_active_account_info, get_active_instance,
+    get_instance_launch_command, get_masked_account_ids, get_usage,
+    import_accounts_full_encrypted_bytes, import_accounts_slim_text, launch_instance_codex,
+    list_accounts, list_instances, refresh_account_metadata, refresh_all_accounts_usage,
+    remove_instance, rename_account, set_active_instance, set_masked_account_ids, start_login,
+    switch_account, warmup_account, warmup_all_accounts,
 };
 
 #[derive(Debug, Deserialize)]
@@ -23,6 +26,39 @@ use crate::commands::{
 struct AccountIdArgs {
     #[serde(alias = "account_id")]
     account_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InstanceIdArgs {
+    #[serde(alias = "instance_id")]
+    instance_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateInstanceArgs {
+    name: String,
+    #[serde(alias = "user_data_dir")]
+    user_data_dir: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoveInstanceArgs {
+    #[serde(alias = "instance_id")]
+    instance_id: String,
+    #[serde(alias = "delete_data")]
+    delete_data: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BindInstanceArgs {
+    #[serde(alias = "instance_id")]
+    instance_id: String,
+    #[serde(alias = "account_id")]
+    account_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -159,6 +195,7 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
             let args: AccountIdArgs = parse_args(payload)?;
             to_json(delete_account(args.account_id).await?)
         }
+        "clear_codex_auth" => to_json(clear_codex_auth().await?),
         "rename_account" => {
             let args: RenameAccountArgs = parse_args(payload)?;
             to_json(rename_account(args.account_id, args.new_name).await?)
@@ -189,6 +226,36 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
         "set_masked_account_ids" => {
             let args: MaskedIdsArgs = parse_args(payload)?;
             to_json(set_masked_account_ids(args.ids).await?)
+        }
+        "list_instances" => to_json(list_instances()?),
+        "get_active_instance" => to_json(get_active_instance()?),
+        "create_instance" => {
+            let args: CreateInstanceArgs = parse_args(payload)?;
+            to_json(create_instance(args.name, args.user_data_dir)?)
+        }
+        "create_empty_instance" => {
+            let args: CreateInstanceArgs = parse_args(payload)?;
+            to_json(create_empty_instance(args.name, args.user_data_dir)?)
+        }
+        "set_active_instance" => {
+            let args: InstanceIdArgs = parse_args(payload)?;
+            to_json(set_active_instance(args.instance_id)?)
+        }
+        "remove_instance" => {
+            let args: RemoveInstanceArgs = parse_args(payload)?;
+            to_json(remove_instance(args.instance_id, args.delete_data)?)
+        }
+        "bind_instance_account" => {
+            let args: BindInstanceArgs = parse_args(payload)?;
+            to_json(bind_instance_account(args.instance_id, args.account_id)?)
+        }
+        "get_instance_launch_command" => {
+            let args: InstanceIdArgs = parse_args(payload)?;
+            to_json(get_instance_launch_command(args.instance_id)?)
+        }
+        "launch_instance_codex" => {
+            let args: InstanceIdArgs = parse_args(payload)?;
+            to_json(launch_instance_codex(args.instance_id)?)
         }
         "check_codex_processes" => to_json(check_codex_processes().await?),
         _ => Err(format!("Unsupported web command: {command}")),

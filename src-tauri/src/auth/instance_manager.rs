@@ -7,6 +7,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
@@ -14,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::atomic_write::{parse_json_with_auto_restore, write_string_atomic};
-use super::switcher::get_codex_home;
+use super::switcher::get_default_codex_home;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -95,7 +96,7 @@ pub fn create_instance(name: String, user_data_dir: String) -> Result<InstancePr
     ensure_unique(&store, &name, &user_data_dir, None)?;
 
     let target_path = PathBuf::from(&user_data_dir);
-    let codex_home = get_codex_home()?;
+    let codex_home = get_default_codex_home()?;
 
     // Copy default codex home to the new instance directory
     if codex_home.exists() {
@@ -140,7 +141,7 @@ pub fn create_empty_instance(name: String, user_data_dir: String) -> Result<Inst
     fs::create_dir_all(&target_path)
         .with_context(|| format!("Failed to create instance dir: {}", target_path.display()))?;
 
-    let codex_home = get_codex_home()?;
+    let codex_home = get_default_codex_home()?;
     setup_shared_symlinks(&target_path, &codex_home)?;
 
     let instance = InstanceProfile {
@@ -171,6 +172,19 @@ pub fn get_active_instance() -> Result<Option<InstanceProfile>> {
         None => return Ok(None),
     };
     Ok(store.instances.into_iter().find(|i| i.id == *active_id))
+}
+
+/// Get the active instance data directory without mutating process state.
+pub fn active_instance_data_dir() -> Result<Option<PathBuf>> {
+    Ok(get_active_instance()?.map(|instance| PathBuf::from(instance.user_data_dir)))
+}
+
+/// Restore CODEX_HOME from the saved active instance when the app starts.
+pub fn restore_active_instance_env() -> Result<()> {
+    if let Some(dir) = active_instance_data_dir()? {
+        std::env::set_var("CODEX_HOME", dir);
+    }
+    Ok(())
 }
 
 /// Set the active instance and update CODEX_HOME accordingly.
@@ -224,9 +238,8 @@ pub fn remove_instance(instance_id: &str, delete_data: bool) -> Result<()> {
     if delete_data {
         let path = PathBuf::from(&instance.user_data_dir);
         if path.exists() {
-            fs::remove_dir_all(&path).with_context(|| {
-                format!("Failed to delete instance data: {}", path.display())
-            })?;
+            fs::remove_dir_all(&path)
+                .with_context(|| format!("Failed to delete instance data: {}", path.display()))?;
         }
     }
 
@@ -246,6 +259,56 @@ pub fn bind_account(instance_id: &str, account_id: Option<String>) -> Result<Ins
     let updated = instance.clone();
     save_instances(&store)?;
     Ok(updated)
+}
+
+pub fn get_instance_launch_command(instance_id: &str) -> Result<String> {
+    let store = load_instances()?;
+    let instance = store
+        .instances
+        .iter()
+        .find(|i| i.id == instance_id)
+        .context("Instance not found")?;
+
+    Ok(build_launch_command(&instance.user_data_dir))
+}
+
+pub fn launch_codex_for_instance(instance: &InstanceProfile) -> Result<()> {
+    #[cfg(windows)]
+    {
+        Command::new("powershell.exe")
+            .args([
+                "-NoExit",
+                "-Command",
+                &build_launch_command(&instance.user_data_dir),
+            ])
+            .spawn()
+            .with_context(|| format!("Failed to launch Codex for instance {}", instance.name))?;
+        return Ok(());
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = instance;
+        bail!("Launching Codex from the app is currently only implemented on Windows");
+    }
+}
+
+fn build_launch_command(user_data_dir: &str) -> String {
+    #[cfg(windows)]
+    {
+        format!(
+            "$env:CODEX_HOME = '{}'; codex",
+            user_data_dir.replace('\'', "''")
+        )
+    }
+
+    #[cfg(not(windows))]
+    {
+        format!(
+            "CODEX_HOME='{}' codex",
+            user_data_dir.replace('\'', "'\\''")
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -271,7 +334,10 @@ fn ensure_unique(
         bail!("An instance with name '{}' already exists", name);
     }
     if dirs.contains(&user_data_dir.to_lowercase()) {
-        bail!("An instance with directory '{}' already exists", user_data_dir);
+        bail!(
+            "An instance with directory '{}' already exists",
+            user_data_dir
+        );
     }
     Ok(())
 }
@@ -284,7 +350,10 @@ fn setup_shared_symlinks(instance_dir: &Path, default_codex_home: &Path) -> Resu
 
         // Ensure the global shared directory exists
         fs::create_dir_all(&global_dir).with_context(|| {
-            format!("Failed to create shared directory: {}", global_dir.display())
+            format!(
+                "Failed to create shared directory: {}",
+                global_dir.display()
+            )
         })?;
 
         // Remove the copied directory if it exists (we'll replace with symlink)
@@ -368,9 +437,8 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         if file_type.is_dir() {
             copy_dir_recursive(&entry.path(), &target)?;
         } else if file_type.is_file() {
-            fs::copy(entry.path(), &target).with_context(|| {
-                format!("Failed to copy file: {}", entry.path().display())
-            })?;
+            fs::copy(entry.path(), &target)
+                .with_context(|| format!("Failed to copy file: {}", entry.path().display()))?;
         }
         // Skip symlinks during copy — they'll be recreated
     }
