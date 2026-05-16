@@ -62,6 +62,12 @@ pub async fn close_codex_processes() -> Result<CodexProcessInfo, String> {
     close_active_codex_processes().map_err(|e| e.to_string())
 }
 
+/// Open the Codex desktop app.
+#[tauri::command]
+pub async fn open_codex_app() -> Result<CodexProcessInfo, String> {
+    open_codex_desktop_app().map_err(|e| e.to_string())
+}
+
 fn close_active_codex_processes() -> anyhow::Result<CodexProcessInfo> {
     let (pids, _) = find_codex_processes()?;
 
@@ -98,11 +104,91 @@ fn close_active_codex_processes() -> anyhow::Result<CodexProcessInfo> {
     })
 }
 
+fn open_codex_desktop_app() -> anyhow::Result<CodexProcessInfo> {
+    #[cfg(windows)]
+    {
+        const POWERSHELL_SCRIPT: &str = r#"
+$app = Get-StartApps |
+  Where-Object { $_.Name -eq 'Codex' -and $_.AppID -notmatch 'codex-switcher' } |
+  Select-Object -First 1
+
+if (-not $app) {
+  $app = Get-StartApps |
+    Where-Object { $_.AppID -match '^OpenAI\.Codex_' } |
+    Select-Object -First 1
+}
+
+if (-not $app) {
+  throw 'Codex desktop app was not found.'
+}
+
+Start-Process "shell:AppsFolder\$($app.AppID)"
+"#;
+
+        let output = Command::new("powershell.exe")
+            .creation_flags(CREATE_NO_WINDOW)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                POWERSHELL_SCRIPT,
+            ])
+            .output()
+            .context("failed to launch Codex desktop app")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Failed to launch Codex desktop app: {}", stderr.trim());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("open")
+            .args(["-a", "Codex"])
+            .output()
+            .context("failed to launch Codex desktop app")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Failed to launch Codex desktop app: {}", stderr.trim());
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("codex")
+            .spawn()
+            .context("failed to launch codex")?;
+    }
+
+    let (pids, background_count) = wait_for_active_codex_start(Duration::from_secs(10))?;
+    Ok(CodexProcessInfo {
+        count: pids.len(),
+        background_count,
+        can_switch: pids.is_empty(),
+        pids,
+    })
+}
+
 fn wait_for_active_codex_exit(timeout: Duration) -> anyhow::Result<(Vec<u32>, usize)> {
     let deadline = Instant::now() + timeout;
     loop {
         let (pids, background_count) = find_codex_processes()?;
         if pids.is_empty() || Instant::now() >= deadline {
+            return Ok((pids, background_count));
+        }
+        sleep(Duration::from_millis(250));
+    }
+}
+
+fn wait_for_active_codex_start(timeout: Duration) -> anyhow::Result<(Vec<u32>, usize)> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let (pids, background_count) = find_codex_processes()?;
+        if !pids.is_empty() || Instant::now() >= deadline {
             return Ok((pids, background_count));
         }
         sleep(Duration::from_millis(250));

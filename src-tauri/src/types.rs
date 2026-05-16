@@ -58,9 +58,15 @@ pub struct UsageAutomationSettings {
     pub auto_switch_enabled: bool,
     #[serde(default)]
     pub auto_close_codex_on_switch: bool,
+    #[serde(default = "default_auto_reopen_codex_after_switch")]
+    pub auto_reopen_codex_after_switch: bool,
     pub auto_switch_strategy: AutoSwitchStrategy,
     #[serde(default)]
     pub priority_account_ids: Vec<String>,
+}
+
+fn default_auto_reopen_codex_after_switch() -> bool {
+    true
 }
 
 impl Default for UsageAutomationSettings {
@@ -70,6 +76,7 @@ impl Default for UsageAutomationSettings {
             auto_switch_remaining_percent: 5.0,
             auto_switch_enabled: false,
             auto_close_codex_on_switch: false,
+            auto_reopen_codex_after_switch: true,
             auto_switch_strategy: AutoSwitchStrategy::default(),
             priority_account_ids: Vec::new(),
         }

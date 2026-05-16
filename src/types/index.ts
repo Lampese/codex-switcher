@@ -45,6 +45,7 @@ export interface UsageAutomationSettings {
   auto_switch_remaining_percent: number;
   auto_switch_enabled: boolean;
   auto_close_codex_on_switch: boolean;
+  auto_reopen_codex_after_switch: boolean;
   auto_switch_strategy: AutoSwitchStrategy;
   priority_account_ids: string[];
 }

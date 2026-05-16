@@ -32,6 +32,7 @@ const DEFAULT_USAGE_AUTOMATION_SETTINGS: UsageAutomationSettings = {
   auto_switch_remaining_percent: 5,
   auto_switch_enabled: false,
   auto_close_codex_on_switch: false,
+  auto_reopen_codex_after_switch: true,
   auto_switch_strategy: "remaining_desc",
   priority_account_ids: [],
 };
@@ -244,6 +245,12 @@ function App() {
 
   const closeCodexProcesses = useCallback(async () => {
     const info = await invokeBackend<CodexProcessInfo>("close_codex_processes");
+    setProcessInfo(info);
+    return info;
+  }, []);
+
+  const openCodexApp = useCallback(async () => {
+    const info = await invokeBackend<CodexProcessInfo>("open_codex_app");
     setProcessInfo(info);
     return info;
   }, []);
@@ -683,6 +690,7 @@ function App() {
       effectiveUsageAutomationSettings.auto_switch_remaining_percent,
       effectiveUsageAutomationSettings.auto_switch_strategy,
       effectiveUsageAutomationSettings.auto_close_codex_on_switch ? "close" : "pause",
+      effectiveUsageAutomationSettings.auto_reopen_codex_after_switch ? "reopen" : "stay-closed",
       effectiveUsageAutomationSettings.priority_account_ids.join(","),
       processInfo?.count ?? "unknown",
       accountUsageSnapshot,
@@ -696,6 +704,7 @@ function App() {
     const runAutoSwitch = async () => {
       const latestProcessInfo = await checkProcesses();
       if (cancelled) return;
+      let closedCodexForSwitch = false;
 
       if (!latestProcessInfo) {
         showWarmupToast("Auto-switch paused. Could not check Codex processes.", true);
@@ -719,6 +728,7 @@ function App() {
             showWarmupToast("Auto-switch paused. Codex is still running.", true);
             return;
           }
+          closedCodexForSwitch = true;
         } catch (err) {
           console.error("Failed to close Codex before auto-switch:", err);
           showWarmupToast(
@@ -770,7 +780,23 @@ function App() {
       try {
         setSwitchingId(nextAccount.id);
         await switchAccount(nextAccount.id);
-        showWarmupToast(`Auto-switched to ${nextAccount.name}.`);
+        if (
+          closedCodexForSwitch &&
+          effectiveUsageAutomationSettings.auto_reopen_codex_after_switch
+        ) {
+          try {
+            await openCodexApp();
+            showWarmupToast(`Auto-switched to ${nextAccount.name} and reopened Codex.`);
+          } catch (err) {
+            console.error("Failed to reopen Codex after auto-switch:", err);
+            showWarmupToast(
+              `Auto-switched to ${nextAccount.name}, but Codex did not reopen: ${formatWarmupError(err)}`,
+              true
+            );
+          }
+        } else {
+          showWarmupToast(`Auto-switched to ${nextAccount.name}.`);
+        }
       } catch (err) {
         console.error("Failed to auto-switch account:", err);
         showWarmupToast(`Auto-switch failed: ${formatWarmupError(err)}`, true);
@@ -791,6 +817,7 @@ function App() {
     closeCodexProcesses,
     effectiveUsageAutomationSettings,
     formatWarmupError,
+    openCodexApp,
     priorityIndex,
     processInfo?.count,
     settingsLoaded,
@@ -1444,6 +1471,49 @@ function App() {
                       />
                     </button>
                   </div>
+
+                  {settingsDraft.auto_close_codex_on_switch && (
+                    <div className="flex items-center justify-between gap-4 rounded-lg border border-gray-200 px-4 py-3 dark:border-gray-700">
+                      <div>
+                        <div className="text-sm font-medium text-gray-800 dark:text-gray-100">
+                          Reopen Codex after switching
+                        </div>
+                        <div className="text-xs text-gray-500 dark:text-gray-400">
+                          {settingsDraft.auto_reopen_codex_after_switch
+                            ? "Codex will launch again after the account changes."
+                            : "Codex stays closed after the account changes."}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() =>
+                          setSettingsDraft((prev) => ({
+                            ...prev,
+                            auto_reopen_codex_after_switch:
+                              !prev.auto_reopen_codex_after_switch,
+                          }))
+                        }
+                        className={`relative h-7 w-12 rounded-full transition-colors ${
+                          settingsDraft.auto_reopen_codex_after_switch
+                            ? "bg-emerald-500"
+                            : "bg-gray-300 dark:bg-gray-700"
+                        }`}
+                        aria-pressed={settingsDraft.auto_reopen_codex_after_switch}
+                        title={
+                          settingsDraft.auto_reopen_codex_after_switch
+                            ? "Keep Codex closed after switching"
+                            : "Reopen Codex after switching"
+                        }
+                      >
+                        <span
+                          className={`absolute left-1 top-1 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                            settingsDraft.auto_reopen_codex_after_switch
+                              ? "translate-x-5"
+                              : "translate-x-0"
+                          }`}
+                        />
+                      </button>
+                    </div>
+                  )}
 
                   <div className="text-sm font-medium text-gray-700 dark:text-gray-200">
                     Auto-switch strategy
