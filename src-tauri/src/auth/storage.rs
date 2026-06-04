@@ -63,11 +63,71 @@ pub fn save_accounts(store: &AccountsStore) -> Result<()> {
     Ok(())
 }
 
+fn normalized_identity_value(value: Option<&str>) -> Option<String> {
+    let normalized = value?.trim().to_ascii_lowercase();
+    if normalized.is_empty() || matches!(normalized.as_str(), "unknown" | "n/a" | "none" | "?") {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn chatgpt_identity(account: &StoredAccount) -> Option<(String, String)> {
+    match &account.auth_data {
+        AuthData::ChatGPT { .. } => Some((
+            normalized_identity_value(account.email.as_deref())?,
+            normalized_identity_value(account.plan_type.as_deref())?,
+        )),
+        AuthData::ApiKey { .. } => None,
+    }
+}
+
+fn accounts_have_same_chatgpt_identity(left: &StoredAccount, right: &StoredAccount) -> bool {
+    match (chatgpt_identity(left), chatgpt_identity(right)) {
+        (Some(left_identity), Some(right_identity)) => left_identity == right_identity,
+        _ => false,
+    }
+}
+
+fn account_plan_suffix(account: &StoredAccount) -> String {
+    normalized_identity_value(account.plan_type.as_deref()).unwrap_or_else(|| "account".to_string())
+}
+
+fn ensure_unique_account_name(account: &mut StoredAccount, existing: &[StoredAccount]) {
+    if !existing.iter().any(|a| a.name == account.name) {
+        return;
+    }
+
+    let base_name = account.name.clone();
+    let suffix = account_plan_suffix(account);
+    let mut candidate = format!("{base_name} ({suffix})");
+    let mut counter = 2;
+
+    while existing.iter().any(|a| a.name == candidate) {
+        candidate = format!("{base_name} ({suffix} {counter})");
+        counter += 1;
+    }
+
+    account.name = candidate;
+}
+
 /// Add a new account to the store
-pub fn add_account(account: StoredAccount) -> Result<StoredAccount> {
+pub fn add_account(mut account: StoredAccount) -> Result<StoredAccount> {
     let mut store = load_accounts()?;
 
-    // Check for duplicate names
+    if store
+        .accounts
+        .iter()
+        .any(|existing| accounts_have_same_chatgpt_identity(existing, &account))
+    {
+        let email = account.email.as_deref().unwrap_or("unknown email");
+        let plan = account.plan_type.as_deref().unwrap_or("unknown plan");
+        anyhow::bail!("An account with email '{email}' and plan '{plan}' already exists");
+    }
+
+    ensure_unique_account_name(&mut account, &store.accounts);
+
+    // Check for duplicate names after automatic disambiguation.
     if store.accounts.iter().any(|a| a.name == account.name) {
         anyhow::bail!("An account with name '{}' already exists", account.name);
     }
@@ -262,4 +322,50 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
     store.masked_account_ids = ids;
     save_accounts(&store)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{accounts_have_same_chatgpt_identity, ensure_unique_account_name};
+    use crate::types::StoredAccount;
+
+    fn chatgpt_account(name: &str, email: &str, plan: &str, account_id: &str) -> StoredAccount {
+        StoredAccount::new_chatgpt(
+            name.to_string(),
+            Some(email.to_string()),
+            Some(plan.to_string()),
+            None,
+            "id-token".to_string(),
+            "access-token".to_string(),
+            "refresh-token".to_string(),
+            Some(account_id.to_string()),
+        )
+    }
+
+    #[test]
+    fn same_email_different_plan_is_not_same_chatgpt_identity() {
+        let plus = chatgpt_account("Personal", "user@example.com", "plus", "acc_plus");
+        let team = chatgpt_account("Team", "USER@example.com", "team", "acc_team");
+
+        assert!(!accounts_have_same_chatgpt_identity(&plus, &team));
+    }
+
+    #[test]
+    fn same_email_same_plan_is_same_chatgpt_identity() {
+        let first = chatgpt_account("First", "user@example.com", "plus", "acc_one");
+        let second = chatgpt_account("Second", "USER@example.com", "PLUS", "acc_two");
+
+        assert!(accounts_have_same_chatgpt_identity(&first, &second));
+    }
+
+    #[test]
+    fn duplicate_display_name_for_distinct_identity_gets_plan_suffix() {
+        let existing = chatgpt_account("user@example.com", "user@example.com", "plus", "acc_plus");
+        let mut candidate =
+            chatgpt_account("user@example.com", "user@example.com", "team", "acc_team");
+
+        ensure_unique_account_name(&mut candidate, &[existing]);
+
+        assert_eq!(candidate.name, "user@example.com (team)");
+    }
 }
