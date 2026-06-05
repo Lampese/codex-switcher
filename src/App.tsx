@@ -22,6 +22,7 @@ const AUTO_WARMUP_MIN_SUCCESS_INTERVAL_MS = 60 * 60 * 1000;
 const AUTO_WARMUP_FULL_WINDOW_SLACK_MINUTES = 5;
 const DEFAULT_PRIMARY_WINDOW_MINUTES = 300;
 const LIMIT_FULL_THRESHOLD = 99.5;
+const SWITCH_ACCOUNT_BLOCKED_EVENT = "switch-account-blocked";
 type ThemeMode = "light" | "dark";
 type AutoWarmupLedger = Record<
   string,
@@ -466,6 +467,27 @@ function App() {
     showToast: showWarmupToast,
     formatError: formatWarmupError,
   });
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+
+    void (async () => {
+      if (!isTauriRuntime()) return;
+      const { listen } = await import("@tauri-apps/api/event");
+      unlisten = await listen<string>(SWITCH_ACCOUNT_BLOCKED_EVENT, async (event) => {
+        const latestProcessInfo = await checkProcesses();
+
+        if (latestProcessInfo && !latestProcessInfo.can_switch) {
+          setForceCloseConfirmOpen(true);
+          return;
+        }
+
+        showWarmupToast(event.payload || "Account switch was blocked.", true);
+      });
+    })();
+
+    return () => unlisten?.();
+  }, [checkProcesses, setForceCloseConfirmOpen, showWarmupToast]);
 
   const handleWarmupAccount = async (accountId: string, accountName: string) => {
     try {
