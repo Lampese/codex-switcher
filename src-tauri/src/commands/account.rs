@@ -7,6 +7,8 @@ use crate::auth::{
 };
 use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
 
+use super::process::ensure_codex_not_running;
+
 use anyhow::Context;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chacha20poly1305::{
@@ -138,6 +140,8 @@ pub fn switch_account_by_id(account_id: &str) -> Result<(), String> {
         .iter()
         .find(|a| a.id == account_id)
         .ok_or_else(|| format!("Account not found: {account_id}"))?;
+
+    ensure_codex_not_running()?;
 
     // Write to ~/.codex/auth.json
     switch_to_account(account).map_err(|e| e.to_string())?;

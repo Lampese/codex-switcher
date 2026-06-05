@@ -74,6 +74,20 @@ pub async fn check_codex_processes() -> Result<CodexProcessInfo, String> {
     })
 }
 
+pub(crate) fn ensure_codex_not_running() -> Result<(), String> {
+    let (pids, _) = find_codex_processes().map_err(|e| e.to_string())?;
+
+    if pids.is_empty() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Cannot switch accounts while {} Codex process{} running",
+        pids.len(),
+        if pids.len() == 1 { " is" } else { "es are" }
+    ))
+}
+
 /// Force-close active Codex processes that currently block account switching.
 #[tauri::command]
 pub async fn kill_codex_processes() -> Result<KillCodexProcessesResult, String> {
