@@ -13,6 +13,7 @@
 
 - **Multi-Account Management** – Add and manage multiple Codex accounts in one place
 - **Quick Switching** – Switch between accounts with a single click
+- **System Tray Switching** – Switch accounts directly from the menu bar or system tray
 - **Usage Monitoring** – View real-time usage for both 5-hour and weekly limits
 - **Dual Login Mode** – OAuth authentication or import existing `auth.json` files
 

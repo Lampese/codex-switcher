@@ -126,6 +126,10 @@ pub async fn add_account_from_auth_json_text(
 /// Switch to a different account
 #[tauri::command]
 pub async fn switch_account(account_id: String) -> Result<(), String> {
+    switch_account_by_id(&account_id)
+}
+
+pub fn switch_account_by_id(account_id: &str) -> Result<(), String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
 
     // Find the account
@@ -139,10 +143,10 @@ pub async fn switch_account(account_id: String) -> Result<(), String> {
     switch_to_account(account).map_err(|e| e.to_string())?;
 
     // Update the active account in our store
-    set_active_account(&account_id).map_err(|e| e.to_string())?;
+    set_active_account(account_id).map_err(|e| e.to_string())?;
 
     // Update last_used_at
-    touch_account(&account_id).map_err(|e| e.to_string())?;
+    touch_account(account_id).map_err(|e| e.to_string())?;
 
     // Restart Antigravity background process if it is running
     // This allows it to pick up the new authorization file seamlessly

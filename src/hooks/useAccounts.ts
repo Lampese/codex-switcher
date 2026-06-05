@@ -390,6 +390,20 @@ export function useAccounts() {
     return () => clearInterval(interval);
   }, [loadAccounts, refreshUsage]);
 
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+
+    void (async () => {
+      if (!("__TAURI_INTERNALS__" in window)) return;
+      const { listen } = await import("@tauri-apps/api/event");
+      unlisten = await listen("accounts-changed", () => {
+        void loadAccounts(true);
+      });
+    })();
+
+    return () => unlisten?.();
+  }, [loadAccounts]);
+
   return {
     accounts,
     loading,
