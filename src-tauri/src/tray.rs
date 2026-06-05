@@ -8,7 +8,7 @@ use tauri::{
 
 use crate::{
     auth::{get_accounts_file, load_accounts},
-    commands::switch_account_by_id,
+    commands::{is_codex_running_switch_block, switch_account_by_id},
     types::AccountsStore,
 };
 
@@ -17,6 +17,7 @@ const ACCOUNT_ITEM_PREFIX: &str = "account:";
 const OPEN_ITEM_ID: &str = "open";
 const QUIT_ITEM_ID: &str = "quit";
 const ACCOUNTS_CHANGED_EVENT: &str = "accounts-changed";
+const SWITCH_ACCOUNT_BLOCKED_EVENT: &str = "switch-account-blocked";
 
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let menu = build_menu(app, &load_accounts().unwrap_or_default())?;
@@ -88,6 +89,10 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
             if let Err(error) = switch_account_by_id(account_id) {
                 eprintln!("Failed to switch account from tray: {error}");
                 refresh_menu(app);
+                if is_codex_running_switch_block(&error) {
+                    show_main_window(app);
+                    let _ = app.emit(SWITCH_ACCOUNT_BLOCKED_EVENT, error);
+                }
                 return;
             }
 
