@@ -6,7 +6,7 @@ import type {
   WarmupSummary,
   ImportAccountsSummary,
 } from "../types";
-import { invokeBackend, type FileSource } from "../lib/platform";
+import { invokeBackend, isTauriRuntime, type FileSource } from "../lib/platform";
 
 export function useAccounts() {
   const [accounts, setAccounts] = useState<AccountWithUsage[]>([]);
@@ -36,6 +36,12 @@ export function useAccounts() {
     }),
     []
   );
+
+  // Push freshly polled usage down to the tray (single poller feeds the tray menu).
+  const reportUsageToTray = useCallback((usages: UsageInfo[]) => {
+    if (!isTauriRuntime() || usages.length === 0) return;
+    void invokeBackend("report_usage", { usages }).catch(() => {});
+  }, []);
 
   const runWithConcurrency = useCallback(
     async <T,>(
@@ -156,12 +162,14 @@ export function useAccounts() {
             };
           })
         );
+
+        reportUsageToTray(Array.from(usageResults.values()));
       } catch (err) {
         console.error("Failed to refresh usage:", err);
         throw err;
       }
     },
-    [buildUsageError, loadAccounts, maxConcurrentUsageRequests, runWithConcurrency]
+    [buildUsageError, loadAccounts, maxConcurrentUsageRequests, reportUsageToTray, runWithConcurrency]
   );
 
   const refreshSingleUsage = useCallback(async (
@@ -185,6 +193,7 @@ export function useAccounts() {
           a.id === accountId ? { ...a, usage, usageLoading: false } : a
         )
       );
+      reportUsageToTray([usage]);
       return usage;
     } catch (err) {
       console.error("Failed to refresh single usage:", err);
@@ -202,7 +211,7 @@ export function useAccounts() {
       );
       throw err;
     }
-  }, [buildUsageError, loadAccounts]);
+  }, [buildUsageError, loadAccounts, reportUsageToTray]);
 
   const warmupAccount = useCallback(async (accountId: string) => {
     try {

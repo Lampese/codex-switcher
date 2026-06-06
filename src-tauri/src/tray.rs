@@ -10,17 +10,16 @@ use tauri::{
 };
 
 use crate::{
-    api::usage::refresh_all_usage,
     auth::{get_accounts_file, load_accounts},
     commands::{is_codex_running_switch_block, switch_account_by_id, window::TRAY_WINDOW},
     types::{AccountsStore, UsageInfo},
 };
 
-// Latest per-account usage, populated by the background poller and read when the
-// native menu is (re)built so Linux users see remaining quota in the menu labels.
+// Latest per-account usage, pushed down by the main app's single usage poll
+// (via the report_usage command) and read when the native menu is (re)built so
+// the menu labels show remaining quota without the tray doing its own fetching.
 static TRAY_USAGE: LazyLock<Mutex<HashMap<String, UsageInfo>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-const USAGE_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
 const TRAY_ID: &str = "codex-switcher-tray";
 const TRAY_REFRESH_EVENT: &str = "tray-refresh";
@@ -40,6 +39,10 @@ struct SwitchAccountBlockedPayload {
 }
 
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
+    // The webview popup is only used where tray click events are reliable
+    // (macOS/Windows). On Linux the AppIndicator menu is the whole interaction,
+    // and stray click events would otherwise pop the popup unexpectedly.
+    #[cfg(not(target_os = "linux"))]
     create_tray_window(app)?;
 
     let menu = build_menu(app, &load_accounts().unwrap_or_default())?;
@@ -52,26 +55,37 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .icon(icon)
         .tooltip("Codex Switcher")
         .menu(&menu)
-        .on_menu_event(handle_menu_event)
-        .on_tray_icon_event(handle_tray_icon_event);
+        .on_menu_event(handle_menu_event);
 
-    // Linux (AppIndicator) can't deliver tray click events and won't even show a
-    // menu-less icon, so the native menu is the interaction there. On macOS/Windows
-    // the left click opens the React popup instead; the menu stays for right click.
+    // macOS/Windows: left click opens the React popup instead of the menu; the
+    // native menu stays as the right-click fallback. Linux keeps the default
+    // left-click menu and ignores click events entirely.
     #[cfg(not(target_os = "linux"))]
-    let builder = builder.show_menu_on_left_click(false);
+    let builder = builder
+        .on_tray_icon_event(handle_tray_icon_event)
+        .show_menu_on_left_click(false);
 
     builder.build(app)?;
 
     watch_accounts_file(app.clone());
-    watch_usage(app.clone());
     Ok(())
+}
+
+/// Store usage reported by the main app and refresh the native menu labels.
+pub fn ingest_usage<R: Runtime>(app: &AppHandle<R>, usages: Vec<UsageInfo>) {
+    if let Ok(mut cache) = TRAY_USAGE.lock() {
+        for usage in usages {
+            cache.insert(usage.account_id.clone(), usage);
+        }
+    }
+    refresh_menu(app);
 }
 
 // ============================================================================
 // React popup window (used on macOS/Windows via tray click events)
 // ============================================================================
 
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn create_tray_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     if app.get_webview_window(TRAY_WINDOW).is_some() {
         return Ok(());
@@ -101,6 +115,7 @@ fn create_tray_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     Ok(())
 }
 
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn handle_tray_icon_event<R: Runtime>(tray: &tauri::tray::TrayIcon<R>, event: TrayIconEvent) {
     if let TrayIconEvent::Click {
         button: MouseButton::Left,
@@ -113,6 +128,7 @@ fn handle_tray_icon_event<R: Runtime>(tray: &tauri::tray::TrayIcon<R>, event: Tr
     }
 }
 
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn toggle_tray_window<R: Runtime>(app: &AppHandle<R>, cursor: PhysicalPosition<f64>) {
     let Some(window) = app.get_webview_window(TRAY_WINDOW) else {
         return;
@@ -129,6 +145,7 @@ fn toggle_tray_window<R: Runtime>(app: &AppHandle<R>, cursor: PhysicalPosition<f
     let _ = app.emit_to(TRAY_WINDOW, TRAY_REFRESH_EVENT, ());
 }
 
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn position_near_cursor<R: Runtime>(
     window: &tauri::WebviewWindow<R>,
     cursor: PhysicalPosition<f64>,
@@ -319,26 +336,6 @@ fn modified_at(path: &std::path::Path) -> Option<std::time::SystemTime> {
     path.metadata()
         .and_then(|metadata| metadata.modified())
         .ok()
-}
-
-// Poll usage for all accounts on an interval and rebuild the menu so its labels
-// stay current (the native menu is the only usage surface on Linux).
-fn watch_usage<R: Runtime>(app: AppHandle<R>) {
-    tauri::async_runtime::spawn(async move {
-        loop {
-            let accounts = load_accounts().map(|store| store.accounts).unwrap_or_default();
-            if !accounts.is_empty() {
-                let usages = refresh_all_usage(&accounts).await;
-                if let Ok(mut cache) = TRAY_USAGE.lock() {
-                    for usage in usages {
-                        cache.insert(usage.account_id.clone(), usage);
-                    }
-                }
-                refresh_menu(&app);
-            }
-            tokio::time::sleep(USAGE_POLL_INTERVAL).await;
-        }
-    });
 }
 
 #[cfg(test)]

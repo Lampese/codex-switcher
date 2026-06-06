@@ -2,8 +2,20 @@
 
 use tauri::{AppHandle, Manager};
 
+use crate::types::UsageInfo;
+
 /// Label of the borderless tray popup window.
 pub const TRAY_WINDOW: &str = "tray";
+
+/// Receive the main app's polled usage so the tray menu can show remaining quota
+/// without doing its own fetching. The main window is the single usage poller.
+#[tauri::command]
+pub fn report_usage(app: AppHandle, usages: Vec<UsageInfo>) {
+    #[cfg(desktop)]
+    crate::tray::ingest_usage(&app, usages);
+    #[cfg(not(desktop))]
+    let _ = (app, usages);
+}
 
 /// Hide the tray popup window (called by the tray UI after an action).
 #[tauri::command]

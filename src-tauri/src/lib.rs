@@ -13,8 +13,8 @@ use commands::{
     export_accounts_full_encrypted_file, export_accounts_slim_text, get_active_account_info,
     get_masked_account_ids, get_usage, hide_tray_window, import_accounts_full_encrypted_file,
     import_accounts_slim_text, kill_codex_processes, list_accounts, open_main_window, quit_app,
-    refresh_account_metadata, refresh_all_accounts_usage, rename_account, set_masked_account_ids,
-    start_login, switch_account, warmup_account, warmup_all_accounts,
+    refresh_account_metadata, refresh_all_accounts_usage, rename_account, report_usage,
+    set_masked_account_ids, start_login, switch_account, warmup_account, warmup_all_accounts,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -74,6 +74,7 @@ pub fn run() {
             hide_tray_window,
             open_main_window,
             quit_app,
+            report_usage,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
