@@ -15,13 +15,11 @@ use crate::{
     types::{AccountsStore, UsageInfo},
 };
 
-// Latest per-account usage, pushed down by the main app's single usage poll
-// (via the report_usage command) and read when the native menu is (re)built so
-// the menu labels show remaining quota without the tray doing its own fetching.
 static TRAY_USAGE: LazyLock<Mutex<HashMap<String, UsageInfo>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 const TRAY_ID: &str = "codex-switcher-tray";
+const TRAY_ICON: tauri::image::Image<'static> = tauri::include_image!("./icons/tray.png");
 const TRAY_REFRESH_EVENT: &str = "tray-refresh";
 const ACCOUNTS_CHANGED_EVENT: &str = "accounts-changed";
 const SWITCH_ACCOUNT_BLOCKED_EVENT: &str = "switch-account-blocked";
@@ -39,27 +37,17 @@ struct SwitchAccountBlockedPayload {
 }
 
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
-    // The webview popup is only used where tray click events are reliable
-    // (macOS/Windows). On Linux the AppIndicator menu is the whole interaction,
-    // and stray click events would otherwise pop the popup unexpectedly.
     #[cfg(not(target_os = "linux"))]
     create_tray_window(app)?;
 
     let menu = build_menu(app, &load_accounts().unwrap_or_default())?;
-    let icon = app
-        .default_window_icon()
-        .cloned()
-        .expect("application icon should be configured");
-
     let builder = TrayIconBuilder::with_id(TRAY_ID)
-        .icon(icon)
+        .icon(TRAY_ICON)
+        .icon_as_template(true)
         .tooltip("Codex Switcher")
         .menu(&menu)
         .on_menu_event(handle_menu_event);
 
-    // macOS/Windows: left click opens the React popup instead of the menu; the
-    // native menu stays as the right-click fallback. Linux keeps the default
-    // left-click menu and ignores click events entirely.
     #[cfg(not(target_os = "linux"))]
     let builder = builder
         .on_tray_icon_event(handle_tray_icon_event)
@@ -341,6 +329,19 @@ fn modified_at(path: &std::path::Path) -> Option<std::time::SystemTime> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_tray_icon_is_not_an_opaque_block() {
+        let alphas: Vec<_> = TRAY_ICON.rgba().iter().skip(3).step_by(4).copied().collect();
+        let width = TRAY_ICON.width() as usize;
+
+        assert_eq!(
+            [alphas[0], alphas[width - 1], alphas[alphas.len() - width], alphas[alphas.len() - 1]],
+            [0, 0, 0, 0]
+        );
+        assert!(alphas.contains(&0));
+        assert!(alphas.contains(&255));
+    }
 
     #[test]
     fn account_ids_are_namespaced_for_tray_events() {

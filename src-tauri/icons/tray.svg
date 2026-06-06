@@ -1,0 +1,32 @@
+<svg width="440" height="440" viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!--
+    Monochrome tray companion to logo.svg.
+    Transparent cutouts and generous spacing keep it legible at 22 px.
+  -->
+  <defs>
+    <mask id="arrow-clearance" maskUnits="userSpaceOnUse" x="0" y="0" width="44" height="44">
+      <rect width="44" height="44" fill="white"/>
+      <path d="M19 27V18M19 18L16 21M19 18L22 21"
+            stroke="black" stroke-width="4.25" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M25 17V26M25 26L22 23M25 26L28 23"
+            stroke="black" stroke-width="4.25" stroke-linecap="round" stroke-linejoin="round"/>
+    </mask>
+  </defs>
+
+  <!-- Offset account cards from the main app mark, drawn as outlines for menu-bar clarity. -->
+  <g mask="url(#arrow-clearance)" stroke="black" stroke-linecap="round">
+    <rect x="2.5" y="4.5" width="26" height="16" rx="3.5" stroke-width="2.5"/>
+    <circle cx="9.5" cy="12.5" r="2.5" fill="black" stroke="none"/>
+    <path d="M15 10.5H23M15 14H20.5" stroke-width="2"/>
+
+    <rect x="15.5" y="23.5" width="26" height="16" rx="3.5" stroke-width="2.5"/>
+    <circle cx="34.5" cy="31.5" r="2.5" fill="black" stroke="none"/>
+    <path d="M21 29.5H29M23.5 33H29" stroke-width="2"/>
+  </g>
+
+  <!-- Account switch symbol. -->
+  <g stroke="black" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M19 27V18M19 18L16 21M19 18L22 21"/>
+    <path d="M25 17V26M25 26L22 23M25 26L28 23"/>
+  </g>
+</svg>
