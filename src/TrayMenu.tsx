@@ -4,6 +4,9 @@ import { invokeBackend, isTauriRuntime } from "./lib/platform";
 
 const TRAY_REFRESH_EVENT = "tray-refresh";
 const ACCOUNTS_CHANGED_EVENT = "accounts-changed";
+const SWITCH_ACCOUNT_BLOCKED_EVENT = "switch-account-blocked";
+// Mirrors the backend guard message in process.rs (ensure_codex_not_running).
+const CODEX_RUNNING_PREFIX = "Cannot switch accounts while";
 
 function formatError(err: unknown): string {
   if (!err) return "Unknown error";
@@ -125,7 +128,18 @@ function TrayMenu() {
       await invokeBackend("switch_account", { accountId: account.id });
       void invokeBackend("hide_tray_window");
     } catch (err) {
-      setError(formatError(err));
+      const message = formatError(err);
+      // Codex is running: hand off to the main window's force-close flow.
+      if (message.startsWith(CODEX_RUNNING_PREFIX)) {
+        const { emit } = await import("@tauri-apps/api/event");
+        await emit(SWITCH_ACCOUNT_BLOCKED_EVENT, {
+          accountId: account.id,
+          error: message,
+        });
+        void invokeBackend("open_main_window"); // focus main + hide tray
+        return;
+      }
+      setError(message);
     } finally {
       setSwitchingId(null);
     }
@@ -184,11 +198,21 @@ function TrayMenu() {
                     : "hover:bg-gray-100 dark:hover:bg-gray-800"
                 }`}
               >
-                <span
-                  className={`mt-1.5 inline-block h-1.5 w-1.5 shrink-0 rounded-full ${
-                    account.is_active ? "bg-green-500" : "bg-transparent"
-                  }`}
-                />
+                <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center">
+                  {account.is_active && (
+                    <svg
+                      className="h-4 w-4 text-emerald-500"
+                      viewBox="0 0 20 20"
+                      fill="currentColor"
+                    >
+                      <path
+                        fillRule="evenodd"
+                        d="M16.7 5.3a1 1 0 010 1.4l-7.5 7.5a1 1 0 01-1.4 0L3.3 9.7a1 1 0 011.4-1.4l3.3 3.3 6.8-6.8a1 1 0 011.4 0z"
+                        clipRule="evenodd"
+                      />
+                    </svg>
+                  )}
+                </span>
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-1.5">
                     <span className="min-w-0 flex-1 truncate text-sm font-medium">
