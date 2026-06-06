@@ -59,6 +59,17 @@ function formatResetAt(resetAt: number | null | undefined): string | null {
   return `${Math.floor(diff / 86_400)}d ${Math.floor((diff % 86_400) / 3600)}h`;
 }
 
+function retainUsageForAccounts(
+  usageById: Record<string, UsageInfo>,
+  accounts: AccountInfo[]
+): Record<string, UsageInfo> {
+  return Object.fromEntries(
+    accounts.flatMap((account) =>
+      usageById[account.id] ? [[account.id, usageById[account.id]]] : []
+    )
+  );
+}
+
 function TrayMenu() {
   const [accounts, setAccounts] = useState<AccountInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -76,8 +87,24 @@ function TrayMenu() {
             accountId: account.id,
           });
           setUsageById((prev) => ({ ...prev, [account.id]: usage }));
-        } catch {
-          // Ignore; the row simply won't show a remaining figure.
+        } catch (err) {
+          setUsageById((prev) => ({
+            ...prev,
+            [account.id]: {
+              account_id: account.id,
+              plan_type: account.plan_type,
+              primary_used_percent: null,
+              primary_window_minutes: null,
+              primary_resets_at: null,
+              secondary_used_percent: null,
+              secondary_window_minutes: null,
+              secondary_resets_at: null,
+              has_credits: null,
+              unlimited_credits: null,
+              credits_balance: null,
+              error: formatError(err),
+            },
+          }));
         }
       })
     );
@@ -87,6 +114,7 @@ function TrayMenu() {
     try {
       const list = await invokeBackend<AccountInfo[]>("list_accounts");
       setAccounts(list);
+      setUsageById((prev) => retainUsageForAccounts(prev, list));
       setError(null);
       void loadUsage(list); // Don't block the list render on the usage calls.
     } catch (err) {
@@ -102,6 +130,7 @@ function TrayMenu() {
     try {
       const list = await invokeBackend<AccountInfo[]>("list_accounts");
       setAccounts(list);
+      setUsageById((prev) => retainUsageForAccounts(prev, list));
       setError(null);
       await loadUsage(list);
     } catch (err) {
@@ -285,6 +314,10 @@ function TrayMenu() {
                           </span>
                         );
                       })}
+                    </span>
+                  ) : usage?.error ? (
+                    <span className="block truncate text-xs text-red-500 dark:text-red-400">
+                      Usage unavailable
                     </span>
                   ) : account.email ? (
                     <span className="block truncate text-xs text-gray-500 dark:text-gray-400">
