@@ -65,6 +65,7 @@ function TrayMenu() {
   const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [usageById, setUsageById] = useState<Record<string, UsageInfo>>({});
+  const [refreshing, setRefreshing] = useState(false);
 
   // Fetch each account's rate-limit usage in parallel; rows fill in as they land.
   const loadUsage = useCallback(async (list: AccountInfo[]) => {
@@ -92,6 +93,21 @@ function TrayMenu() {
       setError(formatError(err));
     } finally {
       setLoading(false);
+    }
+  }, [loadUsage]);
+
+  // Manual refresh: re-pull accounts and actively fetch fresh usage once.
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      const list = await invokeBackend<AccountInfo[]>("list_accounts");
+      setAccounts(list);
+      setError(null);
+      await loadUsage(list);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setRefreshing(false);
     }
   }, [loadUsage]);
 
@@ -152,6 +168,16 @@ function TrayMenu() {
           C
         </div>
         <span className="text-sm font-semibold">Codex Switcher</span>
+        <button
+          onClick={() => void handleRefresh()}
+          disabled={refreshing}
+          title="Refresh usage"
+          className="ml-auto flex h-6 w-6 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 disabled:opacity-50 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
+        >
+          <span className={`text-base leading-none ${refreshing ? "inline-block animate-spin" : ""}`}>
+            ↻
+          </span>
+        </button>
       </div>
 
       <div className="flex-1 overflow-y-auto p-1.5">
