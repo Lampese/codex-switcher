@@ -41,12 +41,24 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     create_tray_window(app)?;
 
     let menu = build_menu(app, &load_accounts().unwrap_or_default())?;
+
+    #[cfg(target_os = "linux")]
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .expect("application icon should be configured");
+
+    #[cfg(not(target_os = "linux"))]
+    let icon = TRAY_ICON;
+
     let builder = TrayIconBuilder::with_id(TRAY_ID)
-        .icon(TRAY_ICON)
-        .icon_as_template(true)
+        .icon(icon)
         .tooltip("Codex Switcher")
         .menu(&menu)
         .on_menu_event(handle_menu_event);
+
+    #[cfg(not(target_os = "linux"))]
+    let builder = builder.icon_as_template(true);
 
     #[cfg(not(target_os = "linux"))]
     let builder = builder
