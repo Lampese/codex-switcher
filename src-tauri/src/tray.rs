@@ -1,36 +1,76 @@
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use tauri::{
+    menu::{CheckMenuItemBuilder, Menu, MenuItemBuilder, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, PhysicalPosition, Runtime, WebviewUrl, WebviewWindowBuilder,
     WindowEvent,
 };
 
-use crate::{auth::get_accounts_file, commands::window::TRAY_WINDOW};
+use crate::{
+    api::usage::refresh_all_usage,
+    auth::{get_accounts_file, load_accounts},
+    commands::{is_codex_running_switch_block, switch_account_by_id, window::TRAY_WINDOW},
+    types::{AccountsStore, UsageInfo},
+};
+
+// Latest per-account usage, populated by the background poller and read when the
+// native menu is (re)built so Linux users see remaining quota in the menu labels.
+static TRAY_USAGE: LazyLock<Mutex<HashMap<String, UsageInfo>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+const USAGE_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
 const TRAY_ID: &str = "codex-switcher-tray";
 const TRAY_REFRESH_EVENT: &str = "tray-refresh";
 const ACCOUNTS_CHANGED_EVENT: &str = "accounts-changed";
+const SWITCH_ACCOUNT_BLOCKED_EVENT: &str = "switch-account-blocked";
+const ACCOUNT_ITEM_PREFIX: &str = "account:";
+const OPEN_ITEM_ID: &str = "open";
+const QUIT_ITEM_ID: &str = "quit";
 const TRAY_WIDTH: f64 = 300.0;
 const TRAY_HEIGHT: f64 = 420.0;
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SwitchAccountBlockedPayload {
+    account_id: String,
+    error: String,
+}
 
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     create_tray_window(app)?;
 
+    let menu = build_menu(app, &load_accounts().unwrap_or_default())?;
     let icon = app
         .default_window_icon()
         .cloned()
         .expect("application icon should be configured");
 
-    TrayIconBuilder::with_id(TRAY_ID)
+    let builder = TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
         .tooltip("Codex Switcher")
-        .on_tray_icon_event(handle_tray_icon_event)
-        .build(app)?;
+        .menu(&menu)
+        .on_menu_event(handle_menu_event)
+        .on_tray_icon_event(handle_tray_icon_event);
+
+    // Linux (AppIndicator) can't deliver tray click events and won't even show a
+    // menu-less icon, so the native menu is the interaction there. On macOS/Windows
+    // the left click opens the React popup instead; the menu stays for right click.
+    #[cfg(not(target_os = "linux"))]
+    let builder = builder.show_menu_on_left_click(false);
+
+    builder.build(app)?;
 
     watch_accounts_file(app.clone());
+    watch_usage(app.clone());
     Ok(())
 }
+
+// ============================================================================
+// React popup window (used on macOS/Windows via tray click events)
+// ============================================================================
 
 fn create_tray_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     if app.get_webview_window(TRAY_WINDOW).is_some() {
@@ -109,6 +149,149 @@ fn position_near_cursor<R: Runtime>(
     let _ = window.set_position(PhysicalPosition::new(x, y));
 }
 
+// ============================================================================
+// Native menu (the only tray interaction on Linux; right-click on macOS/Windows)
+// ============================================================================
+
+fn build_menu<R: Runtime>(app: &AppHandle<R>, store: &AccountsStore) -> tauri::Result<Menu<R>> {
+    let menu = Menu::new(app)?;
+
+    if store.accounts.is_empty() {
+        menu.append(
+            &MenuItemBuilder::with_id("empty", "No accounts configured")
+                .enabled(false)
+                .build(app)?,
+        )?;
+    } else {
+        for account in &store.accounts {
+            let label = format!("{}{}", account.name, usage_suffix(&account.id));
+            let item = CheckMenuItemBuilder::with_id(
+                account_menu_id(&account.id),
+                menu_label(&label),
+            )
+            .checked(store.active_account_id.as_deref() == Some(&account.id))
+            .build(app)?;
+            menu.append(&item)?;
+        }
+    }
+
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&MenuItemBuilder::with_id(OPEN_ITEM_ID, "Open Codex Switcher").build(app)?)?;
+    menu.append(&MenuItemBuilder::with_id(QUIT_ITEM_ID, "Quit").build(app)?)?;
+    Ok(menu)
+}
+
+fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
+    let item_id = event.id().as_ref();
+
+    match item_id {
+        OPEN_ITEM_ID => show_main_window(app),
+        QUIT_ITEM_ID => app.exit(0),
+        _ => {
+            let Some(account_id) = item_id.strip_prefix(ACCOUNT_ITEM_PREFIX) else {
+                return;
+            };
+
+            if load_accounts()
+                .ok()
+                .and_then(|store| store.active_account_id)
+                .as_deref()
+                == Some(account_id)
+            {
+                refresh_menu(app);
+                return;
+            }
+
+            if let Err(error) = switch_account_by_id(account_id) {
+                eprintln!("Failed to switch account from tray: {error}");
+                refresh_menu(app);
+                if is_codex_running_switch_block(&error) {
+                    show_main_window(app);
+                    let _ = app.emit(
+                        SWITCH_ACCOUNT_BLOCKED_EVENT,
+                        SwitchAccountBlockedPayload {
+                            account_id: account_id.to_string(),
+                            error,
+                        },
+                    );
+                }
+                return;
+            }
+
+            refresh_menu(app);
+            let _ = app.emit(ACCOUNTS_CHANGED_EVENT, ());
+        }
+    }
+}
+
+fn refresh_menu<R: Runtime>(app: &AppHandle<R>) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+
+    match load_accounts()
+        .map_err(|error| error.to_string())
+        .and_then(|store| build_menu(app, &store).map_err(|error| error.to_string()))
+    {
+        Ok(menu) => {
+            if let Err(error) = tray.set_menu(Some(menu)) {
+                eprintln!("Failed to refresh tray menu: {error}");
+            }
+        }
+        Err(error) => eprintln!("Failed to build tray menu: {error}"),
+    }
+}
+
+fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(tray) = app.get_webview_window(TRAY_WINDOW) {
+        let _ = tray.hide();
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+// "  —  S:73% W:51%" remaining-quota suffix for a menu label, or "" when unknown.
+fn usage_suffix(account_id: &str) -> String {
+    let Ok(cache) = TRAY_USAGE.lock() else {
+        return String::new();
+    };
+    let Some(usage) = cache.get(account_id) else {
+        return String::new();
+    };
+    if usage.error.is_some() {
+        return String::new();
+    }
+
+    let mut parts = Vec::new();
+    if let Some(used) = usage.primary_used_percent {
+        parts.push(format!("S:{:.0}%", (100.0 - used).max(0.0)));
+    }
+    if let Some(used) = usage.secondary_used_percent {
+        parts.push(format!("W:{:.0}%", (100.0 - used).max(0.0)));
+    }
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("  —  {}", parts.join(" "))
+    }
+}
+
+fn account_menu_id(account_id: &str) -> String {
+    format!("{ACCOUNT_ITEM_PREFIX}{account_id}")
+}
+
+fn menu_label(label: &str) -> String {
+    label.replace('&', "&&")
+}
+
+// ============================================================================
+// Shared: react to external account changes
+// ============================================================================
+
 fn watch_accounts_file<R: Runtime>(app: AppHandle<R>) {
     std::thread::spawn(move || {
         let accounts_path = match get_accounts_file() {
@@ -125,7 +308,8 @@ fn watch_accounts_file<R: Runtime>(app: AppHandle<R>) {
             let modified = modified_at(&accounts_path);
             if modified != last_modified {
                 last_modified = modified;
-                let _ = app.emit(ACCOUNTS_CHANGED_EVENT, ());
+                refresh_menu(&app); // keep the native menu current
+                let _ = app.emit(ACCOUNTS_CHANGED_EVENT, ()); // refresh the React UIs
             }
         }
     });
@@ -135,4 +319,42 @@ fn modified_at(path: &std::path::Path) -> Option<std::time::SystemTime> {
     path.metadata()
         .and_then(|metadata| metadata.modified())
         .ok()
+}
+
+// Poll usage for all accounts on an interval and rebuild the menu so its labels
+// stay current (the native menu is the only usage surface on Linux).
+fn watch_usage<R: Runtime>(app: AppHandle<R>) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let accounts = load_accounts().map(|store| store.accounts).unwrap_or_default();
+            if !accounts.is_empty() {
+                let usages = refresh_all_usage(&accounts).await;
+                if let Ok(mut cache) = TRAY_USAGE.lock() {
+                    for usage in usages {
+                        cache.insert(usage.account_id.clone(), usage);
+                    }
+                }
+                refresh_menu(&app);
+            }
+            tokio::time::sleep(USAGE_POLL_INTERVAL).await;
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn account_ids_are_namespaced_for_tray_events() {
+        assert_eq!(account_menu_id("abc-123"), "account:abc-123");
+    }
+
+    #[test]
+    fn menu_labels_escape_mnemonic_markers() {
+        assert_eq!(
+            menu_label("Research & Development"),
+            "Research && Development"
+        );
+    }
 }
