@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "tauri": "sh ./scripts/tauri.sh",
     "lan": "pnpm build && cargo run --manifest-path src-tauri/Cargo.toml --bin codex-web",
+    "cli": "cargo run --manifest-path src-tauri/Cargo.toml --bin codex-switch --",
     "version:bump": "node scripts/bump-version.mjs",
     "version:patch": "node scripts/bump-version.mjs patch",
     "version:minor": "node scripts/bump-version.mjs minor",
