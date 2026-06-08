@@ -1,6 +1,6 @@
 //! Window and tray popup management commands.
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, Runtime};
 
 use crate::types::UsageInfo;
 
@@ -28,6 +28,11 @@ pub fn hide_tray_window(app: AppHandle) {
 /// Bring the main window to the foreground and hide the tray popup.
 #[tauri::command]
 pub fn open_main_window(app: AppHandle) {
+    restore_main_window(&app);
+}
+
+/// Bring the main window to the foreground and hide the tray popup.
+pub fn restore_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(tray) = app.get_webview_window(TRAY_WINDOW) {
         let _ = tray.hide();
     }

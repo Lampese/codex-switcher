@@ -76,6 +76,12 @@ pub fn run() {
             quit_app,
             report_usage,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, _event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                commands::restore_main_window(_app);
+            }
+        });
 }

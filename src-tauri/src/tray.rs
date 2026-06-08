@@ -11,7 +11,10 @@ use tauri::{
 
 use crate::{
     auth::{get_accounts_file, load_accounts},
-    commands::{is_codex_running_switch_block, switch_account_by_id, window::TRAY_WINDOW},
+    commands::{
+        is_codex_running_switch_block, restore_main_window, switch_account_by_id,
+        window::TRAY_WINDOW,
+    },
     types::{AccountsStore, UsageInfo},
 };
 
@@ -260,14 +263,7 @@ fn refresh_menu<R: Runtime>(app: &AppHandle<R>) {
 }
 
 fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(tray) = app.get_webview_window(TRAY_WINDOW) {
-        let _ = tray.hide();
-    }
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-    }
+    restore_main_window(app);
 }
 
 // "  —  S:73% W:51%" remaining-quota suffix for a menu label, or "" when unknown.
