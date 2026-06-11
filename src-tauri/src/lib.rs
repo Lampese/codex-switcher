@@ -37,7 +37,13 @@ pub fn run() {
             if window.label() == "main" {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
+                    // Order the window out before NSApp.hide so AppKit won't
+                    // restore it on the next activation (e.g. tray popup focus);
+                    // hiding the app deactivates it so a later Dock click is a
+                    // real re-activation and reliably emits RunEvent::Reopen.
                     let _ = window.hide();
+                    #[cfg(target_os = "macos")]
+                    let _ = tauri::Manager::app_handle(window).hide();
                 }
             }
         })
