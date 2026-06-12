@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "dashboard": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/launch-dashboard.ps1",
     "test:web-safe": "node scripts/check-web-safe-tauri-window.mjs",
     "preview": "vite preview",
     "tauri": "node ./scripts/tauri.mjs",

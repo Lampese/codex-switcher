@@ -53,6 +53,15 @@ You can also serve the built dashboard over HTTP instead of opening the Tauri sh
 pnpm lan
 ```
 
+For everyday use on Windows, launch the hardened local dashboard in a standalone
+browser app window instead of a tab:
+
+```bash
+pnpm dashboard
+```
+
+You can also double-click `Launch Codex Switcher Dashboard.cmd`.
+
 Optional environment variables:
 
 - `CODEX_SWITCHER_WEB_HOST` to override the bind host. Non-local hosts require a session token.
