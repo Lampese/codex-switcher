@@ -17,11 +17,15 @@ import {
   THEME_STORAGE_KEY,
   type ThemeMode,
 } from "./lib/theme";
+import {
+  AUTO_WARMUP_ACCOUNTS_STORAGE_KEY,
+  AUTO_WARMUP_ALL_CHANGED_EVENT,
+  AUTO_WARMUP_LEDGER_STORAGE_KEY,
+  readAutoWarmupAllEnabled,
+  writeAutoWarmupAllEnabled,
+} from "./lib/autoWarmup";
 import "./App.css";
 
-const AUTO_WARMUP_ALL_STORAGE_KEY = "codex-switcher-auto-warmup-all";
-const AUTO_WARMUP_ACCOUNTS_STORAGE_KEY = "codex-switcher-auto-warmup-accounts";
-const AUTO_WARMUP_LEDGER_STORAGE_KEY = "codex-switcher-auto-warmup-last-success";
 const AUTO_WARMUP_CHECK_INTERVAL_MS = 30 * 1000;
 const AUTO_WARMUP_RETRY_BACKOFF_MS = 5 * 60 * 1000;
 const AUTO_WARMUP_MIN_SUCCESS_INTERVAL_MS = 60 * 60 * 1000;
@@ -159,8 +163,7 @@ function App() {
     isError: boolean;
   } | null>(null);
   const [autoWarmupAllEnabled, setAutoWarmupAllEnabled] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return window.localStorage.getItem(AUTO_WARMUP_ALL_STORAGE_KEY) === "true";
+    return readAutoWarmupAllEnabled();
   });
   const [autoWarmupAccountIds, setAutoWarmupAccountIds] = useState<Set<string>>(
     () => new Set(readStoredStringArray(AUTO_WARMUP_ACCOUNTS_STORAGE_KEY))
@@ -239,12 +242,15 @@ function App() {
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(
-        AUTO_WARMUP_ALL_STORAGE_KEY,
-        String(autoWarmupAllEnabled)
-      );
+      writeAutoWarmupAllEnabled(autoWarmupAllEnabled);
     } catch {
       // Ignore storage errors; auto warm-up still works for the current session.
+    }
+
+    if (isTauriRuntime()) {
+      void import("@tauri-apps/api/event")
+        .then(({ emit }) => emit(AUTO_WARMUP_ALL_CHANGED_EVENT, autoWarmupAllEnabled))
+        .catch((err) => console.error("Failed to sync tray auto warm-up:", err));
     }
   }, [autoWarmupAllEnabled]);
 
@@ -477,6 +483,7 @@ function App() {
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let unlistenAutoWarmup: (() => void) | undefined;
 
     void (async () => {
       if (!isTauriRuntime()) return;
@@ -514,9 +521,20 @@ function App() {
           );
         }
       );
+      unlistenAutoWarmup = await listen<boolean>(
+        AUTO_WARMUP_ALL_CHANGED_EVENT,
+        ({ payload }) => {
+          if (typeof payload === "boolean") {
+            setAutoWarmupAllEnabled(payload);
+          }
+        }
+      );
     })();
 
-    return () => unlisten?.();
+    return () => {
+      unlisten?.();
+      unlistenAutoWarmup?.();
+    };
   }, [checkProcesses, formatWarmupError, setForceCloseConfirmOpen, showWarmupToast, switchAccount]);
 
   const handleForceCloseConfirm = useCallback(async () => {

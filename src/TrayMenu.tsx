@@ -7,6 +7,11 @@ import {
   THEME_CHANGED_EVENT,
   type ThemeMode,
 } from "./lib/theme";
+import {
+  AUTO_WARMUP_ALL_CHANGED_EVENT,
+  readAutoWarmupAllEnabled,
+  writeAutoWarmupAllEnabled,
+} from "./lib/autoWarmup";
 
 const TRAY_REFRESH_EVENT = "tray-refresh";
 const ACCOUNTS_CHANGED_EVENT = "accounts-changed";
@@ -83,6 +88,7 @@ function TrayMenu() {
   const [error, setError] = useState<string | null>(null);
   const [usageById, setUsageById] = useState<Record<string, UsageInfo>>({});
   const [refreshing, setRefreshing] = useState(false);
+  const [autoWarmupAllEnabled, setAutoWarmupAllEnabled] = useState(readAutoWarmupAllEnabled);
 
   // Fetch each account's rate-limit usage in parallel; rows fill in as they land.
   const loadUsage = useCallback(async (list: AccountInfo[]) => {
@@ -146,6 +152,21 @@ function TrayMenu() {
     }
   }, [loadUsage]);
 
+  const handleAutoWarmupToggle = useCallback(async () => {
+    const next = !autoWarmupAllEnabled;
+    setAutoWarmupAllEnabled(next);
+    try {
+      writeAutoWarmupAllEnabled(next);
+      if (isTauriRuntime()) {
+        const { emit } = await import("@tauri-apps/api/event");
+        await emit(AUTO_WARMUP_ALL_CHANGED_EVENT, next);
+      }
+    } catch (err) {
+      setAutoWarmupAllEnabled(!next);
+      setError(formatError(err));
+    }
+  }, [autoWarmupAllEnabled]);
+
   useEffect(() => {
     void load();
   }, [load]);
@@ -156,11 +177,13 @@ function TrayMenu() {
     let unlistenRefresh: (() => void) | undefined;
     let unlistenChanged: (() => void) | undefined;
     let unlistenTheme: (() => void) | undefined;
+    let unlistenAutoWarmup: (() => void) | undefined;
 
     void (async () => {
       const { listen } = await import("@tauri-apps/api/event");
       unlistenRefresh = await listen(TRAY_REFRESH_EVENT, () => {
         syncThemeFromStorage();
+        setAutoWarmupAllEnabled(readAutoWarmupAllEnabled());
         void load();
       });
       unlistenChanged = await listen(ACCOUNTS_CHANGED_EVENT, () => void load());
@@ -169,12 +192,21 @@ function TrayMenu() {
           applyTheme(payload);
         }
       });
+      unlistenAutoWarmup = await listen<boolean>(
+        AUTO_WARMUP_ALL_CHANGED_EVENT,
+        ({ payload }) => {
+          if (typeof payload === "boolean") {
+            setAutoWarmupAllEnabled(payload);
+          }
+        }
+      );
     })();
 
     return () => {
       unlistenRefresh?.();
       unlistenChanged?.();
       unlistenTheme?.();
+      unlistenAutoWarmup?.();
     };
   }, [load]);
 
@@ -218,10 +250,26 @@ function TrayMenu() {
         </div>
         <span className="text-sm font-semibold">Codex Switcher</span>
         <button
+          onClick={() => void handleAutoWarmupToggle()}
+          disabled={accounts.length === 0}
+          title={
+            autoWarmupAllEnabled
+              ? "Disable auto warm-up for all accounts"
+              : "Enable auto warm-up for all accounts"
+          }
+          className={`ml-auto rounded-md px-2 py-1 text-[11px] font-semibold transition-colors disabled:opacity-50 ${
+            autoWarmupAllEnabled
+              ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-900/20 dark:text-emerald-300 dark:hover:bg-emerald-900/30"
+              : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
+          }`}
+        >
+          Auto: {autoWarmupAllEnabled ? "on" : "off"}
+        </button>
+        <button
           onClick={() => void handleRefresh()}
           disabled={refreshing}
           title="Refresh usage"
-          className="ml-auto flex h-6 w-6 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 disabled:opacity-50 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
+          className="flex h-6 w-6 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 disabled:opacity-50 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
         >
           <span className={`text-base leading-none ${refreshing ? "inline-block animate-spin" : ""}`}>
             ↻
