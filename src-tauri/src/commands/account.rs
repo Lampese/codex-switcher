@@ -40,7 +40,7 @@ const FULL_FILE_VERSION: u8 = 1;
 const FULL_SALT_LEN: usize = 16;
 const FULL_NONCE_LEN: usize = 24;
 const FULL_KDF_ITERATIONS: u32 = 210_000;
-const FULL_PRESET_PASSPHRASE: &str = "gT7kQ9mV2xN4pL8sR1dH6zW3cB5yF0uJ_aE7nK2tP9vM4rX1";
+pub(crate) const MIN_BACKUP_PASSPHRASE_LEN: usize = 12;
 
 const MAX_IMPORT_JSON_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_IMPORT_FILE_BYTES: u64 = 8 * 1024 * 1024;
@@ -227,28 +227,34 @@ pub async fn import_accounts_slim_text(payload: String) -> Result<ImportAccounts
 
 /// Export full account config as an encrypted file.
 #[tauri::command]
-pub async fn export_accounts_full_encrypted_file(path: String) -> Result<(), String> {
+pub async fn export_accounts_full_encrypted_file(
+    path: String,
+    passphrase: String,
+) -> Result<(), String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
-    let encrypted =
-        encode_full_encrypted_store(&store, FULL_PRESET_PASSPHRASE).map_err(|e| e.to_string())?;
+    let passphrase = validate_backup_passphrase(&passphrase).map_err(|e| e.to_string())?;
+    let encrypted = encode_full_encrypted_store(&store, passphrase).map_err(|e| e.to_string())?;
     write_encrypted_file(&path, &encrypted).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 /// Export full account config as encrypted bytes for browser clients.
-pub async fn export_accounts_full_encrypted_bytes() -> Result<Vec<u8>, String> {
+pub async fn export_accounts_full_encrypted_bytes(passphrase: String) -> Result<Vec<u8>, String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
-    encode_full_encrypted_store(&store, FULL_PRESET_PASSPHRASE).map_err(|e| e.to_string())
+    let passphrase = validate_backup_passphrase(&passphrase).map_err(|e| e.to_string())?;
+    encode_full_encrypted_store(&store, passphrase).map_err(|e| e.to_string())
 }
 
 /// Import full account config from an encrypted file, skipping existing accounts.
 #[tauri::command]
 pub async fn import_accounts_full_encrypted_file(
     path: String,
+    passphrase: String,
 ) -> Result<ImportAccountsSummary, String> {
     let encrypted = read_encrypted_file(&path).map_err(|e| e.to_string())?;
-    let imported = decode_full_encrypted_store(&encrypted, FULL_PRESET_PASSPHRASE)
-        .map_err(|e| e.to_string())?;
+    let passphrase = validate_backup_passphrase(&passphrase).map_err(|e| e.to_string())?;
+    let imported =
+        decode_full_encrypted_store(&encrypted, passphrase).map_err(|e| e.to_string())?;
     validate_imported_store(&imported).map_err(|e| e.to_string())?;
 
     let current = load_accounts().map_err(|e| e.to_string())?;
@@ -260,9 +266,10 @@ pub async fn import_accounts_full_encrypted_file(
 /// Import full account config from encrypted bytes uploaded through the browser UI.
 pub async fn import_accounts_full_encrypted_bytes(
     bytes: Vec<u8>,
+    passphrase: String,
 ) -> Result<ImportAccountsSummary, String> {
-    let imported =
-        decode_full_encrypted_store(&bytes, FULL_PRESET_PASSPHRASE).map_err(|e| e.to_string())?;
+    let passphrase = validate_backup_passphrase(&passphrase).map_err(|e| e.to_string())?;
+    let imported = decode_full_encrypted_store(&bytes, passphrase).map_err(|e| e.to_string())?;
     validate_imported_store(&imported).map_err(|e| e.to_string())?;
 
     let current = load_accounts().map_err(|e| e.to_string())?;
@@ -680,6 +687,36 @@ fn validate_imported_store(store: &AccountsStore) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn validate_backup_passphrase(passphrase: &str) -> anyhow::Result<&str> {
+    let trimmed = passphrase.trim();
+    if trimmed.len() < MIN_BACKUP_PASSPHRASE_LEN {
+        anyhow::bail!("Backup passphrase must be at least {MIN_BACKUP_PASSPHRASE_LEN} characters");
+    }
+
+    Ok(trimmed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_backup_passphrase, MIN_BACKUP_PASSPHRASE_LEN};
+
+    #[test]
+    fn backup_passphrase_rejects_blank_and_short_values() {
+        assert!(validate_backup_passphrase("   ").is_err());
+        assert!(validate_backup_passphrase("short").is_err());
+    }
+
+    #[test]
+    fn backup_passphrase_accepts_minimum_length_values() {
+        let passphrase = "a".repeat(MIN_BACKUP_PASSPHRASE_LEN);
+
+        assert_eq!(
+            validate_backup_passphrase(&passphrase).expect("valid passphrase"),
+            passphrase
+        );
+    }
 }
 
 fn merge_accounts_store(

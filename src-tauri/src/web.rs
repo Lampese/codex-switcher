@@ -2,7 +2,11 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::Context;
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine as _,
+};
+use rand::RngCore;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -17,6 +21,21 @@ use crate::commands::{
     list_accounts, refresh_account_metadata, refresh_all_accounts_usage, rename_account,
     set_masked_account_ids, start_login, switch_account, warmup_account, warmup_all_accounts,
 };
+
+pub(crate) const WEB_TOKEN_HEADER: &str = "x-codex-switcher-token";
+const WEB_TOKEN_COOKIE: &str = "codex_switcher_web_token";
+const WEB_TOKEN_BYTES: usize = 32;
+
+#[derive(Debug, Clone)]
+pub struct WebSecurity {
+    token: Option<String>,
+}
+
+impl WebSecurity {
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,6 +81,12 @@ struct UploadAuthJsonArgs {
 struct UploadEncryptedArgs {
     #[serde(alias = "contents_base64")]
     contents_base64: String,
+    passphrase: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExportEncryptedArgs {
+    passphrase: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,7 +95,28 @@ struct FileImportArgs {
     name: String,
 }
 
+pub fn default_web_host() -> String {
+    std::env::var("CODEX_SWITCHER_WEB_HOST").unwrap_or_else(|_| "127.0.0.1".to_string())
+}
+
+pub fn web_security_for_host(
+    host: &str,
+    configured_token: Option<String>,
+) -> anyhow::Result<WebSecurity> {
+    if is_loopback_host(host) {
+        return Ok(WebSecurity { token: None });
+    }
+
+    let token = match configured_token {
+        Some(token) if !token.trim().is_empty() => token.trim().to_string(),
+        _ => generate_web_token(),
+    };
+
+    Ok(WebSecurity { token: Some(token) })
+}
+
 pub fn run_lan_server(host: &str, port: u16) -> anyhow::Result<()> {
+    let security = web_security_for_host(host, std::env::var("CODEX_SWITCHER_WEB_TOKEN").ok())?;
     let address = format!("{host}:{port}");
     let server = Server::http(&address)
         .map_err(|err| anyhow::anyhow!("Failed to bind HTTP server on {address}: {err}"))?;
@@ -81,9 +127,12 @@ pub fn run_lan_server(host: &str, port: u16) -> anyhow::Result<()> {
 
     println!("Codex Switcher web server listening on http://{address}");
     println!("Serving static files from {}", dist_dir.display());
+    if let Some(token) = security.token() {
+        println!("Web access token required. Open http://{address}/?token={token}");
+    }
 
     for request in server.incoming_requests() {
-        if let Err(error) = handle_request(request, &runtime, &dist_dir) {
+        if let Err(error) = handle_request(request, &runtime, &dist_dir, &security) {
             eprintln!("[web] request failed: {error:#}");
         }
     }
@@ -91,12 +140,29 @@ pub fn run_lan_server(host: &str, port: u16) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn handle_request(mut request: Request, runtime: &Runtime, dist_dir: &Path) -> anyhow::Result<()> {
+fn handle_request(
+    mut request: Request,
+    runtime: &Runtime,
+    dist_dir: &Path,
+    security: &WebSecurity,
+) -> anyhow::Result<()> {
     let method = request.method().clone();
     let url = request.url().to_string();
+    let headers = request_headers(&request);
 
     if method == Method::Get && url == "/api/health" {
         respond_json(request, StatusCode(200), &json!({ "ok": true }))?;
+        return Ok(());
+    }
+
+    if !request_is_authorized(&url, &headers, security) {
+        respond_text(
+            request,
+            StatusCode(401),
+            "Unauthorized",
+            "text/plain; charset=utf-8",
+            None,
+        )?;
         return Ok(());
     }
 
@@ -112,7 +178,7 @@ fn handle_request(mut request: Request, runtime: &Runtime, dist_dir: &Path) -> a
     }
 
     if method == Method::Get {
-        serve_static(request, dist_dir, &url)?;
+        serve_static(request, dist_dir, &url, security)?;
         return Ok(());
     }
 
@@ -121,6 +187,7 @@ fn handle_request(mut request: Request, runtime: &Runtime, dist_dir: &Path) -> a
         StatusCode(405),
         "Method Not Allowed",
         "text/plain; charset=utf-8",
+        None,
     )?;
     Ok(())
 }
@@ -175,7 +242,9 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
             to_json(import_accounts_slim_text(args.payload).await?)
         }
         "export_accounts_full_encrypted_bytes" => {
-            let encoded = STANDARD.encode(export_accounts_full_encrypted_bytes().await?);
+            let args: ExportEncryptedArgs = parse_args(payload)?;
+            let encoded =
+                STANDARD.encode(export_accounts_full_encrypted_bytes(args.passphrase).await?);
             to_json(encoded)
         }
         "import_accounts_full_encrypted_bytes" => {
@@ -183,7 +252,7 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
             let bytes = STANDARD
                 .decode(args.contents_base64)
                 .map_err(|error| format!("Failed to decode uploaded backup: {error}"))?;
-            to_json(import_accounts_full_encrypted_bytes(bytes).await?)
+            to_json(import_accounts_full_encrypted_bytes(bytes, args.passphrase).await?)
         }
         "get_masked_account_ids" => to_json(get_masked_account_ids().await?),
         "set_masked_account_ids" => {
@@ -224,7 +293,12 @@ where
     serde_json::to_value(value).map_err(|error| format!("Failed to serialize response: {error}"))
 }
 
-fn serve_static(request: Request, dist_dir: &Path, url: &str) -> anyhow::Result<()> {
+fn serve_static(
+    request: Request,
+    dist_dir: &Path,
+    url: &str,
+    security: &WebSecurity,
+) -> anyhow::Result<()> {
     let requested = if url == "/" {
         PathBuf::from("index.html")
     } else {
@@ -233,7 +307,7 @@ fn serve_static(request: Request, dist_dir: &Path, url: &str) -> anyhow::Result<
     let candidate = dist_dir.join(&requested);
 
     if candidate.is_file() {
-        return serve_file(request, candidate);
+        return serve_file(request, candidate, security, url);
     }
 
     if requested.extension().is_some() {
@@ -242,11 +316,12 @@ fn serve_static(request: Request, dist_dir: &Path, url: &str) -> anyhow::Result<
             StatusCode(404),
             "Not Found",
             "text/plain; charset=utf-8",
+            None,
         )?;
         return Ok(());
     }
 
-    serve_file(request, dist_dir.join("index.html"))
+    serve_file(request, dist_dir.join("index.html"), security, url)
 }
 
 fn sanitize_path(url: &str) -> anyhow::Result<PathBuf> {
@@ -264,12 +339,25 @@ fn sanitize_path(url: &str) -> anyhow::Result<PathBuf> {
     Ok(candidate.to_path_buf())
 }
 
-fn serve_file(request: Request, path: PathBuf) -> anyhow::Result<()> {
+fn serve_file(
+    request: Request,
+    path: PathBuf,
+    security: &WebSecurity,
+    url: &str,
+) -> anyhow::Result<()> {
     let data = fs::read(&path).with_context(|| format!("Failed to read {}", path.display()))?;
     let mime = mime_type_for_path(&path);
-    let response = Response::from_data(data)
+    let mut response = Response::from_data(data)
         .with_header(header("Content-Type", mime)?)
         .with_header(header("Cache-Control", "no-cache")?);
+    if url_has_valid_token(url, security) {
+        if let Some(token) = security.token() {
+            response = response.with_header(header(
+                "Set-Cookie",
+                &format!("{WEB_TOKEN_COOKIE}={token}; Path=/; SameSite=Strict; HttpOnly"),
+            )?);
+        }
+    }
     request.respond(response)?;
     Ok(())
 }
@@ -287,12 +375,90 @@ fn respond_text(
     status: StatusCode,
     body: &str,
     content_type: &str,
+    extra_header: Option<Header>,
 ) -> anyhow::Result<()> {
-    let response = Response::from_string(body.to_string())
+    let mut response = Response::from_string(body.to_string())
         .with_status_code(status)
         .with_header(header("Content-Type", content_type)?);
+    if let Some(extra_header) = extra_header {
+        response = response.with_header(extra_header);
+    }
     request.respond(response)?;
     Ok(())
+}
+
+fn request_headers(request: &Request) -> Vec<(String, String)> {
+    request
+        .headers()
+        .iter()
+        .map(|header| {
+            (
+                header.field.to_string().to_ascii_lowercase(),
+                header.value.as_str().to_string(),
+            )
+        })
+        .collect()
+}
+
+fn request_is_authorized(
+    url: &str,
+    headers: &[(impl AsRef<str>, impl AsRef<str>)],
+    security: &WebSecurity,
+) -> bool {
+    security.token().is_none()
+        || url_has_valid_token(url, security)
+        || request_has_valid_web_token(headers, security)
+}
+
+pub(crate) fn request_has_valid_web_token(
+    headers: &[(impl AsRef<str>, impl AsRef<str>)],
+    security: &WebSecurity,
+) -> bool {
+    let Some(token) = security.token() else {
+        return true;
+    };
+
+    headers.iter().any(|(name, value)| {
+        let name = name.as_ref();
+        let value = value.as_ref();
+        if name.eq_ignore_ascii_case(WEB_TOKEN_HEADER) {
+            return value == token;
+        }
+
+        name.eq_ignore_ascii_case("cookie") && cookie_contains_token(value, token)
+    })
+}
+
+fn cookie_contains_token(cookie_header: &str, token: &str) -> bool {
+    cookie_header
+        .split(';')
+        .map(str::trim)
+        .any(|part| part == format!("{WEB_TOKEN_COOKIE}={token}"))
+}
+
+fn url_has_valid_token(url: &str, security: &WebSecurity) -> bool {
+    let Some(token) = security.token() else {
+        return true;
+    };
+
+    let Some(query) = url.split_once('?').map(|(_, query)| query) else {
+        return false;
+    };
+
+    query.split('&').any(|pair| {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        name == "token" && value == token
+    })
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
+fn generate_web_token() -> String {
+    let mut bytes = [0u8; WEB_TOKEN_BYTES];
+    rand::rng().fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
 }
 
 fn header(name: &str, value: &str) -> anyhow::Result<Header> {
@@ -320,5 +486,48 @@ fn mime_type_for_path(path: &Path) -> &'static str {
         "txt" => "text/plain; charset=utf-8",
         "webp" => "image/webp",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{request_has_valid_web_token, web_security_for_host, WEB_TOKEN_HEADER};
+
+    #[test]
+    fn localhost_web_server_does_not_require_token_by_default() {
+        let security = web_security_for_host("127.0.0.1", None).expect("security config");
+
+        assert!(security.token().is_none());
+    }
+
+    #[test]
+    fn non_loopback_web_server_requires_token() {
+        let security = web_security_for_host("0.0.0.0", None).expect("security config");
+
+        assert!(security.token().is_some());
+    }
+
+    #[test]
+    fn web_token_validation_accepts_header_or_cookie_only_when_matching() {
+        let security = web_security_for_host("0.0.0.0", Some("secret-token".to_string()))
+            .expect("security config");
+
+        assert!(request_has_valid_web_token(
+            &[("x-codex-switcher-token", "secret-token")],
+            &security
+        ));
+        assert!(request_has_valid_web_token(
+            &[(
+                "cookie",
+                "theme=dark; codex_switcher_web_token=secret-token"
+            )],
+            &security
+        ));
+        assert!(!request_has_valid_web_token(
+            &[(WEB_TOKEN_HEADER, "wrong-token")],
+            &security
+        ));
+        let empty_headers: Vec<(&str, &str)> = Vec::new();
+        assert!(!request_has_valid_web_token(&empty_headers, &security));
     }
 }

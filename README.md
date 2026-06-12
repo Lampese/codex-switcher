@@ -49,16 +49,19 @@ The built application will be in `src-tauri/target/release/bundle/`.
 You can also serve the built dashboard over HTTP instead of opening the Tauri shell.
 
 ```bash
-# Build the frontend and start the web server on 0.0.0.0:3210
+# Build the frontend and start the web server on 127.0.0.1:3210
 pnpm lan
 ```
 
 Optional environment variables:
 
-- `CODEX_SWITCHER_WEB_HOST` to override the bind host
+- `CODEX_SWITCHER_WEB_HOST` to override the bind host. Non-local hosts require a session token.
 - `CODEX_SWITCHER_WEB_PORT` to override the port
+- `CODEX_SWITCHER_WEB_TOKEN` to provide a fixed session token instead of generating one
 
-The browser dashboard serves the same UI and backend actions through `/api/invoke/*`, which makes it usable over LAN, Tailscale, or a remote host tunnel when you expose the chosen port safely.
+The browser dashboard serves the same UI and backend actions through `/api/invoke/*`. If you bind to a non-local host such as `0.0.0.0`, the server prints a tokenized URL that must be opened before the dashboard can call backend actions.
+
+Full account backups are encrypted with the passphrase you enter during export. The same passphrase is required during import.
 
 ## Disclaimer
 

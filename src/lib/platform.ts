@@ -2,6 +2,8 @@ import type { ImportAccountsSummary } from "../types";
 
 export type FileSource = string | File;
 
+const MIN_BACKUP_PASSPHRASE_LENGTH = 12;
+
 export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -60,6 +62,9 @@ export async function pickAuthJsonFile(): Promise<FileSource | null> {
 }
 
 export async function exportFullBackupFile(): Promise<boolean> {
+  const passphrase = promptForBackupPassphrase("Enter a backup passphrase for this export:");
+  if (!passphrase) return false;
+
   if (isTauriRuntime()) {
     const { save } = await import("@tauri-apps/plugin-dialog");
     const selected = await save({
@@ -69,11 +74,13 @@ export async function exportFullBackupFile(): Promise<boolean> {
     });
 
     if (!selected) return false;
-    await invokeBackend("export_accounts_full_encrypted_file", { path: selected });
+    await invokeBackend("export_accounts_full_encrypted_file", { path: selected, passphrase });
     return true;
   }
 
-  const contentsBase64 = await invokeBackend<string>("export_accounts_full_encrypted_bytes");
+  const contentsBase64 = await invokeBackend<string>("export_accounts_full_encrypted_bytes", {
+    passphrase,
+  });
   downloadBase64File(
     contentsBase64,
     "codex-switcher-full.cswf",
@@ -83,6 +90,9 @@ export async function exportFullBackupFile(): Promise<boolean> {
 }
 
 export async function importFullBackupFile(): Promise<ImportAccountsSummary | null> {
+  const passphrase = promptForBackupPassphrase("Enter the backup passphrase:");
+  if (!passphrase) return null;
+
   if (isTauriRuntime()) {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
@@ -94,6 +104,7 @@ export async function importFullBackupFile(): Promise<ImportAccountsSummary | nu
     if (!selected || Array.isArray(selected)) return null;
     return invokeBackend<ImportAccountsSummary>("import_accounts_full_encrypted_file", {
       path: selected,
+      passphrase,
     });
   }
 
@@ -103,7 +114,23 @@ export async function importFullBackupFile(): Promise<ImportAccountsSummary | nu
   const contentsBase64 = await fileToBase64(selected);
   return invokeBackend<ImportAccountsSummary>("import_accounts_full_encrypted_bytes", {
     contentsBase64,
+    passphrase,
   });
+}
+
+function promptForBackupPassphrase(message: string): string | null {
+  const passphrase = window.prompt(
+    `${message}\n\nMinimum ${MIN_BACKUP_PASSPHRASE_LENGTH} characters.`
+  );
+  if (passphrase === null) return null;
+
+  const trimmed = passphrase.trim();
+  if (trimmed.length < MIN_BACKUP_PASSPHRASE_LENGTH) {
+    window.alert(`Backup passphrase must be at least ${MIN_BACKUP_PASSPHRASE_LENGTH} characters.`);
+    return null;
+  }
+
+  return trimmed;
 }
 
 export function describeFileSource(source: FileSource | null): string {
