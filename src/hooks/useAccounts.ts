@@ -103,9 +103,13 @@ export function useAccounts() {
           await runWithConcurrency(
             list,
             async (account) => {
-              await invokeBackend<AccountInfo>("refresh_account_metadata", {
-                accountId: account.id,
-              });
+              try {
+                await invokeBackend<AccountInfo>("refresh_account_metadata", {
+                  accountId: account.id,
+                });
+              } catch (err) {
+                console.error("Failed to refresh account metadata:", err);
+              }
             },
             maxConcurrentUsageRequests
           );

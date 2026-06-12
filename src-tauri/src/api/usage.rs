@@ -106,7 +106,11 @@ pub async fn fetch_chatgpt_account_metadata(
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("Accounts check API error: {status} - {body}");
+        anyhow::bail!(external_http_error_message(
+            "Accounts check API",
+            status,
+            &body
+        ));
     }
 
     let payload: AccountsCheckResponse = response
@@ -395,6 +399,28 @@ fn truncate_text(text: &str, max_len: usize) -> String {
     out
 }
 
+fn external_http_error_message(context: &str, status: StatusCode, body: &str) -> String {
+    if is_browser_challenge_response(body) {
+        return format!(
+            "{context} error: {status} - ChatGPT returned a browser verification challenge. Open chatgpt.com in a browser, complete the challenge, then try again."
+        );
+    }
+
+    let body = body.trim();
+    if body.is_empty() {
+        return format!("{context} error: {status}");
+    }
+
+    format!("{context} error: {status} - {}", truncate_text(body, 300))
+}
+
+fn is_browser_challenge_response(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("enable javascript and cookies to continue")
+        || lower.contains("cf_chl")
+        || lower.contains("challenge-platform")
+}
+
 fn extract_text_from_sse(body: &str) -> Option<String> {
     let mut last_text: Option<String> = None;
     for line in body.lines() {
@@ -510,4 +536,23 @@ pub async fn refresh_all_usage(accounts: &[StoredAccount]) -> Vec<UsageInfo> {
 
     println!("[Usage] Refresh complete");
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn external_error_message_summarizes_cloudflare_challenge_html() {
+        let body = r#"<html><head><title>Just a moment...</title></head>
+            <body>Enable JavaScript and cookies to continue</body></html>"#;
+
+        let message = external_http_error_message("Accounts check API", StatusCode::FORBIDDEN, body);
+
+        assert_eq!(
+            message,
+            "Accounts check API error: 403 Forbidden - ChatGPT returned a browser verification challenge. Open chatgpt.com in a browser, complete the challenge, then try again."
+        );
+        assert!(!message.contains("<html>"));
+    }
 }
