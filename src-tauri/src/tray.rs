@@ -187,12 +187,10 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, store: &AccountsStore) -> tauri::R
     } else {
         for account in &store.accounts {
             let label = format!("{}{}", account.name, usage_suffix(&account.id));
-            let item = CheckMenuItemBuilder::with_id(
-                account_menu_id(&account.id),
-                menu_label(&label),
-            )
-            .checked(store.active_account_id.as_deref() == Some(&account.id))
-            .build(app)?;
+            let item =
+                CheckMenuItemBuilder::with_id(account_menu_id(&account.id), menu_label(&label))
+                    .checked(store.active_account_id.as_deref() == Some(&account.id))
+                    .build(app)?;
             menu.append(&item)?;
         }
     }
@@ -392,11 +390,22 @@ mod tests {
 
     #[test]
     fn embedded_tray_icon_is_not_an_opaque_block() {
-        let alphas: Vec<_> = TRAY_ICON.rgba().iter().skip(3).step_by(4).copied().collect();
+        let alphas: Vec<_> = TRAY_ICON
+            .rgba()
+            .iter()
+            .skip(3)
+            .step_by(4)
+            .copied()
+            .collect();
         let width = TRAY_ICON.width() as usize;
 
         assert_eq!(
-            [alphas[0], alphas[width - 1], alphas[alphas.len() - width], alphas[alphas.len() - 1]],
+            [
+                alphas[0],
+                alphas[width - 1],
+                alphas[alphas.len() - width],
+                alphas[alphas.len() - 1]
+            ],
             [0, 0, 0, 0]
         );
         assert!(alphas.contains(&0));

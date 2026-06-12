@@ -187,6 +187,10 @@ function TrayMenu() {
       setSwitchingId(account.id);
       setError(null);
       await invokeBackend("switch_account", { accountId: account.id });
+      // Notify the main window immediately so its active-account state stays in
+      // sync without waiting on the backend accounts-file watcher (~1s poll).
+      const { emit } = await import("@tauri-apps/api/event");
+      await emit(ACCOUNTS_CHANGED_EVENT);
       void invokeBackend("hide_tray_window");
     } catch (err) {
       const message = formatError(err);
