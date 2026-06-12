@@ -42,6 +42,10 @@ pnpm tauri dev
 pnpm tauri build
 ```
 
+> **Windows:** the `pnpm tauri` script runs through a POSIX shell wrapper
+> (`sh ./scripts/tauri.sh`) and will not work in PowerShell/CMD. Use the
+> `tauri:win` script instead: `pnpm tauri:win dev` and `pnpm tauri:win build`.
+
 The built application will be in `src-tauri/target/release/bundle/`.
 
 ### Run the Dashboard in a Browser
