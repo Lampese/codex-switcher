@@ -1,6 +1,8 @@
 //! Codex Switcher - Multi-account manager for Codex CLI
 
 pub mod api;
+#[cfg(desktop)]
+pub mod app_menu;
 pub mod auth;
 pub mod commands;
 #[cfg(desktop)]
@@ -28,6 +30,7 @@ pub fn run() {
             {
                 app.handle()
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
+                app_menu::setup(app.handle())?;
                 tray::setup(app.handle())?;
             }
             Ok(())

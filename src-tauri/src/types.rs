@@ -19,6 +19,20 @@ pub struct AccountsStore {
     pub masked_account_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrayDisplayMode {
+    IconAndSession,
+    #[default]
+    ActiveUsageText,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct AppSettings {
+    pub tray_display_mode: TrayDisplayMode,
+}
+
 impl Default for AccountsStore {
     fn default() -> Self {
         Self {

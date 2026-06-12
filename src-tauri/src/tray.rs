@@ -11,12 +11,12 @@ use tauri::{
 
 use crate::{
     api::usage::get_account_usage,
-    auth::{get_account, get_accounts_file, load_accounts},
+    auth::{get_account, get_accounts_file, load_accounts, load_app_settings},
     commands::{
         is_codex_running_switch_block, restore_main_window, switch_account_by_id,
         window::TRAY_WINDOW,
     },
-    types::{AccountsStore, UsageInfo},
+    types::{AccountsStore, TrayDisplayMode, UsageInfo},
 };
 
 static TRAY_USAGE: LazyLock<Mutex<HashMap<String, UsageInfo>>> =
@@ -70,10 +70,15 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false);
 
     builder.build(app)?;
+    refresh_menu(app);
 
     watch_accounts_file(app.clone());
     poll_active_account_usage(app.clone());
     Ok(())
+}
+
+pub fn refresh<R: Runtime>(app: &AppHandle<R>) {
+    refresh_menu(app);
 }
 
 /// Store usage reported by the main app and refresh the native menu labels.
@@ -252,19 +257,53 @@ fn refresh_menu<R: Runtime>(app: &AppHandle<R>) {
     match load_accounts()
         .map_err(|error| error.to_string())
         .and_then(|store| {
-            let title = active_session_title(store.active_account_id.as_deref());
+            let settings = load_app_settings().unwrap_or_default();
+            let title = active_tray_title(
+                store.active_account_id.as_deref(),
+                settings.tray_display_mode,
+            );
             let menu = build_menu(app, &store).map_err(|error| error.to_string())?;
-            Ok((menu, title))
+            Ok((menu, title, settings.tray_display_mode))
         }) {
-        Ok((menu, title)) => {
+        Ok((menu, title, mode)) => {
             if let Err(error) = tray.set_menu(Some(menu)) {
                 eprintln!("Failed to refresh tray menu: {error}");
             }
-            if let Err(error) = tray.set_title(title.as_deref()) {
+            refresh_tray_display(&tray, mode, title.as_deref());
+        }
+        Err(error) => eprintln!("Failed to build tray menu: {error}"),
+    }
+}
+
+fn refresh_tray_display<R: Runtime>(
+    tray: &tauri::tray::TrayIcon<R>,
+    mode: TrayDisplayMode,
+    title: Option<&str>,
+) {
+    match mode {
+        TrayDisplayMode::IconAndSession => {
+            #[cfg(not(target_os = "linux"))]
+            {
+                if let Err(error) = tray.set_icon(Some(TRAY_ICON)) {
+                    eprintln!("Failed to refresh tray icon: {error}");
+                }
+                if let Err(error) = tray.set_icon_as_template(true) {
+                    eprintln!("Failed to refresh tray icon template mode: {error}");
+                }
+            }
+            if let Err(error) = tray.set_title(title) {
                 eprintln!("Failed to refresh tray title: {error}");
             }
         }
-        Err(error) => eprintln!("Failed to build tray menu: {error}"),
+        TrayDisplayMode::ActiveUsageText => {
+            #[cfg(not(target_os = "linux"))]
+            if let Err(error) = tray.set_icon(None) {
+                eprintln!("Failed to hide tray icon: {error}");
+            }
+            if let Err(error) = tray.set_title(title) {
+                eprintln!("Failed to refresh tray title: {error}");
+            }
+        }
     }
 }
 
@@ -280,11 +319,47 @@ fn active_session_title(active_account_id: Option<&str>) -> Option<String> {
     session_remaining_title(usage.primary_used_percent, usage.error.is_some())
 }
 
+fn active_tray_title(active_account_id: Option<&str>, mode: TrayDisplayMode) -> Option<String> {
+    match mode {
+        TrayDisplayMode::IconAndSession => active_session_title(active_account_id),
+        TrayDisplayMode::ActiveUsageText => Some(active_usage_title(active_account_id)),
+    }
+}
+
+fn active_usage_title(active_account_id: Option<&str>) -> String {
+    let Some(active_account_id) = active_account_id else {
+        return "Codex".to_string();
+    };
+
+    let usage = TRAY_USAGE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(active_account_id).cloned());
+
+    let (primary, secondary) = match usage {
+        Some(usage) if usage.error.is_none() => (
+            remaining_percent_label(usage.primary_used_percent),
+            remaining_percent_label(usage.secondary_used_percent),
+        ),
+        _ => (None, None),
+    };
+
+    format!(
+        "H:{} W:{}",
+        primary.as_deref().unwrap_or("--"),
+        secondary.as_deref().unwrap_or("--")
+    )
+}
+
 fn session_remaining_title(used_percent: Option<f64>, has_error: bool) -> Option<String> {
     if has_error {
         return None;
     }
 
+    remaining_percent_label(used_percent)
+}
+
+fn remaining_percent_label(used_percent: Option<f64>) -> Option<String> {
     let used_percent = used_percent?;
     if !used_percent.is_finite() {
         return None;
@@ -450,5 +525,11 @@ mod tests {
             session_remaining_title(Some(105.0), false),
             Some("0%".to_string())
         );
+    }
+
+    #[test]
+    fn active_usage_title_falls_back_when_usage_is_missing() {
+        assert_eq!(active_usage_title(Some("missing")), "H:-- W:--");
+        assert_eq!(active_usage_title(None), "Codex");
     }
 }

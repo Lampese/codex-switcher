@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 
-use crate::types::{AccountsStore, AuthData, StoredAccount};
+use crate::types::{AccountsStore, AppSettings, AuthData, StoredAccount};
 
 /// Get the path to the codex-switcher config directory
 pub fn get_config_dir() -> Result<PathBuf> {
@@ -17,6 +17,10 @@ pub fn get_config_dir() -> Result<PathBuf> {
 /// Get the path to accounts.json
 pub fn get_accounts_file() -> Result<PathBuf> {
     Ok(get_config_dir()?.join("accounts.json"))
+}
+
+pub fn get_settings_file() -> Result<PathBuf> {
+    Ok(get_config_dir()?.join("settings.json"))
 }
 
 /// Load the accounts store from disk
@@ -34,6 +38,44 @@ pub fn load_accounts() -> Result<AccountsStore> {
         .with_context(|| format!("Failed to parse accounts file: {}", path.display()))?;
 
     Ok(store)
+}
+
+pub fn load_app_settings() -> Result<AppSettings> {
+    let path = get_settings_file()?;
+
+    if !path.exists() {
+        return Ok(AppSettings::default());
+    }
+
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read settings file: {}", path.display()))?;
+
+    let settings: AppSettings = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse settings file: {}", path.display()))?;
+
+    Ok(settings)
+}
+
+pub fn save_app_settings(settings: &AppSettings) -> Result<()> {
+    let path = get_settings_file()?;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create config directory: {}", parent.display()))?;
+    }
+
+    let content = serde_json::to_string_pretty(settings).context("Failed to serialize settings")?;
+    fs::write(&path, content)
+        .with_context(|| format!("Failed to write settings file: {}", path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::Permissions::from_mode(0o600);
+        fs::set_permissions(&path, perms)?;
+    }
+
+    Ok(())
 }
 
 /// Save the accounts store to disk
