@@ -4,9 +4,21 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
+use chacha20poly1305::{
+    aead::{Aead, KeyInit},
+    XChaCha20Poly1305, XNonce,
+};
 use chrono::{DateTime, Utc};
+use rand::RngCore;
 
 use crate::types::{AccountsStore, AuthData, StoredAccount};
+
+const ENCRYPTED_STORE_PREFIX: &str = "cswa1.";
+const STORE_KEY_SERVICE: &str = "codex-switcher";
+const STORE_KEY_ACCOUNT: &str = "accounts-store";
+const STORE_KEY_BYTES: usize = 32;
+const STORE_NONCE_BYTES: usize = 24;
 
 /// Get the path to the codex-switcher config directory
 pub fn get_config_dir() -> Result<PathBuf> {
@@ -27,10 +39,17 @@ pub fn load_accounts() -> Result<AccountsStore> {
         return Ok(AccountsStore::default());
     }
 
-    let content = fs::read_to_string(&path)
+    let content = fs::read(&path)
         .with_context(|| format!("Failed to read accounts file: {}", path.display()))?;
 
-    let store: AccountsStore = serde_json::from_str(&content)
+    let json = if content.starts_with(ENCRYPTED_STORE_PREFIX.as_bytes()) {
+        let key = get_or_create_store_key()?;
+        decrypt_accounts_store_json(&content, &key)?
+    } else {
+        content
+    };
+
+    let store: AccountsStore = serde_json::from_slice(&json)
         .with_context(|| format!("Failed to parse accounts file: {}", path.display()))?;
 
     Ok(store)
@@ -46,10 +65,11 @@ pub fn save_accounts(store: &AccountsStore) -> Result<()> {
             .with_context(|| format!("Failed to create config directory: {}", parent.display()))?;
     }
 
-    let content =
-        serde_json::to_string_pretty(store).context("Failed to serialize accounts store")?;
+    let content = serde_json::to_vec_pretty(store).context("Failed to serialize accounts store")?;
+    let key = get_or_create_store_key()?;
+    let encrypted = encrypt_accounts_store_json(&content, &key)?;
 
-    fs::write(&path, content)
+    fs::write(&path, encrypted)
         .with_context(|| format!("Failed to write accounts file: {}", path.display()))?;
 
     // Set restrictive permissions on Unix
@@ -61,6 +81,112 @@ pub fn save_accounts(store: &AccountsStore) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn get_or_create_store_key() -> Result<[u8; STORE_KEY_BYTES]> {
+    initialize_native_store()?;
+    let entry = keyring_core::Entry::new(STORE_KEY_SERVICE, STORE_KEY_ACCOUNT)
+        .context("Failed to open OS credential store")?;
+
+    match entry.get_password() {
+        Ok(encoded) => decode_store_key(&encoded),
+        Err(keyring_core::Error::NoEntry) => {
+            let mut key = [0u8; STORE_KEY_BYTES];
+            rand::rng().fill_bytes(&mut key);
+            entry
+                .set_password(&STANDARD_NO_PAD.encode(key))
+                .context("Failed to save account-store key to OS credential store")?;
+            Ok(key)
+        }
+        Err(error) => {
+            Err(error).context("Failed to read account-store key from OS credential store")
+        }
+    }
+}
+
+fn initialize_native_store() -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        keyring_core::set_default_store(
+            windows_native_keyring_store::Store::new()
+                .context("Failed to initialize Windows Credential Manager")?,
+        );
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        keyring_core::set_default_store(
+            apple_native_keyring_store::keychain::Store::new()
+                .context("Failed to initialize macOS Keychain")?,
+        );
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        keyring_core::set_default_store(
+            zbus_secret_service_keyring_store::Store::new()
+                .context("Failed to initialize Linux Secret Service")?,
+        );
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        anyhow::bail!("No native credential store is configured for this platform")
+    }
+}
+
+fn decode_store_key(encoded: &str) -> Result<[u8; STORE_KEY_BYTES]> {
+    let decoded = STANDARD_NO_PAD
+        .decode(encoded.trim())
+        .context("Stored account encryption key is invalid base64")?;
+    let key: [u8; STORE_KEY_BYTES] = decoded
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Stored account encryption key has invalid length"))?;
+    Ok(key)
+}
+
+fn encrypt_accounts_store_json(json: &[u8], key: &[u8; STORE_KEY_BYTES]) -> Result<Vec<u8>> {
+    let mut nonce = [0u8; STORE_NONCE_BYTES];
+    rand::rng().fill_bytes(&mut nonce);
+
+    let cipher = XChaCha20Poly1305::new(key.into());
+    let ciphertext = cipher
+        .encrypt(XNonce::from_slice(&nonce), json)
+        .map_err(|_| anyhow::anyhow!("Failed to encrypt accounts store"))?;
+
+    let mut payload = Vec::with_capacity(STORE_NONCE_BYTES + ciphertext.len());
+    payload.extend_from_slice(&nonce);
+    payload.extend_from_slice(&ciphertext);
+
+    Ok(format!(
+        "{ENCRYPTED_STORE_PREFIX}{}",
+        STANDARD_NO_PAD.encode(payload)
+    )
+    .into_bytes())
+}
+
+fn decrypt_accounts_store_json(encrypted: &[u8], key: &[u8; STORE_KEY_BYTES]) -> Result<Vec<u8>> {
+    let encoded = std::str::from_utf8(encrypted)
+        .context("Encrypted accounts store is not UTF-8")?
+        .strip_prefix(ENCRYPTED_STORE_PREFIX)
+        .context("Encrypted accounts store header is invalid")?;
+
+    let payload = STANDARD_NO_PAD
+        .decode(encoded)
+        .context("Encrypted accounts store payload is invalid base64")?;
+
+    if payload.len() <= STORE_NONCE_BYTES {
+        anyhow::bail!("Encrypted accounts store is truncated");
+    }
+
+    let (nonce, ciphertext) = payload.split_at(STORE_NONCE_BYTES);
+    let cipher = XChaCha20Poly1305::new(key.into());
+    cipher
+        .decrypt(XNonce::from_slice(nonce), ciphertext)
+        .map_err(|_| anyhow::anyhow!("Failed to decrypt accounts store"))
 }
 
 /// Add a new account to the store
@@ -262,4 +388,24 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
     store.masked_account_ids = ids;
     save_accounts(&store)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decrypt_accounts_store_json, encrypt_accounts_store_json};
+
+    #[test]
+    fn encrypted_accounts_store_payload_does_not_contain_plaintext_credentials() {
+        let key = [7u8; 32];
+        let json = br#"{"accounts":[{"auth_data":{"type":"api_key","key":"sk-test-secret"}}]}"#;
+
+        let encrypted = encrypt_accounts_store_json(json, &key).expect("encrypt store");
+
+        assert_ne!(encrypted, json);
+        assert!(!String::from_utf8_lossy(&encrypted).contains("sk-test-secret"));
+        assert_eq!(
+            decrypt_accounts_store_json(&encrypted, &key).expect("decrypt store"),
+            json
+        );
+    }
 }

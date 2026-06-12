@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAccounts } from "./hooks/useAccounts";
 import { useForceCloseCodexProcesses } from "./hooks/useForceCloseCodexProcesses";
 import { AccountCard, AddAccountModal, UpdateChecker } from "./components";
@@ -24,6 +23,7 @@ const DEFAULT_PRIMARY_WINDOW_MINUTES = 300;
 const LIMIT_FULL_THRESHOLD = 99.5;
 const SWITCH_ACCOUNT_BLOCKED_EVENT = "switch-account-blocked";
 type ThemeMode = "light" | "dark";
+type AppWindow = import("@tauri-apps/api/window").Window;
 interface SwitchAccountBlockedPayload {
   accountId?: string;
   error?: string;
@@ -34,10 +34,18 @@ type AutoWarmupLedger = Record<
     lastSuccessfulWarmupAt?: number;
   }
 >;
-const appWindow = getCurrentWindow();
+let appWindowPromise: Promise<AppWindow | null> | null = null;
 const isMacOs =
   typeof navigator !== "undefined" &&
   /(Mac|iPhone|iPod|iPad)/i.test(navigator.userAgent);
+
+async function getAppWindow(): Promise<AppWindow | null> {
+  if (!isTauriRuntime()) return null;
+  appWindowPromise ??= import("@tauri-apps/api/window").then(({ getCurrentWindow }) =>
+    getCurrentWindow()
+  );
+  return appWindowPromise;
+}
 
 function readStoredStringArray(key: string): string[] {
   if (typeof window === "undefined") return [];
@@ -265,14 +273,20 @@ function App() {
   const handleTitlebarDrag = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
       if (!isTauriRuntime() || event.button !== 0) return;
-      void appWindow.startDragging();
+      void (async () => {
+        const appWindow = await getAppWindow();
+        await appWindow?.startDragging();
+      })();
     },
     []
   );
 
   const handleTitlebarDoubleClick = useCallback(() => {
     if (!isTauriRuntime()) return;
-    void appWindow.toggleMaximize();
+    void (async () => {
+      const appWindow = await getAppWindow();
+      await appWindow?.toggleMaximize();
+    })();
   }, []);
 
   const toggleMask = (accountId: string) => {
@@ -367,29 +381,37 @@ function App() {
     if (!isTauriRuntime() || isMacOs) return;
 
     let unlisten: (() => void) | undefined;
+    let disposed = false;
+    let appWindow: AppWindow | null = null;
 
     const syncMaximizedState = async () => {
       try {
+        if (!appWindow || disposed) return;
         setIsWindowMaximized(await appWindow.isMaximized());
       } catch (err) {
         console.error("Failed to read window state:", err);
       }
     };
 
-    void syncMaximizedState();
+    void (async () => {
+      appWindow = await getAppWindow();
+      if (!appWindow || disposed) return;
+      await syncMaximizedState();
 
-    appWindow
-      .onResized(() => {
-        void syncMaximizedState();
-      })
-      .then((fn) => {
-        unlisten = fn;
-      })
-      .catch((err) => {
-        console.error("Failed to watch window resize:", err);
-      });
+      appWindow
+        .onResized(() => {
+          void syncMaximizedState();
+        })
+        .then((fn) => {
+          unlisten = fn;
+        })
+        .catch((err) => {
+          console.error("Failed to watch window resize:", err);
+        });
+    })();
 
     return () => {
+      disposed = true;
       unlisten?.();
     };
   }, []);
@@ -954,6 +976,8 @@ function App() {
       return a.name.localeCompare(b.name);
     });
   }, [otherAccounts, otherAccountsSort]);
+  const hasMacNativeControls = isTauriRuntime() && isMacOs;
+  const showNativeWindowControls = isTauriRuntime() && !isMacOs;
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
@@ -962,13 +986,16 @@ function App() {
           <div
             onMouseDown={handleTitlebarDrag}
             onDoubleClick={handleTitlebarDoubleClick}
-            className={`h-full flex-1 select-none cursor-default ${isMacOs ? "ml-18 mr-2" : "mr-3"}`}
+            className={`h-full flex-1 select-none cursor-default ${hasMacNativeControls ? "ml-18 mr-2" : "mr-3"}`}
           />
-          {!isMacOs && (
+          {showNativeWindowControls && (
             <div className="flex items-center gap-1">
               <button
                 onClick={() => {
-                  void appWindow.minimize();
+                  void (async () => {
+                    const appWindow = await getAppWindow();
+                    await appWindow?.minimize();
+                  })();
                 }}
                 className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
                 title="Minimize"
@@ -979,7 +1006,10 @@ function App() {
               </button>
               <button
                 onClick={() => {
-                  void appWindow.toggleMaximize();
+                  void (async () => {
+                    const appWindow = await getAppWindow();
+                    await appWindow?.toggleMaximize();
+                  })();
                 }}
                 className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
                 title={isWindowMaximized ? "Restore" : "Maximize"}
@@ -997,7 +1027,10 @@ function App() {
               </button>
               <button
                 onClick={() => {
-                  void appWindow.close();
+                  void (async () => {
+                    const appWindow = await getAppWindow();
+                    await appWindow?.close();
+                  })();
                 }}
                 className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-red-500 hover:text-white dark:text-gray-400 dark:hover:bg-red-500 dark:hover:text-white"
                 title="Close"
