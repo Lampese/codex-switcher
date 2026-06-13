@@ -39,3 +39,9 @@ url = "2"
 flate2 = "1"
 chacha20poly1305 = "0.10"
 pbkdf2 = "0.12"
+
+# CLI dependencies
+clap = { version = "4.4", features = ["derive"] }
+dialoguer = "0.11"
+console = "0.15"
+crossterm = "0.29.0"
