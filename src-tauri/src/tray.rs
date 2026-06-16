@@ -245,6 +245,15 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
 }
 
 fn refresh_menu<R: Runtime>(app: &AppHandle<R>) {
+    let app_handle = app.clone();
+    if let Err(error) = app.run_on_main_thread(move || {
+        refresh_menu_on_main_thread(&app_handle);
+    }) {
+        eprintln!("Failed to schedule tray menu refresh: {error}");
+    }
+}
+
+fn refresh_menu_on_main_thread<R: Runtime>(app: &AppHandle<R>) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;
     };
