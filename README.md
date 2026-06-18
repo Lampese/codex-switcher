@@ -96,6 +96,26 @@ Optional environment variables:
 
 The browser dashboard serves the same UI and backend actions through `/api/invoke/*`, which makes it usable over LAN, Tailscale, or a remote host tunnel when you expose the chosen port safely.
 
+### Run the Interactive CLI
+
+An interactive command-line interface is available for fast account switching and status checks directly from your terminal.
+
+```bash
+# Run the interactive CLI
+pnpm cli
+```
+
+Alternatively, you can run it directly with Cargo:
+```bash
+cargo run --manifest-path src-tauri/Cargo.toml --bin codex-switch --
+```
+
+**CLI Features:**
+- **Interactive Menu**: Navigate with arrow keys (or `j`/`k`) and `Enter` to switch, add, rename, or delete accounts.
+- **Real-Time Quota Display**: Displays progress bars for 5-hour and weekly usage limits, and shows remaining balance/credits.
+- **OAuth Login flow**: Add new accounts by triggering a login URL which opens in your default browser, then completes securely back in the CLI.
+- **Background Auto-Refresh**: Periodically updates account quotas in the background (frequency configured in the config directory's `cli-config.json`, defaults to 60 seconds). You can also press `r` to trigger a manual refresh.
+
 ## Disclaimer
 
 This tool is designed **exclusively for individuals who personally own multiple OpenAI/ChatGPT accounts**. It is intended to help users manage their own accounts more conveniently.
