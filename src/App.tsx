@@ -3,7 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAccounts } from "./hooks/useAccounts";
 import { useForceCloseCodexProcesses } from "./hooks/useForceCloseCodexProcesses";
 import { AccountCard, AddAccountModal, UpdateChecker } from "./components";
-import type { CodexProcessInfo, UsageInfo } from "./types";
+import type { AccountWithUsage, CodexProcessInfo, UsageInfo } from "./types";
 import {
   exportFullBackupFile,
   importFullBackupFile,
@@ -21,6 +21,7 @@ import {
   AUTO_WARMUP_ACCOUNTS_STORAGE_KEY,
   AUTO_WARMUP_ALL_CHANGED_EVENT,
   AUTO_WARMUP_LEDGER_STORAGE_KEY,
+  TIMED_WARMUP_LEDGER_STORAGE_KEY,
   normalizeTimedWarmupTimes,
   readAutoWarmupAllEnabled,
   readTimedWarmupEnabled,
@@ -88,8 +89,34 @@ function readStoredAutoWarmupLedger(): AutoWarmupLedger {
   }
 }
 
+function readStoredTimedWarmupLedger(): Record<string, string> {
+  if (typeof window === "undefined") return {};
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(TIMED_WARMUP_LEDGER_STORAGE_KEY) ?? "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        (entry): entry is [string, string] =>
+          typeof entry[0] === "string" && typeof entry[1] === "string"
+      )
+    );
+  } catch {
+    return {};
+  }
+}
+
 function isLimitFull(usedPercent: number | null | undefined): boolean {
   return usedPercent !== null && usedPercent !== undefined && usedPercent >= LIMIT_FULL_THRESHOLD;
+}
+
+function getTimedWarmupTargets(accounts: AccountWithUsage[]): AccountWithUsage[] {
+  return accounts.filter(
+    (account) =>
+      account.usage &&
+      !account.usageLoading &&
+      !account.usage.error &&
+      !isLimitFull(account.usage.secondary_used_percent)
+  );
 }
 
 function getPrimaryWindowMinutes(usage: UsageInfo): number {
@@ -209,7 +236,7 @@ function App() {
   const timedWarmupRunningRef = useRef(timedWarmupRunning);
   // Tracks the last calendar date (YYYY-MM-DD) each scheduled time fired on,
   // so each time triggers at most once per day.
-  const timedWarmupLastFireRef = useRef<Record<string, string>>({});
+  const timedWarmupLastFireRef = useRef<Record<string, string>>(readStoredTimedWarmupLedger());
 
   useEffect(() => {
     accountsRef.current = accounts;
@@ -740,6 +767,18 @@ function App() {
       : "Auto: off";
   }, [autoWarmupAccountIds.size, autoWarmupAllEnabled, autoWarmupRunningIds]);
 
+  const timedWarmupTargetsReady = useMemo(
+    () =>
+      accounts.length > 0 &&
+      accounts.every((account) => account.usage && !account.usageLoading),
+    [accounts]
+  );
+
+  const timedWarmupTargetCount = useMemo(
+    () => getTimedWarmupTargets(accounts).length,
+    [accounts]
+  );
+
   const backOffAutoWarmupRetry = useCallback((accountId: string) => {
     autoWarmupRetryAfterRef.current[accountId] =
       Date.now() + AUTO_WARMUP_RETRY_BACKOFF_MS;
@@ -829,9 +868,7 @@ function App() {
   ]);
 
   const runTimedWarmup = useCallback(async () => {
-    const targets = accountsRef.current.filter(
-      (account) => !isLimitFull(account.usage?.secondary_used_percent)
-    );
+    const targets = getTimedWarmupTargets(accountsRef.current);
     if (targets.length === 0) return;
 
     setTimedWarmupRunning(true);
@@ -878,9 +915,18 @@ function App() {
       // asleep) is skipped rather than warmed late at the wrong moment.
       if (!timedWarmupTimes.includes(currentTime)) return;
       if (timedWarmupLastFireRef.current[currentTime] === todayKey) return;
+      if (!timedWarmupTargetsReady || timedWarmupTargetCount === 0) return;
 
       // Mark before running so a slow warm-up can't double-fire on the next tick.
       timedWarmupLastFireRef.current[currentTime] = todayKey;
+      try {
+        window.localStorage.setItem(
+          TIMED_WARMUP_LEDGER_STORAGE_KEY,
+          JSON.stringify(timedWarmupLastFireRef.current)
+        );
+      } catch {
+        // Ignore storage errors; timed warm-up still works for the current session.
+      }
       void runTimedWarmup();
     };
 
@@ -891,7 +937,13 @@ function App() {
     );
 
     return () => window.clearInterval(interval);
-  }, [timedWarmupEnabled, timedWarmupTimes, runTimedWarmup]);
+  }, [
+    timedWarmupEnabled,
+    timedWarmupTimes,
+    timedWarmupTargetsReady,
+    timedWarmupTargetCount,
+    runTimedWarmup,
+  ]);
 
   const handleAddTimedWarmupTime = useCallback(() => {
     const normalized = normalizeTimedWarmupTimes([timedWarmupDraft]);

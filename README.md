@@ -102,7 +102,7 @@ The browser dashboard serves the same UI and backend actions through `/api/invok
 A warm-up sends one minimal request to an account so its current 5-hour usage
 window starts counting — handy for activating a window before you need it.
 
-- **Manual** – warm up a sinlge or all accounts, from the main window or tray menu.
+- **Manual** – warm up a single or all accounts, from the main window or tray menu.
 - **Automatic** – when enabled (per account or for all), the app warms an
   account each time its 5-hour window resets, as long as the weekly limit isn't
   exhausted.
