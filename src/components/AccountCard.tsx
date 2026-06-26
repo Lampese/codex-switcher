@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import type { AccountWithUsage } from "../types";
+import { AccountUsageStats } from "./AccountUsageStats";
 import { UsageBar } from "./UsageBar";
 
 interface AccountCardProps {
@@ -269,8 +270,14 @@ export function AccountCard({
         )}
       </div>
 
+      <AccountUsageStats
+        accountId={account.id}
+        enabled={account.auth_mode === "chat_g_p_t"}
+        defaultOpen={account.is_active}
+      />
+
       {/* Actions */}
-      <div className="flex gap-2">
+      <div className="flex gap-2 mt-3">
         {account.is_active ? (
           <button
             disabled

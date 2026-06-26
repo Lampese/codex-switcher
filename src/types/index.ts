@@ -29,6 +29,51 @@ export interface UsageInfo {
   error: string | null;
 }
 
+export interface AccountUsageSummary {
+  lifetime_tokens: number | null;
+  peak_daily_tokens: number | null;
+  longest_task_seconds: number | null;
+  current_streak_days: number | null;
+  longest_streak_days: number | null;
+}
+
+export interface AccountUsageActivity {
+  fast_mode_percent: number | null;
+  reasoning_effort: string | null;
+  reasoning_effort_percent: number | null;
+  skills_explored: number | null;
+  total_skills_used: number | null;
+  total_threads: number | null;
+}
+
+export interface AccountDailyUsage {
+  date: string;
+  tokens: number;
+}
+
+export interface AccountTopInvocation {
+  kind: string;
+  display_name: string;
+  usage_count: number;
+  plugin_id: string | null;
+  plugin_name: string | null;
+  skill_id: string | null;
+  skill_name: string | null;
+}
+
+export interface AccountUsageStats {
+  account_id: string;
+  available: boolean;
+  source: string;
+  generated_at: string | null;
+  stats_as_of: string | null;
+  summary: AccountUsageSummary;
+  activity: AccountUsageActivity;
+  daily: AccountDailyUsage[];
+  top_invocations: AccountTopInvocation[];
+  error: string | null;
+}
+
 export interface OAuthLoginInfo {
   auth_url: string;
   callback_port: number;

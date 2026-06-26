@@ -12,10 +12,11 @@ use tokio::runtime::Runtime;
 use crate::commands::{
     add_account_from_auth_json_text, add_account_from_file, cancel_login, check_codex_processes,
     complete_login, delete_account, export_accounts_full_encrypted_bytes,
-    export_accounts_slim_text, fetch_usage, get_active_account_info, get_masked_account_ids,
-    import_accounts_full_encrypted_bytes, import_accounts_slim_text, kill_codex_processes,
-    list_accounts, refresh_account_metadata, refresh_all_accounts_usage, rename_account,
-    set_masked_account_ids, start_login, switch_account, warmup_account, warmup_all_accounts,
+    export_accounts_slim_text, fetch_usage, get_account_usage_stats, get_active_account_info,
+    get_masked_account_ids, import_accounts_full_encrypted_bytes, import_accounts_slim_text,
+    kill_codex_processes, list_accounts, refresh_account_metadata, refresh_all_accounts_usage,
+    rename_account, set_masked_account_ids, start_login, switch_account, warmup_account,
+    warmup_all_accounts,
 };
 
 #[derive(Debug, Deserialize)]
@@ -140,6 +141,10 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
         "get_usage" => {
             let args: AccountIdArgs = parse_args(payload)?;
             to_json(fetch_usage(&args.account_id).await?)
+        }
+        "get_account_usage_stats" => {
+            let args: AccountIdArgs = parse_args(payload)?;
+            to_json(get_account_usage_stats(args.account_id).await?)
         }
         "refresh_account_metadata" => {
             let args: AccountIdArgs = parse_args(payload)?;

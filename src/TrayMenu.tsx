@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { AccountInfo, UsageInfo } from "./types";
+import type { AccountInfo, AccountUsageStats, UsageInfo } from "./types";
 import { invokeBackend, isTauriRuntime } from "./lib/platform";
 import {
   applyTheme,
@@ -70,6 +70,29 @@ function formatResetAt(resetAt: number | null | undefined): string | null {
   return `${Math.floor(diff / 86_400)}d ${Math.floor((diff % 86_400) / 3600)}h`;
 }
 
+function formatTokens(tokens: number | null | undefined): string {
+  if (tokens === null || tokens === undefined || !Number.isFinite(tokens)) return "--";
+  const abs = Math.abs(tokens);
+  if (abs >= 1_000_000_000) return `${(tokens / 1_000_000_000).toFixed(1)}B`;
+  if (abs >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
+  if (abs >= 1_000) return `${(tokens / 1_000).toFixed(1)}K`;
+  return `${tokens}`;
+}
+
+function dayKey(offset: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() - offset);
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function sumDailyTokens(stats: AccountUsageStats, days: number): number {
+  const keys = new Set(Array.from({ length: days }, (_, index) => dayKey(index)));
+  return stats.daily.reduce((total, day) => (keys.has(day.date) ? total + day.tokens : total), 0);
+}
+
 function retainUsageForAccounts(
   usageById: Record<string, UsageInfo>,
   accounts: AccountInfo[]
@@ -87,6 +110,7 @@ function TrayMenu() {
   const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [usageById, setUsageById] = useState<Record<string, UsageInfo>>({});
+  const [statsById, setStatsById] = useState<Record<string, AccountUsageStats>>({});
   const [refreshing, setRefreshing] = useState(false);
   const [autoWarmupAllEnabled, setAutoWarmupAllEnabled] = useState(readAutoWarmupAllEnabled);
 
@@ -122,6 +146,47 @@ function TrayMenu() {
     );
   }, []);
 
+  const loadActiveStats = useCallback(async (list: AccountInfo[]) => {
+    const active = list.find((account) => account.is_active);
+    if (!active) return;
+
+    try {
+      const stats = await invokeBackend<AccountUsageStats>("get_account_usage_stats", {
+        accountId: active.id,
+      });
+      setStatsById((prev) => ({ ...prev, [active.id]: stats }));
+    } catch (err) {
+      setStatsById((prev) => ({
+        ...prev,
+        [active.id]: {
+          account_id: active.id,
+          available: false,
+          source: "Codex usage stats via ChatGPT backend",
+          generated_at: null,
+          stats_as_of: null,
+          summary: {
+            lifetime_tokens: null,
+            peak_daily_tokens: null,
+            longest_task_seconds: null,
+            current_streak_days: null,
+            longest_streak_days: null,
+          },
+          activity: {
+            fast_mode_percent: null,
+            reasoning_effort: null,
+            reasoning_effort_percent: null,
+            skills_explored: null,
+            total_skills_used: null,
+            total_threads: null,
+          },
+          daily: [],
+          top_invocations: [],
+          error: formatError(err),
+        },
+      }));
+    }
+  }, []);
+
   const load = useCallback(async () => {
     try {
       const list = await invokeBackend<AccountInfo[]>("list_accounts");
@@ -129,12 +194,13 @@ function TrayMenu() {
       setUsageById((prev) => retainUsageForAccounts(prev, list));
       setError(null);
       void loadUsage(list); // Don't block the list render on the usage calls.
+      void loadActiveStats(list);
     } catch (err) {
       setError(formatError(err));
     } finally {
       setLoading(false);
     }
-  }, [loadUsage]);
+  }, [loadActiveStats, loadUsage]);
 
   // Manual refresh: re-pull accounts and actively fetch fresh usage once.
   const handleRefresh = useCallback(async () => {
@@ -144,13 +210,13 @@ function TrayMenu() {
       setAccounts(list);
       setUsageById((prev) => retainUsageForAccounts(prev, list));
       setError(null);
-      await loadUsage(list);
+      await Promise.all([loadUsage(list), loadActiveStats(list)]);
     } catch (err) {
       setError(formatError(err));
     } finally {
       setRefreshing(false);
     }
-  }, [loadUsage]);
+  }, [loadActiveStats, loadUsage]);
 
   const handleAutoWarmupToggle = useCallback(async () => {
     const next = !autoWarmupAllEnabled;
@@ -286,6 +352,7 @@ function TrayMenu() {
           accounts.map((account) => {
             const plan = formatPlan(account.plan_type);
             const usage = usageById[account.id];
+            const stats = statsById[account.id];
             const windows =
               usage && !usage.error
                 ? ([
@@ -388,6 +455,22 @@ function TrayMenu() {
                       {account.email}
                     </span>
                   ) : null}
+                  {account.is_active && stats?.available && (
+                    <span className="mt-2 grid grid-cols-2 gap-1.5">
+                      <span className="rounded-md bg-white px-2 py-1 text-[11px] text-gray-600 shadow-sm dark:bg-gray-950 dark:text-gray-300">
+                        <span className="block font-medium text-gray-900 dark:text-gray-100">
+                          {formatTokens(sumDailyTokens(stats, 1))}
+                        </span>
+                        <span>today</span>
+                      </span>
+                      <span className="rounded-md bg-white px-2 py-1 text-[11px] text-gray-600 shadow-sm dark:bg-gray-950 dark:text-gray-300">
+                        <span className="block font-medium text-gray-900 dark:text-gray-100">
+                          {formatTokens(sumDailyTokens(stats, 7))}
+                        </span>
+                        <span>last 7 days</span>
+                      </span>
+                    </span>
+                  )}
                 </span>
                 {switchingId === account.id && (
                   <span className="shrink-0 text-xs text-gray-400">...</span>
