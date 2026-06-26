@@ -456,6 +456,12 @@ fn watch_accounts_file<R: Runtime>(app: AppHandle<R>) {
     });
 }
 
+fn modified_at(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    path.metadata()
+        .and_then(|metadata| metadata.modified())
+        .ok()
+}
+
 /// Poll the active account's usage so the tray title stays fresh even when the
 /// main window's webview poller is hidden or suspended by the OS.
 fn poll_active_account_usage<R: Runtime>(app: AppHandle<R>) {
@@ -475,12 +481,6 @@ fn poll_active_account_usage<R: Runtime>(app: AppHandle<R>) {
 
         std::thread::sleep(Duration::from_secs(60));
     });
-}
-
-fn modified_at(path: &std::path::Path) -> Option<std::time::SystemTime> {
-    path.metadata()
-        .and_then(|metadata| metadata.modified())
-        .ok()
 }
 
 #[cfg(test)]

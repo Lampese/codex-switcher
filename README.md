@@ -13,7 +13,7 @@
 
 - **Multi-Account Management** – Add, rename, mask, import, export, and manage multiple Codex accounts in one place
 - **Quick Switching** – Switch between accounts from the main window, native tray menu, or tray popup
-- **Automatic Warm-Up** – Warm up one account or all accounts manually, or keep accounts fresh with automatic warm-up scheduling
+- **Automatic Warm-Up** – Warm up one account or all accounts manually, or let scheduled auto warm-up activate each new 5-hour reset window for you
 - **System Tray Controls** – Use the tray popup to switch accounts, inspect quota, refresh usage, open the main window, or quit the app
 - **Tray Display Modes** – Choose between the app icon with session percentage, a text-only hourly/weekly percentage display, or a hidden tray icon
 - **Usage Monitoring** – View real-time 5-hour session and weekly usage, reset timing, credits, and subscription expiry
@@ -95,6 +95,28 @@ Optional environment variables:
 - `CODEX_SWITCHER_WEB_PORT` to override the port
 
 The browser dashboard serves the same UI and backend actions through `/api/invoke/*`, which makes it usable over LAN, Tailscale, or a remote host tunnel when you expose the chosen port safely.
+
+
+## Warm-Up
+
+A warm-up sends one minimal request to an account so its current 5-hour usage
+window starts counting — handy for activating a window before you need it.
+
+- **Manual** – warm up a single or all accounts, from the main window or tray menu.
+- **Automatic** – when enabled (per account or for all), the app warms an
+  account each time its 5-hour window resets, as long as the weekly limit isn't
+  exhausted.
+- **Timed** – pick specific times of day (e.g. `08:00`, `13:00`, `18:00`) from
+  the **Timed** control in the main window. At each time the app warms all
+  accounts (skipping any whose weekly limit is exhausted), so you control when
+  your 5-hour windows start instead of letting them drift.
+
+On macOS you can keep the machine awake with the built-in `caffeinate` command,
+which stops automatically when the app quits:
+
+```bash
+caffeinate -i -w "$(pgrep -x 'Codex Switcher')"
+```
 
 ## Disclaimer
 

@@ -3,7 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAccounts } from "./hooks/useAccounts";
 import { useForceCloseCodexProcesses } from "./hooks/useForceCloseCodexProcesses";
 import { AccountCard, AddAccountModal, UpdateChecker } from "./components";
-import type { CodexProcessInfo, UsageInfo } from "./types";
+import type { AccountWithUsage, CodexProcessInfo, UsageInfo } from "./types";
 import {
   exportFullBackupFile,
   importFullBackupFile,
@@ -21,8 +21,14 @@ import {
   AUTO_WARMUP_ACCOUNTS_STORAGE_KEY,
   AUTO_WARMUP_ALL_CHANGED_EVENT,
   AUTO_WARMUP_LEDGER_STORAGE_KEY,
+  TIMED_WARMUP_LEDGER_STORAGE_KEY,
+  normalizeTimedWarmupTimes,
   readAutoWarmupAllEnabled,
+  readTimedWarmupEnabled,
+  readTimedWarmupTimes,
   writeAutoWarmupAllEnabled,
+  writeTimedWarmupEnabled,
+  writeTimedWarmupTimes,
 } from "./lib/autoWarmup";
 import "./App.css";
 
@@ -83,8 +89,34 @@ function readStoredAutoWarmupLedger(): AutoWarmupLedger {
   }
 }
 
+function readStoredTimedWarmupLedger(): Record<string, string> {
+  if (typeof window === "undefined") return {};
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(TIMED_WARMUP_LEDGER_STORAGE_KEY) ?? "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        (entry): entry is [string, string] =>
+          typeof entry[0] === "string" && typeof entry[1] === "string"
+      )
+    );
+  } catch {
+    return {};
+  }
+}
+
 function isLimitFull(usedPercent: number | null | undefined): boolean {
   return usedPercent !== null && usedPercent !== undefined && usedPercent >= LIMIT_FULL_THRESHOLD;
+}
+
+function getTimedWarmupTargets(accounts: AccountWithUsage[]): AccountWithUsage[] {
+  return accounts.filter(
+    (account) =>
+      account.usage &&
+      !account.usageLoading &&
+      !account.usage.error &&
+      !isLimitFull(account.usage.secondary_used_percent)
+  );
 }
 
 function getPrimaryWindowMinutes(usage: UsageInfo): number {
@@ -173,6 +205,15 @@ function App() {
   const [autoWarmupRunningIds, setAutoWarmupRunningIds] = useState<Set<string>>(
     new Set()
   );
+  const [timedWarmupEnabled, setTimedWarmupEnabled] = useState(() =>
+    readTimedWarmupEnabled()
+  );
+  const [timedWarmupTimes, setTimedWarmupTimes] = useState<string[]>(() =>
+    readTimedWarmupTimes()
+  );
+  const [isTimedWarmupOpen, setIsTimedWarmupOpen] = useState(false);
+  const [timedWarmupRunning, setTimedWarmupRunning] = useState(false);
+  const [timedWarmupDraft, setTimedWarmupDraft] = useState("");
   const [maskedAccounts, setMaskedAccounts] = useState<Set<string>>(new Set());
   const [otherAccountsSort, setOtherAccountsSort] = useState<
     | "deadline_asc"
@@ -184,6 +225,7 @@ function App() {
   >("deadline_asc");
   const [isActionsMenuOpen, setIsActionsMenuOpen] = useState(false);
   const actionsMenuRef = useRef<HTMLDivElement | null>(null);
+  const timedWarmupRef = useRef<HTMLDivElement | null>(null);
   const [themeMode, setThemeMode] = useState<ThemeMode>(readStoredTheme);
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
   const accountsRef = useRef(accounts);
@@ -191,6 +233,10 @@ function App() {
   const autoWarmupLedgerRef = useRef(autoWarmupLedger);
   const autoWarmupRunningIdsRef = useRef(autoWarmupRunningIds);
   const autoWarmupRetryAfterRef = useRef<Record<string, number>>({});
+  const timedWarmupRunningRef = useRef(timedWarmupRunning);
+  // Tracks the last calendar date (YYYY-MM-DD) each scheduled time fired on,
+  // so each time triggers at most once per day.
+  const timedWarmupLastFireRef = useRef<Record<string, string>>(readStoredTimedWarmupLedger());
 
   useEffect(() => {
     accountsRef.current = accounts;
@@ -203,6 +249,26 @@ function App() {
   useEffect(() => {
     autoWarmupRunningIdsRef.current = autoWarmupRunningIds;
   }, [autoWarmupRunningIds]);
+
+  useEffect(() => {
+    timedWarmupRunningRef.current = timedWarmupRunning;
+  }, [timedWarmupRunning]);
+
+  useEffect(() => {
+    try {
+      writeTimedWarmupEnabled(timedWarmupEnabled);
+    } catch {
+      // Ignore storage errors; timed warm-up still works for the current session.
+    }
+  }, [timedWarmupEnabled]);
+
+  useEffect(() => {
+    try {
+      writeTimedWarmupTimes(timedWarmupTimes);
+    } catch {
+      // Ignore storage errors; timed warm-up still works for the current session.
+    }
+  }, [timedWarmupTimes]);
 
   useEffect(() => {
     if (loading || error) return;
@@ -355,6 +421,20 @@ function App() {
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [isActionsMenuOpen]);
+
+  useEffect(() => {
+    if (!isTimedWarmupOpen) return;
+
+    const handleClickOutside = (event: MouseEvent) => {
+      if (!timedWarmupRef.current) return;
+      if (!timedWarmupRef.current.contains(event.target as Node)) {
+        setIsTimedWarmupOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [isTimedWarmupOpen]);
 
   useEffect(() => {
     applyTheme(themeMode);
@@ -687,6 +767,18 @@ function App() {
       : "Auto: off";
   }, [autoWarmupAccountIds.size, autoWarmupAllEnabled, autoWarmupRunningIds]);
 
+  const timedWarmupTargetsReady = useMemo(
+    () =>
+      accounts.length > 0 &&
+      accounts.every((account) => account.usage && !account.usageLoading),
+    [accounts]
+  );
+
+  const timedWarmupTargetCount = useMemo(
+    () => getTimedWarmupTargets(accounts).length,
+    [accounts]
+  );
+
   const backOffAutoWarmupRetry = useCallback((accountId: string) => {
     autoWarmupRetryAfterRef.current[accountId] =
       Date.now() + AUTO_WARMUP_RETRY_BACKOFF_MS;
@@ -774,6 +866,110 @@ function App() {
     isAutoWarmupDue,
     runAutoWarmupForAccount,
   ]);
+
+  const runTimedWarmup = useCallback(async () => {
+    const targets = getTimedWarmupTargets(accountsRef.current);
+    if (targets.length === 0) return;
+
+    setTimedWarmupRunning(true);
+    try {
+      const warmedAt = Date.now();
+      let warmed = 0;
+      let failed = 0;
+      for (const account of targets) {
+        try {
+          await warmupAccount(account.id);
+          markSuccessfulWarmup(account.id, warmedAt);
+          warmed += 1;
+        } catch (err) {
+          console.error("Timed warm-up failed:", err);
+          failed += 1;
+        }
+      }
+
+      if (failed === 0) {
+        showWarmupToast(
+          `Timed warm-up sent for ${warmed} account${warmed === 1 ? "" : "s"}`
+        );
+      } else {
+        showWarmupToast(`Timed warm-up: ${warmed} ok, ${failed} failed`, true);
+      }
+    } finally {
+      setTimedWarmupRunning(false);
+    }
+  }, [markSuccessfulWarmup, showWarmupToast, warmupAccount]);
+
+  useEffect(() => {
+    if (!timedWarmupEnabled || timedWarmupTimes.length === 0) return;
+
+    const checkTimedWarmup = () => {
+      if (timedWarmupRunningRef.current) return;
+
+      const now = new Date();
+      const todayKey = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
+      const currentTime = `${String(now.getHours()).padStart(2, "0")}:${String(
+        now.getMinutes()
+      ).padStart(2, "0")}`;
+
+      // Only fire during the scheduled minute itself; a missed time (e.g. while
+      // asleep) is skipped rather than warmed late at the wrong moment.
+      if (!timedWarmupTimes.includes(currentTime)) return;
+      if (timedWarmupLastFireRef.current[currentTime] === todayKey) return;
+      if (!timedWarmupTargetsReady || timedWarmupTargetCount === 0) return;
+
+      // Mark before running so a slow warm-up can't double-fire on the next tick.
+      timedWarmupLastFireRef.current[currentTime] = todayKey;
+      try {
+        window.localStorage.setItem(
+          TIMED_WARMUP_LEDGER_STORAGE_KEY,
+          JSON.stringify(timedWarmupLastFireRef.current)
+        );
+      } catch {
+        // Ignore storage errors; timed warm-up still works for the current session.
+      }
+      void runTimedWarmup();
+    };
+
+    checkTimedWarmup();
+    const interval = window.setInterval(
+      checkTimedWarmup,
+      AUTO_WARMUP_CHECK_INTERVAL_MS
+    );
+
+    return () => window.clearInterval(interval);
+  }, [
+    timedWarmupEnabled,
+    timedWarmupTimes,
+    timedWarmupTargetsReady,
+    timedWarmupTargetCount,
+    runTimedWarmup,
+  ]);
+
+  const handleAddTimedWarmupTime = useCallback(() => {
+    const normalized = normalizeTimedWarmupTimes([timedWarmupDraft]);
+    if (normalized.length === 0) return;
+    setTimedWarmupTimes((prev) =>
+      normalizeTimedWarmupTimes([...prev, normalized[0]])
+    );
+    setTimedWarmupDraft("");
+  }, [timedWarmupDraft]);
+
+  const handleRemoveTimedWarmupTime = useCallback((time: string) => {
+    setTimedWarmupTimes((prev) => prev.filter((entry) => entry !== time));
+  }, []);
+
+  const timedWarmupLabel = useMemo(() => {
+    if (timedWarmupRunning) return "Timed warming...";
+    if (!timedWarmupEnabled || timedWarmupTimes.length === 0) return "Timed: off";
+
+    const now = new Date();
+    const nowMinutes = now.getHours() * 60 + now.getMinutes();
+    const upcoming = timedWarmupTimes.find((time) => {
+      const [hours, minutes] = time.split(":").map(Number);
+      return hours * 60 + minutes > nowMinutes;
+    });
+    return `Timed: ${upcoming ?? timedWarmupTimes[0]}`;
+  }, [timedWarmupEnabled, timedWarmupRunning, timedWarmupTimes]);
 
   const handleExportSlimText = async () => {
     setConfigModalMode("slim_export");
@@ -1145,6 +1341,76 @@ function App() {
               >
                 {headerAutoWarmupLabel}
               </button>
+              <div className="relative shrink-0" ref={timedWarmupRef}>
+                <button
+                  onClick={() => setIsTimedWarmupOpen((prev) => !prev)}
+                  className={`flex h-10 items-center justify-center rounded-lg px-3 text-xs font-semibold transition-colors whitespace-nowrap ${
+                    timedWarmupEnabled
+                      ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-900/20 dark:text-emerald-300 dark:hover:bg-emerald-900/30"
+                      : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
+                  }`}
+                  title="Schedule warm-up at specific times of day for all accounts"
+                >
+                  {timedWarmupLabel} ▾
+                </button>
+                {isTimedWarmupOpen && (
+                  <div className="absolute right-0 z-20 mt-2 w-64 rounded-lg border border-gray-200 bg-white p-3 shadow-lg dark:border-gray-700 dark:bg-gray-900">
+                    <label className="flex items-center justify-between text-sm font-medium text-gray-800 dark:text-gray-100">
+                      <span>Timed warm-up</span>
+                      <input
+                        type="checkbox"
+                        checked={timedWarmupEnabled}
+                        onChange={(e) => setTimedWarmupEnabled(e.target.checked)}
+                        className="h-4 w-4 accent-emerald-600"
+                      />
+                    </label>
+                    <div className="mt-3 space-y-1">
+                      {timedWarmupTimes.length === 0 ? (
+                        <p className="text-xs italic text-gray-400 dark:text-gray-500">
+                          No times added yet.
+                        </p>
+                      ) : (
+                        timedWarmupTimes.map((time) => (
+                          <div
+                            key={time}
+                            className="flex items-center justify-between rounded-md bg-gray-50 px-2 py-1 text-sm dark:bg-gray-800"
+                          >
+                            <span className="font-mono text-gray-800 dark:text-gray-100">
+                              {time}
+                            </span>
+                            <button
+                              onClick={() => handleRemoveTimedWarmupTime(time)}
+                              className="text-gray-400 transition-colors hover:text-red-500"
+                              title={`Remove ${time}`}
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        ))
+                      )}
+                    </div>
+
+                    <div className="mt-3 flex items-center gap-2">
+                      <input
+                        type="time"
+                        value={timedWarmupDraft}
+                        onChange={(e) => setTimedWarmupDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") handleAddTimedWarmupTime();
+                        }}
+                        className="h-8 flex-1 rounded-md border border-gray-300 bg-white px-2 text-sm text-gray-800 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+                      />
+                      <button
+                        onClick={handleAddTimedWarmupTime}
+                        disabled={!timedWarmupDraft}
+                        className="h-8 rounded-md bg-gray-900 px-3 text-xs font-semibold text-white transition-colors hover:bg-gray-800 disabled:opacity-50 dark:bg-black dark:hover:bg-neutral-900"
+                      >
+                        Add
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
               <button
                 onClick={() => setThemeMode((prev) => (prev === "dark" ? "light" : "dark"))}
                 className="flex h-10 w-10 items-center justify-center rounded-lg bg-gray-100 text-lg text-gray-700 transition-colors hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700 shrink-0"
