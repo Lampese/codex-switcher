@@ -10,8 +10,7 @@ use tauri::{
 };
 
 use crate::{
-    api::usage::get_account_usage,
-    auth::{get_account, get_accounts_file, load_accounts, load_app_settings},
+    auth::{get_accounts_file, load_accounts, load_app_settings},
     commands::{
         is_codex_running_switch_block, restore_main_window, switch_account_by_id,
         window::TRAY_WINDOW,
@@ -73,7 +72,6 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     refresh_menu(app);
 
     watch_accounts_file(app.clone());
-    poll_active_account_usage(app.clone());
     Ok(())
 }
 
@@ -438,27 +436,6 @@ fn watch_accounts_file<R: Runtime>(app: AppHandle<R>) {
                 let _ = app.emit(ACCOUNTS_CHANGED_EVENT, ()); // refresh the React UIs
             }
         }
-    });
-}
-
-/// Poll the active account's usage so the tray title stays fresh even when the
-/// main window's webview poller is hidden or suspended by the OS.
-fn poll_active_account_usage<R: Runtime>(app: AppHandle<R>) {
-    std::thread::spawn(move || loop {
-        let account = load_accounts()
-            .ok()
-            .and_then(|store| store.active_account_id)
-            .and_then(|id| get_account(&id).ok().flatten());
-
-        if let Some(account) = account {
-            match tauri::async_runtime::block_on(get_account_usage(&account)) {
-                // Keep the last known title on transient fetch errors.
-                Ok(usage) => ingest_usage(&app, vec![usage]),
-                Err(error) => eprintln!("Failed to poll usage for tray title: {error}"),
-            }
-        }
-
-        std::thread::sleep(Duration::from_secs(60));
     });
 }
 

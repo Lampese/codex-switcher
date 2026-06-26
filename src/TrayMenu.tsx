@@ -167,10 +167,6 @@ function TrayMenu() {
     }
   }, [autoWarmupAllEnabled]);
 
-  useEffect(() => {
-    void load();
-  }, [load]);
-
   // Reload when the tray is reopened or accounts change elsewhere.
   useEffect(() => {
     if (!isTauriRuntime()) return;
