@@ -106,6 +106,18 @@ pub async fn fetch_chatgpt_account_metadata(
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
+
+        // When Cloudflare throws a managed challenge (403 + JS challenge page) the
+        // accounts/check endpoint becomes unavailable for non-browser clients.
+        // Return a readable error instead of dumping the entire HTML page.
+        if status.as_u16() == 403
+            && (body.contains("_cf_chl_opt") || body.contains("challenge-platform"))
+        {
+            anyhow::bail!(
+                "Cloudflare rate-limit (403); plan info temporarily unavailable"
+            );
+        }
+
         anyhow::bail!("Accounts check API error: {status} - {body}");
     }
 
