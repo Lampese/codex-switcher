@@ -155,6 +155,11 @@ This tool is designed **exclusively for individuals who personally own multiple 
 
 By using this software, you agree that you are the rightful owner of all accounts you add to the application. The authors are not responsible for any misuse or violations of OpenAI's terms of service.
 
+## Attribution
+
+This project is based on [Lampese/codex-switcher](https://github.com/Lampese/codex-switcher).
+Original author: Lampese.
+
 ## Versioning
 
 Use the version bump helper to keep app versions in sync across Tauri, Cargo, and the frontend.
