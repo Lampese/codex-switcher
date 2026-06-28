@@ -106,17 +106,24 @@ export function useAccounts() {
         }
 
         if (options?.refreshMetadata) {
-          await runWithConcurrency(
-            list,
-            async (account) => {
-              await invokeBackend<AccountInfo>("refresh_account_metadata", {
-                accountId: account.id,
-              });
-            },
-            maxConcurrentUsageRequests
-          );
+          try {
+            await runWithConcurrency(
+              list,
+              async (account) => {
+                await invokeBackend<AccountInfo>("refresh_account_metadata", {
+                  accountId: account.id,
+                });
+              },
+              maxConcurrentUsageRequests
+            );
 
-          list = await loadAccounts(true);
+            list = await loadAccounts(true);
+          } catch (err) {
+            console.warn(
+              "Failed to refresh account metadata, continuing with usage refresh:",
+              err
+            );
+          }
         }
 
         const accountIds = list.map((account) => account.id);
@@ -178,8 +185,15 @@ export function useAccounts() {
   ) => {
     try {
       if (options?.refreshMetadata) {
-        await invokeBackend<AccountInfo>("refresh_account_metadata", { accountId });
-        await loadAccounts(true);
+        try {
+          await invokeBackend<AccountInfo>("refresh_account_metadata", { accountId });
+          await loadAccounts(true);
+        } catch (err) {
+          console.warn(
+            "Failed to refresh account metadata, continuing with usage refresh:",
+            err
+          );
+        }
       }
 
       setAccounts((prev) =>
