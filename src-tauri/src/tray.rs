@@ -3,7 +3,7 @@ use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use tauri::{
-    menu::{CheckMenuItemBuilder, Menu, MenuItemBuilder, PredefinedMenuItem},
+    menu::{CheckMenuItemBuilder, Menu, MenuItemBuilder, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, PhysicalPosition, Runtime, WebviewUrl, WebviewWindowBuilder,
     WindowEvent,
@@ -201,13 +201,45 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, store: &AccountsStore) -> tauri::R
     }
 
     menu.append(&PredefinedMenuItem::separator(app)?)?;
+    #[cfg(target_os = "macos")]
+    append_dock_settings_menu(app, &menu)?;
+    #[cfg(target_os = "macos")]
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&MenuItemBuilder::with_id(OPEN_ITEM_ID, "Open Codex Switcher").build(app)?)?;
     menu.append(&MenuItemBuilder::with_id(QUIT_ITEM_ID, "Quit").build(app)?)?;
     Ok(menu)
 }
 
+#[cfg(target_os = "macos")]
+fn append_dock_settings_menu<R: Runtime>(app: &AppHandle<R>, menu: &Menu<R>) -> tauri::Result<()> {
+    let settings = load_app_settings().unwrap_or_default();
+    let dock_settings = Submenu::with_items(
+        app,
+        "Dock Icon",
+        true,
+        &[
+            &CheckMenuItemBuilder::with_id(crate::app_menu::DOCK_SHOW_IN_DOCK_ID, "Show in Dock")
+                .checked(settings.dock_display_mode == crate::app_menu::DockDisplayMode::ShowInDock)
+                .build(app)?,
+            &CheckMenuItemBuilder::with_id(crate::app_menu::DOCK_MENU_BAR_ONLY_ID, "Menu Bar Only")
+                .checked(
+                    settings.dock_display_mode == crate::app_menu::DockDisplayMode::MenuBarOnly,
+                )
+                .build(app)?,
+        ],
+    )?;
+    menu.append(&dock_settings)?;
+    Ok(())
+}
+
 fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     let item_id = event.id().as_ref();
+
+    #[cfg(target_os = "macos")]
+    if let Some(mode) = crate::app_menu::dock_display_mode_for_item(item_id) {
+        crate::app_menu::update_dock_display_mode(app, mode);
+        return;
+    }
 
     match item_id {
         OPEN_ITEM_ID => show_main_window(app),

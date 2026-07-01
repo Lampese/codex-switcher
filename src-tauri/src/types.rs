@@ -28,10 +28,35 @@ pub enum TrayDisplayMode {
     Hidden,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DockDisplayMode {
+    #[default]
+    ShowInDock,
+    MenuBarOnly,
+}
+
+fn default_close_behavior_prompt_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
     pub tray_display_mode: TrayDisplayMode,
+    pub dock_display_mode: DockDisplayMode,
+    #[serde(default = "default_close_behavior_prompt_enabled")]
+    pub close_behavior_prompt_enabled: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            tray_display_mode: TrayDisplayMode::default(),
+            dock_display_mode: DockDisplayMode::default(),
+            close_behavior_prompt_enabled: true,
+        }
+    }
 }
 
 impl Default for AccountsStore {
@@ -383,7 +408,7 @@ pub struct CreditStatusDetails {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_chatgpt_id_token_claims;
+    use super::{parse_chatgpt_id_token_claims, AppSettings, DockDisplayMode, TrayDisplayMode};
     use base64::Engine;
 
     #[test]
@@ -403,5 +428,15 @@ mod tests {
                 .map(|value| value.to_rfc3339()),
             Some("2026-04-23T05:03:38+00:00".to_string())
         );
+    }
+
+    #[test]
+    fn app_settings_default_missing_dock_display_mode_to_show_in_dock() {
+        let settings: AppSettings =
+            serde_json::from_str(r#"{"tray_display_mode":"active_usage_text"}"#).unwrap();
+
+        assert_eq!(settings.tray_display_mode, TrayDisplayMode::ActiveUsageText);
+        assert_eq!(settings.dock_display_mode, DockDisplayMode::ShowInDock);
+        assert!(settings.close_behavior_prompt_enabled);
     }
 }

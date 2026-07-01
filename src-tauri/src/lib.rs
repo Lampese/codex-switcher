@@ -11,14 +11,16 @@ pub mod types;
 pub mod web;
 
 use commands::{
-    add_account_from_file, cancel_login, check_codex_processes, complete_login, delete_account,
-    export_accounts_full_encrypted_file, export_accounts_slim_text, get_account_usage_stats,
-    get_active_account_info, get_masked_account_ids, get_usage, hide_tray_window,
+    ack_close_behavior_prompt, add_account_from_file, cancel_login, check_codex_processes,
+    complete_close_behavior, complete_login, delete_account, export_accounts_full_encrypted_file,
+    export_accounts_slim_text, get_account_usage_stats, get_active_account_info,
+    get_dock_display_mode, get_masked_account_ids, get_usage, hide_tray_window,
     import_accounts_full_encrypted_file, import_accounts_slim_text, kill_codex_processes,
     list_accounts, open_main_window, quit_app, refresh_account_metadata,
-    refresh_all_accounts_usage, rename_account, report_usage, set_masked_account_ids, start_login,
-    switch_account, warmup_account, warmup_all_accounts,
+    refresh_all_accounts_usage, rename_account, report_usage, set_dock_display_mode,
+    set_masked_account_ids, start_login, switch_account, warmup_account, warmup_all_accounts,
 };
+use tauri::Emitter;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -41,13 +43,19 @@ pub fn run() {
             if window.label() == "main" {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
-                    // Order the window out before NSApp.hide so AppKit won't
-                    // restore it on the next activation (e.g. tray popup focus);
-                    // hiding the app deactivates it so a later Dock click is a
-                    // real re-activation and reliably emits RunEvent::Reopen.
-                    let _ = window.hide();
                     #[cfg(target_os = "macos")]
-                    let _ = tauri::Manager::app_handle(window).hide();
+                    if commands::should_prompt_for_close_behavior() {
+                        let payload = commands::window::next_close_behavior_prompt_payload();
+                        let app_handle = tauri::Manager::app_handle(window);
+                        commands::window::schedule_close_behavior_prompt_fallback(
+                            app_handle.clone(),
+                            payload.request_id,
+                        );
+                        let _ =
+                            window.emit(commands::window::CLOSE_BEHAVIOR_REQUESTED_EVENT, payload);
+                        return;
+                    }
+                    commands::hide_main_window(&tauri::Manager::app_handle(window));
                 }
             }
         })
@@ -86,6 +94,10 @@ pub fn run() {
             open_main_window,
             quit_app,
             report_usage,
+            get_dock_display_mode,
+            set_dock_display_mode,
+            complete_close_behavior,
+            ack_close_behavior_prompt,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

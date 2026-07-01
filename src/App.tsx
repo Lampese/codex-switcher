@@ -3,7 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAccounts } from "./hooks/useAccounts";
 import { useForceCloseCodexProcesses } from "./hooks/useForceCloseCodexProcesses";
 import { AccountCard, AddAccountModal, UpdateChecker } from "./components";
-import type { AccountWithUsage, CodexProcessInfo, UsageInfo } from "./types";
+import type { AccountWithUsage, CodexProcessInfo, DockDisplayMode, UsageInfo } from "./types";
 import {
   exportFullBackupFile,
   importFullBackupFile,
@@ -39,9 +39,13 @@ const AUTO_WARMUP_FULL_WINDOW_SLACK_MINUTES = 5;
 const DEFAULT_PRIMARY_WINDOW_MINUTES = 300;
 const LIMIT_FULL_THRESHOLD = 99.5;
 const SWITCH_ACCOUNT_BLOCKED_EVENT = "switch-account-blocked";
+const CLOSE_BEHAVIOR_REQUESTED_EVENT = "close-behavior-requested";
 interface SwitchAccountBlockedPayload {
   accountId?: string;
   error?: string;
+}
+interface CloseBehaviorRequestedPayload {
+  requestId?: number;
 }
 type AutoWarmupLedger = Record<
   string,
@@ -228,6 +232,9 @@ function App() {
   const timedWarmupRef = useRef<HTMLDivElement | null>(null);
   const [themeMode, setThemeMode] = useState<ThemeMode>(readStoredTheme);
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
+  const [closeBehaviorPromptOpen, setCloseBehaviorPromptOpen] = useState(false);
+  const [closeBehaviorDontAskAgain, setCloseBehaviorDontAskAgain] = useState(false);
+  const [isCompletingCloseBehavior, setIsCompletingCloseBehavior] = useState(false);
   const accountsRef = useRef(accounts);
   const autoWarmupAccountIdsRef = useRef(autoWarmupAccountIds);
   const autoWarmupLedgerRef = useRef(autoWarmupLedger);
@@ -564,6 +571,7 @@ function App() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let unlistenAutoWarmup: (() => void) | undefined;
+    let unlistenCloseBehavior: (() => void) | undefined;
 
     void (async () => {
       if (!isTauriRuntime()) return;
@@ -609,13 +617,44 @@ function App() {
           }
         }
       );
+      unlistenCloseBehavior = await listen<CloseBehaviorRequestedPayload>(
+        CLOSE_BEHAVIOR_REQUESTED_EVENT,
+        ({ payload }) => {
+          const requestId = payload?.requestId;
+          if (typeof requestId === "number") {
+            void invokeBackend("ack_close_behavior_prompt", { requestId });
+          }
+          setCloseBehaviorDontAskAgain(false);
+          setCloseBehaviorPromptOpen(true);
+        }
+      );
     })();
 
     return () => {
       unlisten?.();
       unlistenAutoWarmup?.();
+      unlistenCloseBehavior?.();
     };
   }, [checkProcesses, formatWarmupError, setForceCloseConfirmOpen, showWarmupToast, switchAccount]);
+
+  const handleCloseBehaviorChoice = useCallback(
+    async (mode: DockDisplayMode) => {
+      try {
+        setIsCompletingCloseBehavior(true);
+        await invokeBackend("complete_close_behavior", {
+          mode,
+          dontAskAgain: closeBehaviorDontAskAgain,
+        });
+        setCloseBehaviorPromptOpen(false);
+      } catch (err) {
+        console.error("Failed to complete close behavior:", err);
+        showWarmupToast(`Close failed: ${formatWarmupError(err)}`, true);
+      } finally {
+        setIsCompletingCloseBehavior(false);
+      }
+    },
+    [closeBehaviorDontAskAgain, formatWarmupError, showWarmupToast]
+  );
 
   const handleForceCloseConfirm = useCallback(async () => {
     const accountId = pendingTraySwitchAccountId;
@@ -1723,6 +1762,58 @@ function App() {
                 {isForceClosingCodex
                   ? "Force closing..."
                   : forceCloseConfirmLabel}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {closeBehaviorPromptOpen && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-md mx-4 shadow-xl">
+            <div className="p-5 border-b border-gray-100 dark:border-gray-800">
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+                Keep Codex Switcher in the Dock?
+              </h2>
+            </div>
+            <div className="p-5 space-y-4">
+              <p className="text-sm text-gray-600 dark:text-gray-300">
+                When the window is closed, Codex Switcher can stay in the Dock or live only in the menu bar.
+              </p>
+              <p className="text-sm text-gray-600 dark:text-gray-300">
+                You can always change this later from the tray popup.
+              </p>
+              <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
+                <input
+                  type="checkbox"
+                  checked={closeBehaviorDontAskAgain}
+                  onChange={(event) => setCloseBehaviorDontAskAgain(event.target.checked)}
+                  className="h-4 w-4 accent-gray-900 dark:accent-gray-100"
+                />
+                <span>Don't ask again</span>
+              </label>
+            </div>
+            <div className="flex flex-col gap-2 p-5 border-t border-gray-100 dark:border-gray-800 sm:flex-row sm:justify-end">
+              <button
+                onClick={() => setCloseBehaviorPromptOpen(false)}
+                disabled={isCompletingCloseBehavior}
+                className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void handleCloseBehaviorChoice("show_in_dock")}
+                disabled={isCompletingCloseBehavior}
+                className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-50"
+              >
+                Keep in Dock
+              </button>
+              <button
+                onClick={() => void handleCloseBehaviorChoice("menu_bar_only")}
+                disabled={isCompletingCloseBehavior}
+                className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors disabled:opacity-50"
+              >
+                Menu Bar Only
               </button>
             </div>
           </div>
