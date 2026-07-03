@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import type { CodexProcessInfo } from "../types";
 import { invokeBackend } from "../lib/platform";
+import i18n from "../i18n";
 
 interface KillCodexProcessesResult {
   targeted_count: number;
@@ -36,23 +37,23 @@ export function useForceCloseCodexProcesses({
       const closedCount = Math.max(0, processCount - remainingCount);
 
       if (result.targeted_count === 0) {
-        showToast("No running Codex processes found.");
+        showToast(i18n.t("forceClose.noneFound"));
       } else if (remainingCount === 0) {
         showToast(
-          `Force closed ${processCount} Codex session${
-            processCount === 1 ? "" : "s"
-          }.`
+          i18n.t("forceClose.closed", { count: processCount })
         );
       } else if (closedCount > 0) {
         showToast(
-          `Force closed ${closedCount}/${processCount} Codex sessions. ${remainingCount} still running.`,
+          i18n.t("forceClose.partial", {
+            closed: closedCount,
+            total: processCount,
+            remaining: remainingCount,
+          }),
           true
         );
       } else {
         showToast(
-          `Could not force close ${remainingCount} Codex session${
-            remainingCount === 1 ? "" : "s"
-          }.`,
+          i18n.t("forceClose.couldNotClose", { count: remainingCount }),
           true
         );
       }
@@ -60,7 +61,7 @@ export function useForceCloseCodexProcesses({
       return latestProcessInfo;
     } catch (err) {
       console.error("Failed to force close Codex processes:", err);
-      showToast(`Force close failed: ${formatError(err)}`, true);
+      showToast(i18n.t("forceClose.failed", { error: formatError(err) }), true);
       return null;
     } finally {
       setConfirmOpen(false);

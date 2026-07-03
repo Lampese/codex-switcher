@@ -289,7 +289,7 @@ fn map_profile_usage(account_id: &str, payload: ProfileUsageResponse) -> Account
     AccountUsageStats {
         account_id: account_id.to_string(),
         available,
-        source: "Codex usage stats via ChatGPT backend".to_string(),
+        source: "chatgpt_backend".to_string(),
         generated_at: payload.metadata.generated_at,
         stats_as_of: payload.metadata.stats_as_of,
         summary: AccountUsageSummary {
@@ -388,7 +388,7 @@ fn unavailable_stats(account_id: String, message: &str) -> AccountUsageStats {
     AccountUsageStats {
         account_id,
         available: false,
-        source: "Codex usage stats via ChatGPT backend".to_string(),
+        source: "chatgpt_backend".to_string(),
         generated_at: None,
         stats_as_of: None,
         summary: AccountUsageSummary::default(),

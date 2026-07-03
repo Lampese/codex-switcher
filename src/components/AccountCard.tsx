@@ -1,4 +1,6 @@
 import { useCallback, useState, useRef, useEffect } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import type { AccountResetCredits, AccountUsageStats as AccountUsageStatsInfo, AccountWithUsage } from "../types";
 import { invokeBackend } from "../lib/platform";
 import { AccountUsageStats } from "./AccountUsageStats";
@@ -24,30 +26,30 @@ interface AccountCardProps {
   onToggleAutoWarmup?: () => void;
 }
 
-function formatLastRefresh(date: Date | null): string {
-  if (!date) return "Never";
+function formatLastRefresh(date: Date | null, t: TFunction, locale: string): string {
+  if (!date) return t("accountCard.never");
   const now = new Date();
   const diff = Math.floor((now.getTime() - date.getTime()) / 1000);
-  if (diff < 5) return "Just now";
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return date.toLocaleDateString();
+  if (diff < 5) return t("accountCard.justNow");
+  if (diff < 60) return t("accountCard.secondsAgo", { count: diff });
+  if (diff < 3600) return t("accountCard.minutesAgo", { count: Math.floor(diff / 60) });
+  if (diff < 86400) return t("accountCard.hoursAgo", { count: Math.floor(diff / 3600) });
+  return date.toLocaleDateString(locale);
 }
 
-function getSubscriptionStatus(timestamp: string | null | undefined): {
+function getSubscriptionStatus(timestamp: string | null | undefined, t: TFunction, locale: string): {
   label: string;
   className: string;
 } {
   if (!timestamp) {
     return {
-      label: "Expiry unavailable",
+      label: t("accountCard.expiryUnavailable"),
       className: "text-gray-400 dark:text-gray-500",
     };
   }
 
   const expiryDate = new Date(timestamp);
-  const formattedDate = new Intl.DateTimeFormat(undefined, {
+  const formattedDate = new Intl.DateTimeFormat(locale, {
     month: "short",
     day: "numeric",
     year: "numeric",
@@ -56,40 +58,42 @@ function getSubscriptionStatus(timestamp: string | null | undefined): {
   const remainingMs = expiryDate.getTime() - Date.now();
   if (remainingMs <= 0) {
     return {
-      label: `Expired ${formattedDate}`,
+      label: t("accountCard.expired", { date: formattedDate }),
       className: "text-red-500 dark:text-red-400",
     };
   }
 
   if (remainingMs <= 3 * 24 * 60 * 60 * 1000) {
     return {
-      label: `Until ${formattedDate}`,
+      label: t("accountCard.until", { date: formattedDate }),
       className: "text-red-500 dark:text-red-400",
     };
   }
 
   if (remainingMs <= 7 * 24 * 60 * 60 * 1000) {
     return {
-      label: `Until ${formattedDate}`,
+      label: t("accountCard.until", { date: formattedDate }),
       className: "text-amber-500 dark:text-amber-400",
     };
   }
 
   return {
-    label: `Until ${formattedDate}`,
+    label: t("accountCard.until", { date: formattedDate }),
     className: "text-gray-400 dark:text-gray-500",
   };
 }
 
-function formatResetCreditsCount(resetCredits: AccountResetCredits | null): string | null {
+function formatResetCreditsCount(resetCredits: AccountResetCredits | null, t: TFunction): string | null {
   if (!resetCredits) return null;
   const count = resetCredits.available_count;
   if (count <= 0) return null;
-  return count === 1 ? "1 reset" : `${count} resets`;
+  return t("accountCard.resetCount", { count });
 }
 
 function formatResetCreditsExpiry(
   resetCredits: AccountResetCredits | null,
+  t: TFunction,
+  locale: string,
   compact = false,
 ): string | null {
   if (!resetCredits?.next_expires_at) return null;
@@ -97,13 +101,15 @@ function formatResetCreditsExpiry(
   const expiry = new Date(resetCredits.next_expires_at);
   if (Number.isNaN(expiry.getTime())) return null;
 
-  const formattedDate = new Intl.DateTimeFormat(undefined, {
+  const formattedDate = new Intl.DateTimeFormat(locale, {
     month: "short",
     day: "numeric",
     ...(compact ? {} : { year: "numeric" }),
   }).format(expiry);
 
-  return compact ? `closest ${formattedDate}` : `closest expires ${formattedDate}`;
+  return compact
+    ? t("accountCard.closest", { date: formattedDate })
+    : t("accountCard.closestExpires", { date: formattedDate });
 }
 
 function getResetCreditsTone(resetCredits: AccountResetCredits | null): {
@@ -172,6 +178,8 @@ export function AccountCard({
   autoWarmupLabel,
   onToggleAutoWarmup,
 }: AccountCardProps) {
+  const { t, i18n } = useTranslation();
+  const locale = i18n.resolvedLanguage ?? "en-US";
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(
     account.usage && !account.usage.error ? new Date() : null
@@ -225,8 +233,8 @@ export function AccountCard({
   const planDisplay = account.plan_type
     ? account.plan_type.charAt(0).toUpperCase() + account.plan_type.slice(1)
     : account.auth_mode === "api_key"
-      ? "API Key"
-      : "Unknown";
+      ? t("accountCard.apiKey")
+      : t("common.unknown");
 
   const planColors: Record<string, string> = {
     pro: "bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-700",
@@ -240,10 +248,10 @@ export function AccountCard({
   const planKey = account.plan_type?.toLowerCase() || "api_key";
   const planColorClass = planColors[planKey] || planColors.free;
   const showSubscriptionStatus = account.auth_mode === "chat_g_p_t";
-  const subscriptionStatus = getSubscriptionStatus(account.subscription_expires_at);
-  const resetCreditsCount = formatResetCreditsCount(resetCredits);
+  const subscriptionStatus = getSubscriptionStatus(account.subscription_expires_at, t, locale);
+  const resetCreditsCount = formatResetCreditsCount(resetCredits, t);
   const compactResetCredits = !account.is_active;
-  const resetCreditsExpiry = formatResetCreditsExpiry(resetCredits, compactResetCredits);
+  const resetCreditsExpiry = formatResetCreditsExpiry(resetCredits, t, locale, compactResetCredits);
   const resetCreditsTone = getResetCreditsTone(resetCredits);
 
   const loadResetCredits = useCallback(async () => {
@@ -324,7 +332,7 @@ export function AccountCard({
                   setEditName(account.name);
                   setIsEditing(true);
                 }}
-                title={masked ? undefined : "Click to rename"}
+                title={masked ? undefined : t("accountCard.rename")}
               >
                 <BlurredText blur={masked}>{account.name}</BlurredText>
               </h3>
@@ -343,7 +351,7 @@ export function AccountCard({
             <button
               onClick={onToggleMask}
               className="p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
-              title={masked ? "Show info" : "Hide info"}
+              title={masked ? t("accountCard.showInfo") : t("accountCard.hideInfo")}
             >
               {masked ? (
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -403,7 +411,7 @@ export function AccountCard({
       {/* Last refresh time */}
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs mb-3">
         <div className="text-gray-400 dark:text-gray-500">
-          Last updated: {formatLastRefresh(lastRefresh)}
+          {t("accountCard.lastUpdated", { time: formatLastRefresh(lastRefresh, t, locale) })}
         </div>
         {showSubscriptionStatus && (
           <div className={`text-right ${subscriptionStatus.className}`}>
@@ -426,7 +434,7 @@ export function AccountCard({
             disabled
             className="flex-1 px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700 cursor-default"
           >
-            ✓ Active
+            ✓ {t("accountCard.active")}
           </button>
         ) : (
           <button
@@ -437,9 +445,9 @@ export function AccountCard({
                 ? "bg-gray-200 dark:bg-gray-800 text-gray-400 dark:text-gray-500 cursor-not-allowed"
                 : "bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900"
             }`}
-            title={switchDisabled ? "Close all Codex processes first" : undefined}
+            title={switchDisabled ? t("accountCard.closeProcesses") : undefined}
           >
-            {switching ? "Switching..." : switchDisabled ? "Codex Running" : "Switch"}
+            {switching ? t("accountCard.switching") : switchDisabled ? t("accountCard.codexRunning") : t("accountCard.switch")}
           </button>
         )}
         <button
@@ -452,7 +460,7 @@ export function AccountCard({
               ? "bg-amber-100 dark:bg-amber-900/30 text-amber-500 dark:text-amber-300"
               : "bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-100 dark:hover:bg-amber-900/40 text-amber-700 dark:text-amber-300"
           }`}
-          title={warmingUp ? "Sending warm-up request..." : "Send minimal warm-up request"}
+          title={warmingUp ? t("accountCard.warmupSending") : t("accountCard.warmupSend")}
         >
           ⚡
         </button>
@@ -467,13 +475,13 @@ export function AccountCard({
             } disabled:opacity-60`}
             title={
               autoWarmupManagedByAll
-                ? "Auto warm-up is enabled for all accounts"
+                ? t("accountCard.autoAll")
                 : autoWarmupEnabled
-                  ? "Disable auto warm-up for this account"
-                : "Enable auto warm-up for this account"
+                  ? t("accountCard.autoDisable")
+                : t("accountCard.autoEnable")
             }
           >
-            {autoWarmupLabel ?? `Auto: ${autoWarmupEnabled ? "on" : "off"}`}
+            {autoWarmupLabel ?? (autoWarmupEnabled ? t("warmup.autoOn") : t("warmup.autoOff"))}
           </button>
         )}
         <button
@@ -484,14 +492,14 @@ export function AccountCard({
               ? "bg-gray-200 dark:bg-gray-800 text-gray-400 dark:text-gray-500"
               : "bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300"
           }`}
-          title="Refresh usage"
+          title={t("accountCard.refreshUsage")}
         >
           <span className={isRefreshing ? "animate-spin inline-block" : ""}>↻</span>
         </button>
         <button
           onClick={onDelete}
           className="px-3 py-2 text-sm rounded-lg bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-300 transition-colors"
-          title="Remove account"
+          title={t("accountCard.remove")}
         >
           ✕
         </button>

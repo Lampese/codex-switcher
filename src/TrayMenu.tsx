@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import type { AccountInfo, AccountUsageStats, DockDisplayMode, UsageInfo } from "./types";
 import { invokeBackend, isTauriRuntime } from "./lib/platform";
 import {
@@ -19,14 +21,14 @@ const SWITCH_ACCOUNT_BLOCKED_EVENT = "switch-account-blocked";
 // Mirrors the backend guard message in process.rs (ensure_codex_not_running).
 const CODEX_RUNNING_PREFIX = "Cannot switch accounts while";
 
-function formatError(err: unknown): string {
-  if (!err) return "Unknown error";
+function formatError(err: unknown, t: TFunction): string {
+  if (!err) return t("common.unknownError");
   if (err instanceof Error && err.message) return err.message;
   if (typeof err === "string") return err;
   try {
     return JSON.stringify(err);
   } catch {
-    return "Unknown error";
+    return t("common.unknownError");
   }
 }
 
@@ -57,17 +59,20 @@ function remainingTone(remaining: number): { text: string; bar: string; dot: str
 }
 
 // "time until reset" label, e.g. "4h 55m" / "4d 18h" / "now".
-function formatResetAt(resetAt: number | null | undefined): string | null {
+function formatResetAt(resetAt: number | null | undefined, t: TFunction): string | null {
   if (!resetAt) return null;
 
   const diff = resetAt - Math.floor(Date.now() / 1000);
-  if (diff <= 0) return "now";
-  if (diff < 60) return `${diff}s`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+  if (diff <= 0) return t("usage.now");
+  if (diff < 60) return t("usage.seconds", { count: diff });
+  if (diff < 3600) return t("usage.minutes", { count: Math.floor(diff / 60) });
   if (diff < 86_400) {
-    return `${Math.floor(diff / 3600)}h ${Math.floor((diff % 3600) / 60)}m`;
+    return t("usage.hoursMinutes", {
+      hours: Math.floor(diff / 3600),
+      minutes: Math.floor((diff % 3600) / 60),
+    });
   }
-  return `${Math.floor(diff / 86_400)}d ${Math.floor((diff % 86_400) / 3600)}h`;
+  return `${t("usage.days", { count: Math.floor(diff / 86_400) })} ${t("usage.hours", { count: Math.floor((diff % 86_400) / 3600) })}`;
 }
 
 function formatTokens(tokens: number | null | undefined): string {
@@ -105,6 +110,7 @@ function retainUsageForAccounts(
 }
 
 function TrayMenu() {
+  const { t } = useTranslation();
   const [accounts, setAccounts] = useState<AccountInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
@@ -139,7 +145,7 @@ function TrayMenu() {
               has_credits: null,
               unlimited_credits: null,
               credits_balance: null,
-              error: formatError(err),
+              error: formatError(err, t),
             },
           }));
         }
@@ -162,7 +168,7 @@ function TrayMenu() {
         [active.id]: {
           account_id: active.id,
           available: false,
-          source: "Codex usage stats via ChatGPT backend",
+          source: "chatgpt_backend",
           generated_at: null,
           stats_as_of: null,
           summary: {
@@ -183,7 +189,7 @@ function TrayMenu() {
           daily: [],
           top_invocations: [],
           reset_credits: null,
-          error: formatError(err),
+          error: formatError(err, t),
         },
       }));
     }
@@ -208,7 +214,7 @@ function TrayMenu() {
       void loadUsage(list); // Don't block the list render on the usage calls.
       void loadActiveStats(list);
     } catch (err) {
-      setError(formatError(err));
+      setError(formatError(err, t));
     } finally {
       setLoading(false);
     }
@@ -224,7 +230,7 @@ function TrayMenu() {
       setError(null);
       await Promise.all([loadUsage(list), loadActiveStats(list)]);
     } catch (err) {
-      setError(formatError(err));
+      setError(formatError(err, t));
     } finally {
       setRefreshing(false);
     }
@@ -241,7 +247,7 @@ function TrayMenu() {
       }
     } catch (err) {
       setAutoWarmupAllEnabled(!next);
-      setError(formatError(err));
+      setError(formatError(err, t));
     }
   }, [autoWarmupAllEnabled]);
 
@@ -256,7 +262,7 @@ function TrayMenu() {
         setDockDisplayMode(next);
       } catch (err) {
         setDockDisplayMode(previous);
-        setError(formatError(err));
+        setError(formatError(err, t));
       }
     },
     [dockDisplayMode]
@@ -316,7 +322,7 @@ function TrayMenu() {
       await emit(ACCOUNTS_CHANGED_EVENT);
       void invokeBackend("hide_tray_window");
     } catch (err) {
-      const message = formatError(err);
+      const message = formatError(err, t);
       // Codex is running: hand off to the main window's force-close flow.
       if (message.startsWith(CODEX_RUNNING_PREFIX)) {
         const { emit } = await import("@tauri-apps/api/event");
@@ -331,7 +337,7 @@ function TrayMenu() {
     } finally {
       setSwitchingId(null);
     }
-  }, []);
+  }, [t]);
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden rounded-xl border border-gray-200 bg-white text-gray-900 shadow-2xl dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100">
@@ -345,8 +351,8 @@ function TrayMenu() {
           disabled={accounts.length === 0}
           title={
             autoWarmupAllEnabled
-              ? "Disable auto warm-up for all accounts"
-              : "Enable auto warm-up for all accounts"
+              ? t("header.disableAutoAll")
+              : t("header.enableAutoAll")
           }
           className={`ml-auto rounded-md px-2 py-1 text-[11px] font-semibold transition-colors disabled:opacity-50 ${
             autoWarmupAllEnabled
@@ -354,12 +360,12 @@ function TrayMenu() {
               : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
           }`}
         >
-          Auto: {autoWarmupAllEnabled ? "on" : "off"}
+          {autoWarmupAllEnabled ? t("warmup.autoOn") : t("warmup.autoOff")}
         </button>
         <button
           onClick={() => void handleRefresh()}
           disabled={refreshing}
-          title="Refresh usage"
+          title={t("accountCard.refreshUsage")}
           className="flex h-6 w-6 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 disabled:opacity-50 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
         >
           <span className={`text-base leading-none ${refreshing ? "inline-block animate-spin" : ""}`}>
@@ -371,11 +377,11 @@ function TrayMenu() {
       <div className="flex-1 overflow-y-auto p-1.5">
         {loading ? (
           <div className="px-2 py-6 text-center text-xs text-gray-500 dark:text-gray-400">
-            Loading...
+            {t("tray.loading")}
           </div>
         ) : accounts.length === 0 ? (
           <div className="px-2 py-6 text-center text-xs text-gray-500 dark:text-gray-400">
-            No accounts configured
+            {t("tray.noAccounts")}
           </div>
         ) : (
           accounts.map((account) => {
@@ -386,12 +392,12 @@ function TrayMenu() {
               usage && !usage.error
                 ? ([
                     {
-                      label: "Session",
+                      label: t("tray.session"),
                       used: usage.primary_used_percent,
                       resetAt: usage.primary_resets_at,
                     },
                     {
-                      label: "Weekly",
+                      label: t("tray.weekly"),
                       used: usage.secondary_used_percent,
                       resetAt: usage.secondary_resets_at,
                     },
@@ -444,7 +450,7 @@ function TrayMenu() {
                       {windows.map((w) => {
                         const remaining = Math.max(0, 100 - w.used);
                         const tone = remainingTone(remaining);
-                        const reset = formatResetAt(w.resetAt);
+                        const reset = formatResetAt(w.resetAt, t);
                         return (
                           <span key={w.label} className="block">
                             <span className="flex items-center gap-1">
@@ -463,11 +469,11 @@ function TrayMenu() {
                             </span>
                             <span className="mt-0.5 flex justify-between text-[11px] text-gray-500 dark:text-gray-400">
                               <span className={tone.text}>
-                                {remaining.toFixed(0)}% left
+                                {t("usage.left", { percent: remaining.toFixed(0) })}
                               </span>
                               {reset && (
                                 <span>
-                                  {reset === "now" ? "Resets now" : `Resets in ${reset}`}
+                                  {reset === t("usage.now") ? t("tray.resetsNow") : t("tray.resetsIn", { time: reset })}
                                 </span>
                               )}
                             </span>
@@ -477,7 +483,7 @@ function TrayMenu() {
                     </span>
                   ) : usage?.error ? (
                     <span className="block truncate text-xs text-red-500 dark:text-red-400">
-                      Usage unavailable
+                      {t("tray.usageUnavailable")}
                     </span>
                   ) : account.email ? (
                     <span className="block truncate text-xs text-gray-500 dark:text-gray-400">
@@ -490,13 +496,13 @@ function TrayMenu() {
                         <span className="block font-medium text-gray-900 dark:text-gray-100">
                           {formatTokens(sumDailyTokens(stats, 1))}
                         </span>
-                        <span>today</span>
+                        <span>{t("tray.today")}</span>
                       </span>
                       <span className="rounded-md bg-white px-2 py-1 text-[11px] text-gray-600 shadow-sm dark:bg-gray-950 dark:text-gray-300">
                         <span className="block font-medium text-gray-900 dark:text-gray-100">
                           {formatTokens(sumDailyTokens(stats, 7))}
                         </span>
-                        <span>last 7 days</span>
+                        <span>{t("tray.lastSevenDays")}</span>
                       </span>
                     </span>
                   )}
@@ -519,7 +525,7 @@ function TrayMenu() {
       {dockDisplayMode && (
         <div className="flex items-center gap-1 border-t border-gray-100 px-1.5 py-1.5 dark:border-gray-800">
           <span className="px-1.5 text-[11px] font-medium text-gray-500 dark:text-gray-400">
-            Dock
+            {t("tray.dock")}
           </span>
           <button
             onClick={() => void handleDockDisplayMode("show_in_dock")}
@@ -529,7 +535,7 @@ function TrayMenu() {
                 : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
             }`}
           >
-            Show
+            {t("tray.show")}
           </button>
           <button
             onClick={() => void handleDockDisplayMode("menu_bar_only")}
@@ -539,7 +545,7 @@ function TrayMenu() {
                 : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
             }`}
           >
-            Menu Bar
+            {t("tray.menuBar")}
           </button>
         </div>
       )}
@@ -549,13 +555,13 @@ function TrayMenu() {
           onClick={() => void invokeBackend("open_main_window")}
           className="flex-1 rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-gray-100 dark:hover:bg-gray-800"
         >
-          Open Codex Switcher
+          {t("tray.openApp")}
         </button>
         <button
           onClick={() => void invokeBackend("quit_app")}
           className="rounded-lg px-2 py-1.5 text-sm text-gray-500 transition-colors hover:bg-gray-100 hover:text-red-600 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-red-400"
         >
-          Quit
+          {t("tray.quit")}
         </button>
       </div>
     </div>

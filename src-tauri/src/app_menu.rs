@@ -9,12 +9,13 @@ use tauri::{
 pub(crate) use crate::types::DockDisplayMode;
 use crate::{
     auth::{load_app_settings, save_app_settings},
-    types::{AppSettings, TrayDisplayMode},
+    types::{AppLanguage, AppSettings, TrayDisplayMode},
 };
 
 const TRAY_ICON_AND_SESSION_ID: &str = "tray-display-icon-and-session";
 const TRAY_ACTIVE_USAGE_TEXT_ID: &str = "tray-display-active-usage-text";
 const TRAY_HIDDEN_ID: &str = "tray-display-hidden";
+const LANGUAGE_ITEM_PREFIX: &str = "language:";
 #[cfg(target_os = "macos")]
 pub(crate) const DOCK_SHOW_IN_DOCK_ID: &str = "dock-display-show-in-dock";
 #[cfg(target_os = "macos")]
@@ -40,6 +41,14 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
 
     if let Some(mode) = tray_display_mode_for_item(item_id.as_ref()) {
         update_tray_display_mode(app, mode);
+        return;
+    }
+
+    if let Some(code) = item_id.as_ref().strip_prefix(LANGUAGE_ITEM_PREFIX) {
+        let language = AppLanguage::new(code);
+        if let Err(error) = crate::commands::settings::set_app_language(app.clone(), language) {
+            eprintln!("Failed to update app language: {error}");
+        }
         return;
     }
 
@@ -176,6 +185,7 @@ fn apply_dock_display_mode<R: Runtime>(app: &AppHandle<R>, mode: DockDisplayMode
 }
 
 fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::Result<Menu<R>> {
+    let t = |key| crate::i18n::text(&settings.language, key);
     let pkg_info = app.package_info();
     let config = app.config();
     let about_metadata = AboutMetadata {
@@ -192,13 +202,13 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
 
     let tray_settings = Submenu::with_items(
         app,
-        "Tray",
+        t("tray"),
         true,
         &[
             &CheckMenuItem::with_id(
                 app,
                 TRAY_ICON_AND_SESSION_ID,
-                "Icon + Session",
+                t("trayIconAndSession"),
                 true,
                 settings.tray_display_mode == TrayDisplayMode::IconAndSession,
                 None::<&str>,
@@ -206,7 +216,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
             &CheckMenuItem::with_id(
                 app,
                 TRAY_ACTIVE_USAGE_TEXT_ID,
-                "Hourly + Weekly",
+                t("trayHourlyAndWeekly"),
                 true,
                 settings.tray_display_mode == TrayDisplayMode::ActiveUsageText,
                 None::<&str>,
@@ -214,7 +224,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
             &CheckMenuItem::with_id(
                 app,
                 TRAY_HIDDEN_ID,
-                "Hidden",
+                t("hidden"),
                 true,
                 settings.tray_display_mode == TrayDisplayMode::Hidden,
                 None::<&str>,
@@ -225,13 +235,13 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
     #[cfg(target_os = "macos")]
     let dock_settings = Submenu::with_items(
         app,
-        "Dock Icon",
+        t("dockIcon"),
         true,
         &[
             &CheckMenuItem::with_id(
                 app,
                 DOCK_SHOW_IN_DOCK_ID,
-                "Show in Dock",
+                t("showInDock"),
                 true,
                 settings.dock_display_mode == DockDisplayMode::ShowInDock,
                 None::<&str>,
@@ -239,7 +249,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
             &CheckMenuItem::with_id(
                 app,
                 DOCK_MENU_BAR_ONLY_ID,
-                "Menu Bar Only",
+                t("menuBarOnly"),
                 true,
                 settings.dock_display_mode == DockDisplayMode::MenuBarOnly,
                 None::<&str>,
@@ -247,27 +257,58 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
         ],
     )?;
 
+    let language_settings = Submenu::new(app, t("language"), true)?;
+    let system_language = CheckMenuItem::with_id(
+        app,
+        format!("{LANGUAGE_ITEM_PREFIX}{}", AppLanguage::SYSTEM_CODE),
+        t("systemLanguage"),
+        true,
+        settings.language.as_str() == AppLanguage::SYSTEM_CODE,
+        None::<&str>,
+    )?;
+    language_settings.append(&system_language)?;
+    for locale in crate::i18n::supported_languages() {
+        let item = CheckMenuItem::with_id(
+            app,
+            format!("{LANGUAGE_ITEM_PREFIX}{}", locale.code),
+            &locale.label,
+            true,
+            settings.language.as_str() == locale.code,
+            None::<&str>,
+        )?;
+        language_settings.append(&item)?;
+    }
+
     #[cfg(target_os = "macos")]
-    let settings_menu =
-        Submenu::with_items(app, "Settings", true, &[&tray_settings, &dock_settings])?;
+    let settings_menu = Submenu::with_items(
+        app,
+        t("settings"),
+        true,
+        &[&tray_settings, &dock_settings, &language_settings],
+    )?;
 
     #[cfg(not(target_os = "macos"))]
-    let settings_menu = Submenu::with_items(app, "Settings", true, &[&tray_settings])?;
+    let settings_menu = Submenu::with_items(
+        app,
+        t("settings"),
+        true,
+        &[&tray_settings, &language_settings],
+    )?;
 
     let window_menu = Submenu::with_items(
         app,
-        "Window",
+        t("window"),
         true,
         &[
-            &PredefinedMenuItem::minimize(app, None)?,
-            &PredefinedMenuItem::maximize(app, None)?,
+            &PredefinedMenuItem::minimize(app, Some(t("minimize")))?,
+            &PredefinedMenuItem::maximize(app, Some(t("maximize")))?,
             #[cfg(target_os = "macos")]
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::close_window(app, None)?,
+            &PredefinedMenuItem::close_window(app, Some(t("closeWindow")))?,
         ],
     )?;
 
-    let help_menu = Submenu::with_items(app, "Help", true, &[])?;
+    let help_menu = Submenu::with_items(app, t("help"), true, &[])?;
 
     Menu::with_items(
         app,
@@ -278,16 +319,16 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
                 pkg_info.name.clone(),
                 true,
                 &[
-                    &PredefinedMenuItem::about(app, None, Some(about_metadata))?,
+                    &PredefinedMenuItem::about(app, Some(t("about")), Some(about_metadata))?,
                     &PredefinedMenuItem::separator(app)?,
                     &settings_menu,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::services(app, None)?,
+                    &PredefinedMenuItem::services(app, Some(t("services")))?,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::hide(app, None)?,
-                    &PredefinedMenuItem::hide_others(app, None)?,
+                    &PredefinedMenuItem::hide(app, Some(t("hide")))?,
+                    &PredefinedMenuItem::hide_others(app, Some(t("hideOthers")))?,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::quit(app, None)?,
+                    &PredefinedMenuItem::quit(app, Some(t("quit")))?,
                 ],
             )?,
             #[cfg(not(any(
@@ -299,34 +340,36 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
             )))]
             &Submenu::with_items(
                 app,
-                "File",
+                t("file"),
                 true,
                 &[
-                    &PredefinedMenuItem::close_window(app, None)?,
+                    &PredefinedMenuItem::close_window(app, Some(t("closeWindow")))?,
                     #[cfg(not(target_os = "macos"))]
-                    &PredefinedMenuItem::quit(app, None)?,
+                    &PredefinedMenuItem::quit(app, Some(t("quit")))?,
                 ],
             )?,
+            #[cfg(not(target_os = "macos"))]
+            &settings_menu,
             &Submenu::with_items(
                 app,
-                "Edit",
+                t("edit"),
                 true,
                 &[
-                    &PredefinedMenuItem::undo(app, None)?,
-                    &PredefinedMenuItem::redo(app, None)?,
+                    &PredefinedMenuItem::undo(app, Some(t("undo")))?,
+                    &PredefinedMenuItem::redo(app, Some(t("redo")))?,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::cut(app, None)?,
-                    &PredefinedMenuItem::copy(app, None)?,
-                    &PredefinedMenuItem::paste(app, None)?,
-                    &PredefinedMenuItem::select_all(app, None)?,
+                    &PredefinedMenuItem::cut(app, Some(t("cut")))?,
+                    &PredefinedMenuItem::copy(app, Some(t("copy")))?,
+                    &PredefinedMenuItem::paste(app, Some(t("paste")))?,
+                    &PredefinedMenuItem::select_all(app, Some(t("selectAll")))?,
                 ],
             )?,
             #[cfg(target_os = "macos")]
             &Submenu::with_items(
                 app,
-                "View",
+                t("view"),
                 true,
-                &[&PredefinedMenuItem::fullscreen(app, None)?],
+                &[&PredefinedMenuItem::fullscreen(app, Some(t("fullscreen")))?],
             )?,
             &window_menu,
             &help_menu,

@@ -36,6 +36,29 @@ pub enum DockDisplayMode {
     MenuBarOnly,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AppLanguage(String);
+
+impl AppLanguage {
+    pub const DEFAULT_CODE: &'static str = "en-US";
+    pub const SYSTEM_CODE: &'static str = "system";
+
+    pub fn new(code: impl Into<String>) -> Self {
+        Self(code.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for AppLanguage {
+    fn default() -> Self {
+        Self::new(Self::SYSTEM_CODE)
+    }
+}
+
 fn default_close_behavior_prompt_enabled() -> bool {
     true
 }
@@ -45,6 +68,7 @@ fn default_close_behavior_prompt_enabled() -> bool {
 pub struct AppSettings {
     pub tray_display_mode: TrayDisplayMode,
     pub dock_display_mode: DockDisplayMode,
+    pub language: AppLanguage,
     #[serde(default = "default_close_behavior_prompt_enabled")]
     pub close_behavior_prompt_enabled: bool,
 }
@@ -54,6 +78,7 @@ impl Default for AppSettings {
         Self {
             tray_display_mode: TrayDisplayMode::default(),
             dock_display_mode: DockDisplayMode::default(),
+            language: AppLanguage::default(),
             close_behavior_prompt_enabled: true,
         }
     }
@@ -408,7 +433,9 @@ pub struct CreditStatusDetails {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_chatgpt_id_token_claims, AppSettings, DockDisplayMode, TrayDisplayMode};
+    use super::{
+        parse_chatgpt_id_token_claims, AppLanguage, AppSettings, DockDisplayMode, TrayDisplayMode,
+    };
     use base64::Engine;
 
     #[test]
@@ -437,6 +464,7 @@ mod tests {
 
         assert_eq!(settings.tray_display_mode, TrayDisplayMode::ActiveUsageText);
         assert_eq!(settings.dock_display_mode, DockDisplayMode::ShowInDock);
+        assert_eq!(settings.language, AppLanguage::default());
         assert!(settings.close_behavior_prompt_enabled);
     }
 }

@@ -182,10 +182,12 @@ fn position_near_cursor<R: Runtime>(
 
 fn build_menu<R: Runtime>(app: &AppHandle<R>, store: &AccountsStore) -> tauri::Result<Menu<R>> {
     let menu = Menu::new(app)?;
+    let language = load_app_settings().unwrap_or_default().language;
+    let t = |key| crate::i18n::text(&language, key);
 
     if store.accounts.is_empty() {
         menu.append(
-            &MenuItemBuilder::with_id("empty", "No accounts configured")
+            &MenuItemBuilder::with_id("empty", t("noAccounts"))
                 .enabled(false)
                 .build(app)?,
         )?;
@@ -205,27 +207,29 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, store: &AccountsStore) -> tauri::R
     append_dock_settings_menu(app, &menu)?;
     #[cfg(target_os = "macos")]
     menu.append(&PredefinedMenuItem::separator(app)?)?;
-    menu.append(&MenuItemBuilder::with_id(OPEN_ITEM_ID, "Open Codex Switcher").build(app)?)?;
-    menu.append(&MenuItemBuilder::with_id(QUIT_ITEM_ID, "Quit").build(app)?)?;
+    menu.append(&MenuItemBuilder::with_id(OPEN_ITEM_ID, t("openApp")).build(app)?)?;
+    menu.append(&MenuItemBuilder::with_id(QUIT_ITEM_ID, t("quit")).build(app)?)?;
     Ok(menu)
 }
 
 #[cfg(target_os = "macos")]
 fn append_dock_settings_menu<R: Runtime>(app: &AppHandle<R>, menu: &Menu<R>) -> tauri::Result<()> {
     let settings = load_app_settings().unwrap_or_default();
+    let t = |key| crate::i18n::text(&settings.language, key);
     let dock_settings = Submenu::with_items(
         app,
-        "Dock Icon",
+        t("dockIcon"),
         true,
         &[
-            &CheckMenuItemBuilder::with_id(crate::app_menu::DOCK_SHOW_IN_DOCK_ID, "Show in Dock")
+            &CheckMenuItemBuilder::with_id(crate::app_menu::DOCK_SHOW_IN_DOCK_ID, t("showInDock"))
                 .checked(settings.dock_display_mode == crate::app_menu::DockDisplayMode::ShowInDock)
                 .build(app)?,
-            &CheckMenuItemBuilder::with_id(crate::app_menu::DOCK_MENU_BAR_ONLY_ID, "Menu Bar Only")
-                .checked(
-                    settings.dock_display_mode == crate::app_menu::DockDisplayMode::MenuBarOnly,
-                )
-                .build(app)?,
+            &CheckMenuItemBuilder::with_id(
+                crate::app_menu::DOCK_MENU_BAR_ONLY_ID,
+                t("menuBarOnly"),
+            )
+            .checked(settings.dock_display_mode == crate::app_menu::DockDisplayMode::MenuBarOnly)
+            .build(app)?,
         ],
     )?;
     menu.append(&dock_settings)?;

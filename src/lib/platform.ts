@@ -43,13 +43,13 @@ export async function openExternalUrl(url: string): Promise<void> {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
-export async function pickAuthJsonFile(): Promise<FileSource | null> {
+export async function pickAuthJsonFile(title = "Select auth.json file"): Promise<FileSource | null> {
   if (isTauriRuntime()) {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
       multiple: false,
       filters: [{ name: "JSON", extensions: ["json"] }],
-      title: "Select auth.json file",
+      title,
     });
 
     if (!selected || Array.isArray(selected)) return null;
@@ -59,11 +59,13 @@ export async function pickAuthJsonFile(): Promise<FileSource | null> {
   return pickBrowserFile(".json,application/json");
 }
 
-export async function exportFullBackupFile(): Promise<boolean> {
+export async function exportFullBackupFile(
+  title = "Export Full Encrypted Account Config"
+): Promise<boolean> {
   if (isTauriRuntime()) {
     const { save } = await import("@tauri-apps/plugin-dialog");
     const selected = await save({
-      title: "Export Full Encrypted Account Config",
+      title,
       defaultPath: "codex-switcher-full.cswf",
       filters: [{ name: "Codex Switcher Full Backup", extensions: ["cswf"] }],
     });
@@ -82,12 +84,14 @@ export async function exportFullBackupFile(): Promise<boolean> {
   return true;
 }
 
-export async function importFullBackupFile(): Promise<ImportAccountsSummary | null> {
+export async function importFullBackupFile(
+  title = "Import Full Encrypted Account Config"
+): Promise<ImportAccountsSummary | null> {
   if (isTauriRuntime()) {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
       multiple: false,
-      title: "Import Full Encrypted Account Config",
+      title,
       filters: [{ name: "Codex Switcher Full Backup", extensions: ["cswf"] }],
     });
 
