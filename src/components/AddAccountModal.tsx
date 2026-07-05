@@ -118,7 +118,7 @@ export function AddAccountModal({
       return;
     }
     if (!accessToken.trim()) {
-      setError("Please paste a CODEX_ACCESS_TOKEN value");
+      setError("Please paste a K12 CODEX_ACCESS_TOKEN value");
       return;
     }
 
@@ -153,7 +153,7 @@ export function AddAccountModal({
       ? "Generate Login Link"
       : activeTab === "import"
         ? "Import"
-        : "Add Token";
+        : "Add K12 Token";
 
   if (!isOpen) return null;
 
@@ -196,7 +196,7 @@ export function AddAccountModal({
                 ? "ChatGPT Login"
                 : tab === "import"
                   ? "Import File"
-                  : "Access Token"}
+                  : "K12 Token"}
             </button>
           ))}
         </div>
@@ -302,15 +302,20 @@ export function AddAccountModal({
           )}
 
           {activeTab === "accessToken" && (
-            <div>
+            <div className="space-y-3">
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200">
+                This option is only for K12 accounts that provide a Codex
+                <code className="mx-1 font-mono">CODEX_ACCESS_TOKEN</code>.
+                Use ChatGPT Login or Import File for other account types.
+              </div>
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                CODEX_ACCESS_TOKEN
+                K12 CODEX_ACCESS_TOKEN
               </label>
               <input
                 type="password"
                 value={accessToken}
                 onChange={(e) => setAccessToken(e.target.value)}
-                placeholder="Paste token"
+                placeholder="Paste K12 access token"
                 autoComplete="off"
                 spellCheck={false}
                 className="w-full px-4 py-2.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-gray-400 dark:focus:border-gray-500 focus:ring-1 focus:ring-gray-400 dark:focus:ring-gray-500 transition-colors font-mono text-xs"
