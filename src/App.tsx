@@ -502,6 +502,8 @@ function App() {
       await switchAccount(accountId);
     } catch (err) {
       console.error("Failed to switch account:", err);
+      const accountName = accounts.find((account) => account.id === accountId)?.name ?? "account";
+      showWarmupToast(`Switch failed for ${accountName}: ${formatWarmupError(err)}`, true);
     } finally {
       setSwitchingId(null);
     }

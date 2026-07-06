@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
@@ -122,7 +122,7 @@ fn login_with_codex_access_token(token: &str) -> Result<()> {
         anyhow::bail!("Codex access token is empty");
     }
 
-    let mut child = Command::new("codex")
+    let mut child = Command::new(resolve_codex_executable())
         .args(["login", "--with-access-token"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -159,6 +159,53 @@ fn login_with_codex_access_token(token: &str) -> Result<()> {
     Ok(())
 }
 
+/// Resolve the `codex` CLI executable, falling back to well-known install
+/// locations when it isn't found on the current process's PATH.
+///
+/// GUI apps launched from Finder/Dock/Spotlight on macOS inherit launchd's
+/// minimal PATH, not the user's shell PATH — so a Homebrew-installed `codex`
+/// (e.g. under `/opt/homebrew/bin`) is invisible to `Command::new("codex")`
+/// even though it works fine from a terminal.
+fn resolve_codex_executable() -> PathBuf {
+    if let Some(path) = find_on_path("codex", std::env::var_os("PATH")) {
+        return path;
+    }
+
+    #[cfg(unix)]
+    {
+        for candidate in fallback_codex_paths(dirs::home_dir().as_deref()) {
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+
+    PathBuf::from("codex")
+}
+
+fn find_on_path(name: &str, path_var: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let path_var = path_var?;
+    std::env::split_paths(&path_var).find_map(|dir| {
+        let candidate = dir.join(name);
+        candidate.is_file().then_some(candidate)
+    })
+}
+
+#[cfg(unix)]
+fn fallback_codex_paths(home: Option<&Path>) -> Vec<PathBuf> {
+    let mut candidates = vec![
+        PathBuf::from("/opt/homebrew/bin/codex"),
+        PathBuf::from("/usr/local/bin/codex"),
+    ];
+
+    if let Some(home) = home {
+        candidates.push(home.join(".local/bin/codex"));
+        candidates.push(home.join(".npm-global/bin/codex"));
+    }
+
+    candidates
+}
+
 fn redact_access_token_from_output(output: &str, token: &str) -> String {
     if token.is_empty() {
         return output.to_string();
@@ -169,7 +216,55 @@ fn redact_access_token_from_output(output: &str, token: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{create_access_token_auth_json, redact_access_token_from_output};
+    use super::{create_access_token_auth_json, find_on_path, redact_access_token_from_output};
+
+    #[test]
+    fn find_on_path_returns_none_when_path_is_unset() {
+        assert_eq!(find_on_path("codex", None), None);
+    }
+
+    #[test]
+    fn find_on_path_returns_none_when_not_present_in_any_directory() {
+        let path_var = std::ffi::OsString::from("/definitely/does/not/exist/xyz");
+        assert_eq!(find_on_path("codex", Some(path_var)), None);
+    }
+
+    #[test]
+    fn find_on_path_locates_executable_within_a_path_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-switcher-find-on-path-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("codex");
+        std::fs::write(&exe, b"").unwrap();
+
+        let path_var = std::ffi::OsString::from(dir.as_os_str());
+        let found = find_on_path("codex", Some(path_var));
+
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(found.as_deref(), Some(exe.as_path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fallback_codex_paths_includes_common_homebrew_prefixes() {
+        let candidates = super::fallback_codex_paths(None);
+
+        assert!(candidates.contains(&std::path::PathBuf::from("/opt/homebrew/bin/codex")));
+        assert!(candidates.contains(&std::path::PathBuf::from("/usr/local/bin/codex")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fallback_codex_paths_includes_home_relative_locations_when_home_is_known() {
+        let home = std::path::PathBuf::from("/Users/example");
+        let candidates = super::fallback_codex_paths(Some(&home));
+
+        assert!(candidates.contains(&home.join(".local/bin/codex")));
+        assert!(candidates.contains(&home.join(".npm-global/bin/codex")));
+    }
 
     #[test]
     fn redacts_access_token_from_cli_error_output() {
