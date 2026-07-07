@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
 use crate::types::{AccountsStore, AppSettings, AuthData, StoredAccount};
 
@@ -65,15 +66,54 @@ pub fn save_app_settings(settings: &AppSettings) -> Result<()> {
     }
 
     let content = serde_json::to_string_pretty(settings).context("Failed to serialize settings")?;
-    fs::write(&path, content)
+    write_file_atomically(&path, &content)
         .with_context(|| format!("Failed to write settings file: {}", path.display()))?;
+
+    Ok(())
+}
+
+/// Write `content` to `path` by writing a sibling temp file and atomically
+/// renaming it into place, instead of writing directly to `path`.
+///
+/// `fs::write` truncates the target file before writing the new bytes, so any
+/// concurrent reader (the tray's 1s file watcher, the 60s usage poller, a
+/// separate `codex-web` LAN process, or the official `codex` CLI reading
+/// `auth.json`) that opens the file during that window observes a truncated or
+/// empty file. `fs::rename` within the same directory is atomic, so readers
+/// always see either the fully-old or fully-new content, never a partial
+/// write. The temp filename is suffixed with a UUID rather than a PID so two
+/// writers on the same process (e.g. a tray-triggered switch racing a
+/// main-window switch) never collide on the same temp file. Shared across
+/// `auth::storage` and `auth::switcher`, which both persist small JSON/text
+/// files that outside readers can observe mid-write.
+pub(crate) fn write_file_atomically(path: &std::path::Path, content: &str) -> Result<()> {
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("tmp");
+    let tmp_path = path.with_extension(format!("{extension}.tmp.{}", Uuid::new_v4()));
+
+    let result = write_temp_then_rename(&tmp_path, path, content);
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    result
+}
+
+fn write_temp_then_rename(
+    tmp_path: &std::path::Path,
+    path: &std::path::Path,
+    content: &str,
+) -> Result<()> {
+    fs::write(tmp_path, content)
+        .with_context(|| format!("Failed to write temp file: {}", tmp_path.display()))?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(&path, perms)?;
+        fs::set_permissions(tmp_path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("Failed to set permissions: {}", tmp_path.display()))?;
     }
+
+    fs::rename(tmp_path, path)
+        .with_context(|| format!("Failed to finalize file: {}", path.display()))?;
 
     Ok(())
 }
@@ -91,16 +131,8 @@ pub fn save_accounts(store: &AccountsStore) -> Result<()> {
     let content =
         serde_json::to_string_pretty(store).context("Failed to serialize accounts store")?;
 
-    fs::write(&path, content)
+    write_file_atomically(&path, &content)
         .with_context(|| format!("Failed to write accounts file: {}", path.display()))?;
-
-    // Set restrictive permissions on Unix
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(&path, perms)?;
-    }
 
     Ok(())
 }
@@ -304,4 +336,62 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
     store.masked_account_ids = ids;
     save_accounts(&store)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// Reproduces the "Failed to parse accounts file" bug: a reader (e.g. the
+    /// tray's 1s file watcher) can open the file while a writer is mid-`fs::write`,
+    /// since plain `fs::write` truncates before the new bytes land.
+    #[test]
+    fn concurrent_readers_never_observe_a_torn_write() {
+        let dir = std::env::temp_dir().join(format!("codex-switcher-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("accounts.json");
+
+        let payload_a = format!("{{\"marker\":\"A\",\"pad\":\"{}\"}}", "a".repeat(200_000));
+        let payload_b = format!("{{\"marker\":\"B\",\"pad\":\"{}\"}}", "b".repeat(200_000));
+
+        write_file_atomically(&path, &payload_a).unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let stop = stop.clone();
+            let path = path.clone();
+            let payload_a = payload_a.clone();
+            let payload_b = payload_b.clone();
+            std::thread::spawn(move || {
+                for i in 0..200 {
+                    let payload = if i % 2 == 0 { &payload_b } else { &payload_a };
+                    write_file_atomically(&path, payload).unwrap();
+                }
+                stop.store(true, Ordering::SeqCst);
+            })
+        };
+
+        let mut reads = 0;
+        while !stop.load(Ordering::SeqCst) {
+            if let Ok(content) = fs::read_to_string(&path) {
+                assert!(
+                    content == payload_a || content == payload_b,
+                    "torn read detected: got {} bytes (expected {} or {})",
+                    content.len(),
+                    payload_a.len(),
+                    payload_b.len()
+                );
+                reads += 1;
+            }
+        }
+        writer.join().unwrap();
+        assert!(
+            reads > 0,
+            "test didn't overlap reads with writes — increase iterations"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
