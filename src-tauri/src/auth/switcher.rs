@@ -115,7 +115,10 @@ fn login_with_codex_access_token(token: &str) -> Result<()> {
         anyhow::bail!("Codex access token is empty");
     }
 
-    let mut child = Command::new(resolve_codex_executable())
+    let codex_path = resolve_codex_executable();
+    let child_path = child_path_for(&codex_path, std::env::var_os("PATH"));
+    let mut child = Command::new(&codex_path)
+        .env("PATH", child_path)
         .args(["login", "--with-access-token"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -176,6 +179,40 @@ fn resolve_codex_executable() -> PathBuf {
     PathBuf::from("codex")
 }
 
+/// Build the PATH for the spawned Codex CLI child process.
+///
+/// GUI apps launched from Finder/Dock inherit launchd's minimal PATH, and an
+/// npm-installed `codex` is a `#!/usr/bin/env node` shim — if `node` isn't on
+/// the *child's* PATH the login dies with "env: node: No such file or
+/// directory" even though the shim itself was found. Prepend the resolved
+/// codex binary's own directory (nvm/volta/npm colocate `node` with the shim)
+/// plus the same well-known bin directories used to find codex itself.
+fn child_path_for(codex_path: &Path, existing: Option<std::ffi::OsString>) -> std::ffi::OsString {
+    let mut path_dirs: Vec<PathBuf> = Vec::new();
+
+    if let Some(parent) = codex_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            path_dirs.push(parent.to_path_buf());
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        path_dirs.push(PathBuf::from("/opt/homebrew/bin"));
+        path_dirs.push(PathBuf::from("/usr/local/bin"));
+        if let Some(home) = dirs::home_dir() {
+            path_dirs.push(home.join(".local/bin"));
+            path_dirs.push(home.join(".npm-global/bin"));
+        }
+    }
+
+    if let Some(existing) = existing.as_ref() {
+        path_dirs.extend(std::env::split_paths(existing));
+    }
+
+    std::env::join_paths(path_dirs).unwrap_or_else(|_| existing.unwrap_or_default())
+}
+
 fn find_on_path(name: &str, path_var: Option<std::ffi::OsString>) -> Option<PathBuf> {
     let path_var = path_var?;
     std::env::split_paths(&path_var).find_map(|dir| {
@@ -209,7 +246,49 @@ fn redact_access_token_from_output(output: &str, token: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{create_access_token_auth_json, find_on_path, redact_access_token_from_output};
+    use super::{
+        child_path_for, create_access_token_auth_json, find_on_path,
+        redact_access_token_from_output,
+    };
+
+    #[test]
+    fn child_path_puts_codex_parent_dir_first_and_keeps_existing_entries() {
+        let path = child_path_for(
+            std::path::Path::new("/some/toolchain/bin/codex"),
+            Some(std::ffi::OsString::from("/usr/bin:/bin")),
+        );
+        let dirs: Vec<std::path::PathBuf> = std::env::split_paths(&path).collect();
+
+        assert_eq!(
+            dirs.first(),
+            Some(&std::path::PathBuf::from("/some/toolchain/bin")),
+            "node must be findable next to the resolved codex shim"
+        );
+        assert!(dirs.contains(&std::path::PathBuf::from("/usr/bin")));
+        assert!(dirs.contains(&std::path::PathBuf::from("/bin")));
+    }
+
+    #[test]
+    fn child_path_adds_no_empty_entry_for_bare_codex_name() {
+        let path = child_path_for(
+            std::path::Path::new("codex"),
+            Some(std::ffi::OsString::from("/usr/bin")),
+        );
+        let dirs: Vec<std::path::PathBuf> = std::env::split_paths(&path).collect();
+
+        assert!(!dirs.iter().any(|d| d.as_os_str().is_empty()));
+        assert!(dirs.contains(&std::path::PathBuf::from("/usr/bin")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_path_includes_well_known_bin_dirs() {
+        let path = child_path_for(std::path::Path::new("codex"), None);
+        let dirs: Vec<std::path::PathBuf> = std::env::split_paths(&path).collect();
+
+        assert!(dirs.contains(&std::path::PathBuf::from("/opt/homebrew/bin")));
+        assert!(dirs.contains(&std::path::PathBuf::from("/usr/local/bin")));
+    }
 
     #[test]
     fn find_on_path_returns_none_when_path_is_unset() {
