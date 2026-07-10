@@ -1,9 +1,7 @@
 //! Account switching logic - writes credentials to ~/.codex/auth.json
 
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -29,16 +27,23 @@ pub fn get_codex_auth_file() -> Result<PathBuf> {
     Ok(get_codex_home()?.join("auth.json"))
 }
 
-/// Switch to a specific account by writing its credentials to ~/.codex/auth.json
+/// Switch to a specific account by writing its credentials to ~/.codex/auth.json.
+///
+/// All auth modes — including `CodexAccessToken` — are materialized by writing
+/// the same `auth.json` the official Codex CLI stores after a successful login.
+/// We write it directly (atomically) rather than shelling out to
+/// `codex login --with-access-token`: that command gates login on a network
+/// fetch of the agent-identity JWKS which can hang or fail, and the file it
+/// ultimately writes is byte-for-byte what `create_auth_json` produces here.
 pub fn switch_to_account(account: &StoredAccount) -> Result<()> {
-    if let AuthData::CodexAccessToken { token, .. } = &account.auth_data {
-        return login_with_codex_access_token(token);
-    }
-
     let codex_home = get_codex_home()?;
+    write_account_auth_json(&codex_home, account)
+}
 
-    // Ensure the codex home directory exists
-    fs::create_dir_all(&codex_home)
+/// Write an account's credentials to `<codex_home>/auth.json` atomically,
+/// creating the codex home directory if it does not exist.
+fn write_account_auth_json(codex_home: &Path, account: &StoredAccount) -> Result<()> {
+    fs::create_dir_all(codex_home)
         .with_context(|| format!("Failed to create codex home: {}", codex_home.display()))?;
 
     let auth_json = create_auth_json(account)?;
@@ -82,277 +87,92 @@ fn create_auth_json(account: &StoredAccount) -> Result<AuthDotJson> {
             agent_identity: None,
             personal_access_token: None,
         }),
-        AuthData::CodexAccessToken { token, .. } => Ok(create_access_token_auth_json(token)),
+        AuthData::CodexAccessToken { token, .. } => create_access_token_auth_json(token),
     }
 }
 
-fn create_access_token_auth_json(token: &str) -> AuthDotJson {
-    let trimmed = token.trim().to_string();
-    if trimmed.starts_with("at-") {
-        AuthDotJson {
-            auth_mode: None,
-            openai_api_key: None,
-            tokens: None,
-            last_refresh: None,
-            agent_identity: None,
-            personal_access_token: Some(trimmed),
-        }
-    } else {
-        AuthDotJson {
-            auth_mode: Some("agentIdentity".to_string()),
-            openai_api_key: None,
-            tokens: None,
-            last_refresh: None,
-            agent_identity: Some(serde_json::Value::String(trimmed)),
-            personal_access_token: None,
-        }
-    }
-}
-
-fn login_with_codex_access_token(token: &str) -> Result<()> {
+fn create_access_token_auth_json(token: &str) -> Result<AuthDotJson> {
     let trimmed = token.trim();
     if trimmed.is_empty() {
         anyhow::bail!("Codex access token is empty");
     }
 
-    let codex_path = resolve_codex_executable();
-    let child_path = child_path_for(&codex_path, std::env::var_os("PATH"));
-    let mut child = Command::new(&codex_path)
-        .env("PATH", child_path)
-        .args(["login", "--with-access-token"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("Failed to start Codex CLI. Make sure `codex` is installed and on PATH")?;
-
-    {
-        let mut stdin = child
-            .stdin
-            .take()
-            .context("Failed to open Codex CLI stdin")?;
-        writeln!(stdin, "{trimmed}").context("Failed to send access token to Codex CLI")?;
+    if trimmed.starts_with("at-") {
+        Ok(AuthDotJson {
+            auth_mode: None,
+            openai_api_key: None,
+            tokens: None,
+            last_refresh: None,
+            agent_identity: None,
+            personal_access_token: Some(trimmed.to_string()),
+        })
+    } else {
+        Ok(AuthDotJson {
+            auth_mode: Some("agentIdentity".to_string()),
+            openai_api_key: None,
+            tokens: None,
+            last_refresh: None,
+            agent_identity: Some(serde_json::Value::String(trimmed.to_string())),
+            personal_access_token: None,
+        })
     }
-
-    let output = child
-        .wait_with_output()
-        .context("Failed to wait for Codex CLI login")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
-        } else {
-            format!("exit status {}", output.status)
-        };
-        let detail = redact_access_token_from_output(&detail, trimmed);
-        anyhow::bail!("Codex access token login failed: {detail}");
-    }
-
-    Ok(())
-}
-
-/// Resolve the `codex` CLI executable, falling back to well-known install
-/// locations when it isn't found on the current process's PATH.
-///
-/// GUI apps launched from Finder/Dock/Spotlight on macOS inherit launchd's
-/// minimal PATH, not the user's shell PATH — so a Homebrew-installed `codex`
-/// (e.g. under `/opt/homebrew/bin`) is invisible to `Command::new("codex")`
-/// even though it works fine from a terminal.
-fn resolve_codex_executable() -> PathBuf {
-    if let Some(path) = find_on_path("codex", std::env::var_os("PATH")) {
-        return path;
-    }
-
-    #[cfg(unix)]
-    {
-        for candidate in fallback_codex_paths(dirs::home_dir().as_deref()) {
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
-    }
-
-    PathBuf::from("codex")
-}
-
-/// Build the PATH for the spawned Codex CLI child process.
-///
-/// GUI apps launched from Finder/Dock inherit launchd's minimal PATH, and an
-/// npm-installed `codex` is a `#!/usr/bin/env node` shim — if `node` isn't on
-/// the *child's* PATH the login dies with "env: node: No such file or
-/// directory" even though the shim itself was found. Prepend the resolved
-/// codex binary's own directory (nvm/volta/npm colocate `node` with the shim)
-/// plus the same well-known bin directories used to find codex itself.
-fn child_path_for(codex_path: &Path, existing: Option<std::ffi::OsString>) -> std::ffi::OsString {
-    let mut path_dirs: Vec<PathBuf> = Vec::new();
-
-    if let Some(parent) = codex_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            path_dirs.push(parent.to_path_buf());
-        }
-    }
-
-    #[cfg(unix)]
-    {
-        path_dirs.push(PathBuf::from("/opt/homebrew/bin"));
-        path_dirs.push(PathBuf::from("/usr/local/bin"));
-        if let Some(home) = dirs::home_dir() {
-            path_dirs.push(home.join(".local/bin"));
-            path_dirs.push(home.join(".npm-global/bin"));
-        }
-    }
-
-    if let Some(existing) = existing.as_ref() {
-        path_dirs.extend(std::env::split_paths(existing));
-    }
-
-    std::env::join_paths(path_dirs).unwrap_or_else(|_| existing.unwrap_or_default())
-}
-
-fn find_on_path(name: &str, path_var: Option<std::ffi::OsString>) -> Option<PathBuf> {
-    let path_var = path_var?;
-    std::env::split_paths(&path_var).find_map(|dir| {
-        let candidate = dir.join(name);
-        candidate.is_file().then_some(candidate)
-    })
-}
-
-#[cfg(unix)]
-fn fallback_codex_paths(home: Option<&Path>) -> Vec<PathBuf> {
-    let mut candidates = vec![
-        PathBuf::from("/opt/homebrew/bin/codex"),
-        PathBuf::from("/usr/local/bin/codex"),
-    ];
-
-    if let Some(home) = home {
-        candidates.push(home.join(".local/bin/codex"));
-        candidates.push(home.join(".npm-global/bin/codex"));
-    }
-
-    candidates
-}
-
-fn redact_access_token_from_output(output: &str, token: &str) -> String {
-    if token.is_empty() {
-        return output.to_string();
-    }
-
-    output.replace(token, "[redacted access token]")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        child_path_for, create_access_token_auth_json, find_on_path,
-        redact_access_token_from_output,
-    };
+    use super::{create_access_token_auth_json, write_account_auth_json};
+    use crate::types::StoredAccount;
 
-    #[test]
-    fn child_path_puts_codex_parent_dir_first_and_keeps_existing_entries() {
-        let path = child_path_for(
-            std::path::Path::new("/some/toolchain/bin/codex"),
-            Some(std::ffi::OsString::from("/usr/bin:/bin")),
-        );
-        let dirs: Vec<std::path::PathBuf> = std::env::split_paths(&path).collect();
-
-        assert_eq!(
-            dirs.first(),
-            Some(&std::path::PathBuf::from("/some/toolchain/bin")),
-            "node must be findable next to the resolved codex shim"
-        );
-        assert!(dirs.contains(&std::path::PathBuf::from("/usr/bin")));
-        assert!(dirs.contains(&std::path::PathBuf::from("/bin")));
-    }
-
-    #[test]
-    fn child_path_adds_no_empty_entry_for_bare_codex_name() {
-        let path = child_path_for(
-            std::path::Path::new("codex"),
-            Some(std::ffi::OsString::from("/usr/bin")),
-        );
-        let dirs: Vec<std::path::PathBuf> = std::env::split_paths(&path).collect();
-
-        assert!(!dirs.iter().any(|d| d.as_os_str().is_empty()));
-        assert!(dirs.contains(&std::path::PathBuf::from("/usr/bin")));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn child_path_includes_well_known_bin_dirs() {
-        let path = child_path_for(std::path::Path::new("codex"), None);
-        let dirs: Vec<std::path::PathBuf> = std::env::split_paths(&path).collect();
-
-        assert!(dirs.contains(&std::path::PathBuf::from("/opt/homebrew/bin")));
-        assert!(dirs.contains(&std::path::PathBuf::from("/usr/local/bin")));
-    }
-
-    #[test]
-    fn find_on_path_returns_none_when_path_is_unset() {
-        assert_eq!(find_on_path("codex", None), None);
-    }
-
-    #[test]
-    fn find_on_path_returns_none_when_not_present_in_any_directory() {
-        let path_var = std::ffi::OsString::from("/definitely/does/not/exist/xyz");
-        assert_eq!(find_on_path("codex", Some(path_var)), None);
-    }
-
-    #[test]
-    fn find_on_path_locates_executable_within_a_path_directory() {
+    fn unique_codex_home(label: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "codex-switcher-find-on-path-test-{}",
-            std::process::id()
+            "codex-switcher-switch-test-{}-{}",
+            std::process::id(),
+            label
         ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let exe = dir.join("codex");
-        std::fs::write(&exe, b"").unwrap();
-
-        let path_var = std::ffi::OsString::from(dir.as_os_str());
-        let found = find_on_path("codex", Some(path_var));
-
         std::fs::remove_dir_all(&dir).ok();
-
-        assert_eq!(found.as_deref(), Some(exe.as_path()));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn fallback_codex_paths_includes_common_homebrew_prefixes() {
-        let candidates = super::fallback_codex_paths(None);
-
-        assert!(candidates.contains(&std::path::PathBuf::from("/opt/homebrew/bin/codex")));
-        assert!(candidates.contains(&std::path::PathBuf::from("/usr/local/bin/codex")));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn fallback_codex_paths_includes_home_relative_locations_when_home_is_known() {
-        let home = std::path::PathBuf::from("/Users/example");
-        let candidates = super::fallback_codex_paths(Some(&home));
-
-        assert!(candidates.contains(&home.join(".local/bin/codex")));
-        assert!(candidates.contains(&home.join(".npm-global/bin/codex")));
+        dir
     }
 
     #[test]
-    fn redacts_access_token_from_cli_error_output() {
-        let marker = ["sample", "token", "value"].join("-");
-        let output = format!("login failed for {marker}");
+    fn switching_jwt_access_token_account_writes_agent_identity_auth_json() {
+        // A successful `codex login --with-access-token` writes exactly this
+        // file; we produce it directly instead of shelling out to the CLI (whose
+        // login gates on an agent-identity JWKS fetch that can hang/fail).
+        let token = ["header", "payload", "signature"].join(".");
+        let account = StoredAccount::new_codex_access_token("K12".to_string(), token.clone());
+        let codex_home = unique_codex_home("jwt");
 
-        assert_eq!(
-            redact_access_token_from_output(&output, &marker),
-            "login failed for [redacted access token]"
-        );
+        write_account_auth_json(&codex_home, &account).expect("switch should write auth.json");
+
+        let written = std::fs::read_to_string(codex_home.join("auth.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
+        std::fs::remove_dir_all(&codex_home).ok();
+
+        assert_eq!(parsed["auth_mode"], "agentIdentity");
+        assert_eq!(parsed["agent_identity"], token);
+        assert!(parsed.get("tokens").is_none());
+    }
+
+    #[test]
+    fn switching_personal_access_token_account_writes_personal_access_token() {
+        let account =
+            StoredAccount::new_codex_access_token("K12".to_string(), "at-secret-123".to_string());
+        let codex_home = unique_codex_home("pat");
+
+        write_account_auth_json(&codex_home, &account).expect("switch should write auth.json");
+
+        let written = std::fs::read_to_string(codex_home.join("auth.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
+        std::fs::remove_dir_all(&codex_home).ok();
+
+        assert_eq!(parsed["personal_access_token"], "at-secret-123");
+        assert!(parsed.get("auth_mode").is_none());
     }
 
     #[test]
     fn creates_agent_identity_auth_json_for_codex_access_token_jwt() {
         let sample_access_token = ["header", "payload", "signature"].join(".");
-        let auth = create_access_token_auth_json(&sample_access_token);
+        let auth = create_access_token_auth_json(&sample_access_token).unwrap();
 
         assert_eq!(auth.auth_mode.as_deref(), Some("agentIdentity"));
         assert_eq!(
@@ -363,6 +183,13 @@ mod tests {
         );
         assert!(auth.tokens.is_none());
         assert!(auth.personal_access_token.is_none());
+    }
+
+    #[test]
+    fn rejects_empty_codex_access_token() {
+        let error = create_access_token_auth_json(" \n\t ").unwrap_err();
+
+        assert!(error.to_string().contains("access token is empty"));
     }
 }
 
