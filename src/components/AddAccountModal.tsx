@@ -11,17 +11,19 @@ interface AddAccountModalProps {
   isOpen: boolean;
   onClose: () => void;
   onImportFile: (source: FileSource, name: string) => Promise<void>;
+  onAddAccessToken: (accessToken: string, name: string) => Promise<void>;
   onStartOAuth: (name: string) => Promise<{ auth_url: string }>;
   onCompleteOAuth: () => Promise<unknown>;
   onCancelOAuth: () => Promise<void>;
 }
 
-type Tab = "oauth" | "import";
+type Tab = "oauth" | "import" | "accessToken";
 
 export function AddAccountModal({
   isOpen,
   onClose,
   onImportFile,
+  onAddAccessToken,
   onStartOAuth,
   onCompleteOAuth,
   onCancelOAuth,
@@ -29,6 +31,7 @@ export function AddAccountModal({
   const [activeTab, setActiveTab] = useState<Tab>("oauth");
   const [name, setName] = useState("");
   const [fileSource, setFileSource] = useState<FileSource | null>(null);
+  const [accessToken, setAccessToken] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [oauthPending, setOauthPending] = useState(false);
@@ -40,6 +43,7 @@ export function AddAccountModal({
   const resetForm = () => {
     setName("");
     setFileSource(null);
+    setAccessToken("");
     setError(null);
     setLoading(false);
     setOauthPending(false);
@@ -108,6 +112,49 @@ export function AddAccountModal({
     }
   };
 
+  const handleAddAccessToken = async () => {
+    if (!name.trim()) {
+      setError("Please enter an account name");
+      return;
+    }
+    if (!accessToken.trim()) {
+      setError("Please paste a K12 CODEX_ACCESS_TOKEN value");
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setError(null);
+      await onAddAccessToken(accessToken.trim(), name.trim());
+      handleClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setLoading(false);
+    }
+  };
+
+  const handlePrimaryAction = () => {
+    if (activeTab === "oauth") {
+      void handleOAuthLogin();
+      return;
+    }
+
+    if (activeTab === "import") {
+      void handleImportFile();
+      return;
+    }
+
+    void handleAddAccessToken();
+  };
+
+  const primaryLabel = loading
+    ? "Adding..."
+    : activeTab === "oauth"
+      ? "Generate Login Link"
+      : activeTab === "import"
+        ? "Import"
+        : "Add K12 Token";
+
   if (!isOpen) return null;
 
   return (
@@ -126,11 +173,11 @@ export function AddAccountModal({
 
         {/* Tabs */}
         <div className="flex border-b border-gray-100 dark:border-gray-800">
-          {(["oauth", "import"] as Tab[]).map((tab) => (
+          {(["oauth", "import", "accessToken"] as Tab[]).map((tab) => (
             <button
               key={tab}
               onClick={() => {
-                if (tab === "import" && oauthPending) {
+                if (tab !== "oauth" && oauthPending) {
                   void onCancelOAuth().catch((err) => {
                     console.error("Failed to cancel login:", err);
                   });
@@ -145,7 +192,11 @@ export function AddAccountModal({
                   : "text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300"
                 }`}
             >
-              {tab === "oauth" ? "ChatGPT Login" : "Import File"}
+              {tab === "oauth"
+                ? "ChatGPT Login"
+                : tab === "import"
+                  ? "Import File"
+                  : "K12 Token"}
             </button>
           ))}
         </div>
@@ -250,6 +301,28 @@ export function AddAccountModal({
             </div>
           )}
 
+          {activeTab === "accessToken" && (
+            <div className="space-y-3">
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200">
+                This option is only for K12 accounts that provide a Codex
+                <code className="mx-1 font-mono">CODEX_ACCESS_TOKEN</code>.
+                Use ChatGPT Login or Import File for other account types.
+              </div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                K12 CODEX_ACCESS_TOKEN
+              </label>
+              <input
+                type="password"
+                value={accessToken}
+                onChange={(e) => setAccessToken(e.target.value)}
+                placeholder="Paste K12 access token"
+                autoComplete="off"
+                spellCheck={false}
+                className="w-full px-4 py-2.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-gray-400 dark:focus:border-gray-500 focus:ring-1 focus:ring-gray-400 dark:focus:ring-gray-500 transition-colors font-mono text-xs"
+              />
+            </div>
+          )}
+
           {/* Error */}
           {error && (
             <div className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-lg text-red-600 dark:text-red-300 text-sm">
@@ -267,15 +340,11 @@ export function AddAccountModal({
             Cancel
           </button>
           <button
-            onClick={activeTab === "oauth" ? handleOAuthLogin : handleImportFile}
+            onClick={handlePrimaryAction}
             disabled={isPrimaryDisabled}
             className="flex-1 px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors disabled:opacity-50"
           >
-            {loading
-              ? "Adding..."
-              : activeTab === "oauth"
-                ? "Generate Login Link"
-                : "Import"}
+            {primaryLabel}
           </button>
         </div>
       </div>

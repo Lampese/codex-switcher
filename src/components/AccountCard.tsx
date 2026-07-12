@@ -226,7 +226,9 @@ export function AccountCard({
     ? account.plan_type.charAt(0).toUpperCase() + account.plan_type.slice(1)
     : account.auth_mode === "api_key"
       ? "API Key"
-      : "Unknown";
+      : account.auth_mode === "codex_access_token"
+        ? "Access Token"
+        : "Unknown";
 
   const planColors: Record<string, string> = {
     pro: "bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-700",
@@ -235,10 +237,13 @@ export function AccountCard({
     enterprise: "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-700",
     free: "bg-gray-50 text-gray-600 border-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:border-gray-700",
     api_key: "bg-orange-50 text-orange-700 border-orange-200 dark:bg-orange-900/30 dark:text-orange-300 dark:border-orange-700",
+    codex_access_token: "bg-cyan-50 text-cyan-700 border-cyan-200 dark:bg-cyan-900/30 dark:text-cyan-300 dark:border-cyan-700",
   };
 
-  const planKey = account.plan_type?.toLowerCase() || "api_key";
+  const planKey = account.plan_type?.toLowerCase() || account.auth_mode;
   const planColorClass = planColors[planKey] || planColors.free;
+  const supportsUsageStats =
+    account.auth_mode === "chat_g_p_t" || account.auth_mode === "codex_access_token";
   const showSubscriptionStatus = account.auth_mode === "chat_g_p_t";
   const subscriptionStatus = getSubscriptionStatus(account.subscription_expires_at);
   const resetCreditsCount = formatResetCreditsCount(resetCredits);
@@ -414,7 +419,7 @@ export function AccountCard({
 
       <AccountUsageStats
         accountId={account.id}
-        enabled={account.auth_mode === "chat_g_p_t"}
+        enabled={supportsUsageStats}
         defaultOpen={account.is_active}
         onStatsLoaded={handleStatsLoaded}
       />

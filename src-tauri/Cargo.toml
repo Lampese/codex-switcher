@@ -39,6 +39,8 @@ url = "2"
 flate2 = "1"
 chacha20poly1305 = "0.10"
 pbkdf2 = "0.12"
+ed25519-dalek = { version = "2.2", features = ["pkcs8"] }
+crypto_box = { version = "0.9", features = ["seal"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 plist = "1"

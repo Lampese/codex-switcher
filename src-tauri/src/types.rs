@@ -138,6 +138,31 @@ impl StoredAccount {
             last_used_at: None,
         }
     }
+
+    /// Create a new account from a Codex CLI access token.
+    pub fn new_codex_access_token(name: String, token: String) -> Self {
+        let claims = parse_codex_access_token_claims(&token);
+
+        Self {
+            id: Uuid::new_v4().to_string(),
+            name,
+            email: claims.email.clone(),
+            plan_type: claims.plan_type.clone(),
+            subscription_expires_at: None,
+            auth_mode: AuthMode::CodexAccessToken,
+            auth_data: AuthData::CodexAccessToken {
+                token,
+                account_id: claims.account_id,
+                agent_runtime_id: claims.agent_runtime_id,
+                agent_private_key: claims.agent_private_key,
+                chatgpt_user_id: claims.chatgpt_user_id,
+                chatgpt_account_is_fedramp: claims.chatgpt_account_is_fedramp,
+                task_id: None,
+            },
+            created_at: Utc::now(),
+            last_used_at: None,
+        }
+    }
 }
 
 /// Authentication mode
@@ -148,6 +173,8 @@ pub enum AuthMode {
     ApiKey,
     /// Using ChatGPT OAuth tokens
     ChatGPT,
+    /// Using a Codex CLI access token
+    CodexAccessToken,
 }
 
 /// Authentication data (credentials)
@@ -170,6 +197,29 @@ pub enum AuthData {
         /// ChatGPT account ID
         account_id: Option<String>,
     },
+    /// Codex CLI access token authentication
+    CodexAccessToken {
+        /// The raw CODEX_ACCESS_TOKEN value
+        token: String,
+        /// Account ID from token claims, when present
+        #[serde(default)]
+        account_id: Option<String>,
+        /// Agent runtime ID from agent identity JWT claims, when present
+        #[serde(default)]
+        agent_runtime_id: Option<String>,
+        /// Agent private key from agent identity JWT claims, when present
+        #[serde(default)]
+        agent_private_key: Option<String>,
+        /// ChatGPT user ID from agent identity JWT claims, when present
+        #[serde(default)]
+        chatgpt_user_id: Option<String>,
+        /// Whether this account should route through FedRAMP headers
+        #[serde(default)]
+        chatgpt_account_is_fedramp: bool,
+        /// Optional registered task ID for signed Agent Identity requests
+        #[serde(default)]
+        task_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -180,20 +230,54 @@ pub struct ChatGptIdTokenClaims {
     pub subscription_expires_at: Option<DateTime<Utc>>,
 }
 
-pub fn parse_chatgpt_id_token_claims(id_token: &str) -> ChatGptIdTokenClaims {
-    let parts: Vec<&str> = id_token.split('.').collect();
-    if parts.len() != 3 {
-        return ChatGptIdTokenClaims::default();
-    }
+#[derive(Debug, Clone, Default)]
+pub struct CodexAccessTokenClaims {
+    pub email: Option<String>,
+    pub plan_type: Option<String>,
+    pub account_id: Option<String>,
+    pub agent_runtime_id: Option<String>,
+    pub agent_private_key: Option<String>,
+    pub chatgpt_user_id: Option<String>,
+    pub chatgpt_account_is_fedramp: bool,
+}
 
-    let payload = match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[1]) {
-        Ok(bytes) => bytes,
-        Err(_) => return ChatGptIdTokenClaims::default(),
+pub fn parse_codex_access_token_claims(token: &str) -> CodexAccessTokenClaims {
+    let Some(json) = parse_jwt_payload(token) else {
+        return CodexAccessTokenClaims::default();
     };
 
-    let json: serde_json::Value = match serde_json::from_slice(&payload) {
-        Ok(value) => value,
-        Err(_) => return ChatGptIdTokenClaims::default(),
+    CodexAccessTokenClaims {
+        email: json.get("email").and_then(|v| v.as_str()).map(String::from),
+        plan_type: json
+            .get("plan_type")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        account_id: json
+            .get("account_id")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        agent_runtime_id: json
+            .get("agent_runtime_id")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        agent_private_key: json
+            .get("agent_private_key")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        chatgpt_user_id: json
+            .get("chatgpt_user_id")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        chatgpt_account_is_fedramp: json
+            .get("chatgpt_account_is_fedramp")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    }
+}
+
+pub fn parse_chatgpt_id_token_claims(id_token: &str) -> ChatGptIdTokenClaims {
+    let Some(json) = parse_jwt_payload(id_token) else {
+        return ChatGptIdTokenClaims::default();
     };
 
     let auth_claims = json.get("https://api.openai.com/auth");
@@ -216,6 +300,20 @@ pub fn parse_chatgpt_id_token_claims(id_token: &str) -> ChatGptIdTokenClaims {
     }
 }
 
+fn parse_jwt_payload(token: &str) -> Option<serde_json::Value> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(parts[1]))
+        .ok()?;
+
+    serde_json::from_slice(&payload).ok()
+}
+
 // ============================================================================
 // Types for Codex's auth.json format (for compatibility)
 // ============================================================================
@@ -223,6 +321,9 @@ pub fn parse_chatgpt_id_token_claims(id_token: &str) -> ChatGptIdTokenClaims {
 /// The official Codex auth.json format
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthDotJson {
+    /// Explicit auth mode used by newer Codex auth.json formats
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_mode: Option<String>,
     /// OpenAI API key (for API key auth mode)
     #[serde(rename = "OPENAI_API_KEY", skip_serializing_if = "Option::is_none")]
     pub openai_api_key: Option<String>,
@@ -232,6 +333,12 @@ pub struct AuthDotJson {
     /// Last token refresh timestamp
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_refresh: Option<DateTime<Utc>>,
+    /// Agent identity auth material used by CODEX_ACCESS_TOKEN JWTs
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_identity: Option<serde_json::Value>,
+    /// Personal access token auth material used by access tokens prefixed with at-
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personal_access_token: Option<String>,
 }
 
 /// Token data stored in auth.json
@@ -272,7 +379,7 @@ impl AccountInfo {
             AuthData::ChatGPT { id_token, .. } => {
                 parse_chatgpt_id_token_claims(id_token).subscription_expires_at
             }
-            AuthData::ApiKey { .. } => None,
+            AuthData::ApiKey { .. } | AuthData::CodexAccessToken { .. } => None,
         };
 
         Self {
@@ -387,14 +494,20 @@ pub struct RateLimitStatusPayload {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RateLimitDetails {
+    #[serde(alias = "primary")]
     pub primary_window: Option<RateLimitWindow>,
+    #[serde(alias = "secondary")]
     pub secondary_window: Option<RateLimitWindow>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RateLimitWindow {
     pub used_percent: f64,
+    #[serde(default)]
     pub limit_window_seconds: Option<i32>,
+    #[serde(default)]
+    pub window_duration_mins: Option<i64>,
+    #[serde(alias = "resets_at")]
     pub reset_at: Option<i64>,
 }
 
@@ -408,7 +521,10 @@ pub struct CreditStatusDetails {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_chatgpt_id_token_claims, AppSettings, DockDisplayMode, TrayDisplayMode};
+    use super::{
+        parse_chatgpt_id_token_claims, AppSettings, AuthData, AuthMode, DockDisplayMode,
+        StoredAccount, TrayDisplayMode,
+    };
     use base64::Engine;
 
     #[test]
@@ -438,5 +554,47 @@ mod tests {
         assert_eq!(settings.tray_display_mode, TrayDisplayMode::ActiveUsageText);
         assert_eq!(settings.dock_display_mode, DockDisplayMode::ShowInDock);
         assert!(settings.close_behavior_prompt_enabled);
+    }
+
+    #[test]
+    fn creates_codex_access_token_account_from_jwt_claims() {
+        let payload = r#"{"account_id":"acc_env_123","agent_runtime_id":"agent-runtime-123","agent_private_key":"private-key","chatgpt_user_id":"user-123","chatgpt_account_is_fedramp":true,"email":"token-user@example.com","plan_type":"team","exp":2098606399}"#;
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
+        let token = format!("header.{encoded}.signature");
+
+        let account =
+            StoredAccount::new_codex_access_token("Env Account".to_string(), token.clone());
+
+        assert_eq!(account.name, "Env Account");
+        assert_eq!(account.email.as_deref(), Some("token-user@example.com"));
+        assert_eq!(account.plan_type.as_deref(), Some("team"));
+        assert_eq!(account.auth_mode, AuthMode::CodexAccessToken);
+        match account.auth_data {
+            AuthData::CodexAccessToken {
+                token: stored_token,
+                account_id,
+                agent_runtime_id,
+                agent_private_key,
+                chatgpt_user_id,
+                chatgpt_account_is_fedramp,
+                task_id,
+            } => {
+                assert_eq!(stored_token, token);
+                assert_eq!(account_id.as_deref(), Some("acc_env_123"));
+                assert_eq!(agent_runtime_id.as_deref(), Some("agent-runtime-123"));
+                assert_eq!(agent_private_key.as_deref(), Some("private-key"));
+                assert_eq!(chatgpt_user_id.as_deref(), Some("user-123"));
+                assert!(chatgpt_account_is_fedramp);
+                assert_eq!(task_id, None);
+            }
+            other => panic!("expected CodexAccessToken auth data, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serializes_codex_access_token_auth_mode_as_snake_case() {
+        let encoded = serde_json::to_string(&AuthMode::CodexAccessToken).unwrap();
+
+        assert_eq!(encoded, "\"codex_access_token\"");
     }
 }

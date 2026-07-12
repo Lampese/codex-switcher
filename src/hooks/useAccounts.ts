@@ -288,6 +288,22 @@ export function useAccounts() {
     [loadAccounts, refreshUsage]
   );
 
+  const addFromAccessToken = useCallback(
+    async (accessToken: string, name: string) => {
+      try {
+        await invokeBackend<AccountInfo>("add_account_from_access_token", {
+          name,
+          accessToken,
+        });
+        const accountList = await loadAccounts();
+        await refreshUsage(accountList);
+      } catch (err) {
+        throw err;
+      }
+    },
+    [loadAccounts, refreshUsage]
+  );
+
   const startOAuthLogin = useCallback(async (accountName: string) => {
     try {
       const info = await invokeBackend<{ auth_url: string; callback_port: number }>(
@@ -426,6 +442,7 @@ export function useAccounts() {
     deleteAccount,
     renameAccount,
     importFromFile,
+    addFromAccessToken,
     exportAccountsSlimText,
     importAccountsSlimText,
     exportAccountsFullEncryptedFile,

@@ -5,9 +5,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
 use crate::auth::oauth_server::{start_oauth_login, wait_for_oauth_login, OAuthLoginResult};
-use crate::auth::{
-    add_account, load_accounts, set_active_account, switch_to_account, touch_account,
-};
+use crate::auth::{add_account, load_accounts, mutate_accounts, switch_to_account};
 use crate::types::{AccountInfo, OAuthLoginInfo};
 
 struct PendingOAuth {
@@ -59,10 +57,17 @@ pub async fn complete_login() -> Result<AccountInfo, String> {
     // Add the account to storage
     let stored = add_account(account).map_err(|e| e.to_string())?;
 
-    // Make it active and switch to it
-    set_active_account(&stored.id).map_err(|e| e.to_string())?;
-    switch_to_account(&stored).map_err(|e| e.to_string())?;
-    touch_account(&stored.id).map_err(|e| e.to_string())?;
+    // Make it active and switch to it in one locked cycle, so auth.json and
+    // the store's active account can't diverge under concurrent writers.
+    mutate_accounts(|store| {
+        switch_to_account(&stored)?;
+        store.active_account_id = Some(stored.id.clone());
+        if let Some(account) = store.accounts.iter_mut().find(|a| a.id == stored.id) {
+            account.last_used_at = Some(chrono::Utc::now());
+        }
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
 
     let store = load_accounts().map_err(|e| e.to_string())?;
     let active_id = store.active_account_id.as_deref();

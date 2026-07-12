@@ -7,6 +7,7 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::api::build_codex_access_token_headers;
 use crate::auth::{ensure_chatgpt_tokens_fresh, load_accounts, refresh_chatgpt_tokens};
 use crate::types::{AuthData, AuthMode, StoredAccount};
 
@@ -192,11 +193,8 @@ pub async fn get_account_usage_stats(account_id: String) -> Result<AccountUsageS
         .find(|account| account.id == account_id)
         .ok_or_else(|| format!("Account not found: {account_id}"))?;
 
-    if account.auth_mode != AuthMode::ChatGPT {
-        return Ok(unavailable_stats(
-            account_id,
-            "Usage stats are available for ChatGPT accounts only.",
-        ));
+    if !supports_usage_stats(account.auth_mode) {
+        return Ok(unavailable_stats(account_id, api_key_unavailable_message()));
     }
 
     fetch_profile_usage(account)
@@ -204,38 +202,74 @@ pub async fn get_account_usage_stats(account_id: String) -> Result<AccountUsageS
         .map_err(|e| e.to_string())
 }
 
+fn supports_usage_stats(auth_mode: AuthMode) -> bool {
+    matches!(auth_mode, AuthMode::ChatGPT | AuthMode::CodexAccessToken)
+}
+
+fn api_key_unavailable_message() -> &'static str {
+    "Usage stats are unavailable for API key accounts."
+}
+
 async fn fetch_profile_usage(account: &StoredAccount) -> anyhow::Result<AccountUsageStats> {
+    match account.auth_mode {
+        AuthMode::ChatGPT => fetch_chatgpt_profile_usage(account).await,
+        AuthMode::CodexAccessToken => fetch_codex_access_token_profile_usage(account).await,
+        AuthMode::ApiKey => Ok(unavailable_stats(
+            account.id.clone(),
+            api_key_unavailable_message(),
+        )),
+    }
+}
+
+async fn fetch_chatgpt_profile_usage(account: &StoredAccount) -> anyhow::Result<AccountUsageStats> {
     let fresh_account = ensure_chatgpt_tokens_fresh(account).await?;
-    let mut response = send_profile_usage_request(&fresh_account).await?;
+    let mut headers = chatgpt_headers_for_account(&fresh_account)?;
+    let mut response = send_profile_usage_request(headers.clone()).await?;
 
     if response.status() == StatusCode::UNAUTHORIZED {
         let refreshed_account = refresh_chatgpt_tokens(&fresh_account).await?;
-        response = send_profile_usage_request(&refreshed_account).await?;
-        return parse_profile_usage_with_reset_credits(&refreshed_account, response).await;
+        headers = chatgpt_headers_for_account(&refreshed_account)?;
+        response = send_profile_usage_request(headers.clone()).await?;
+        return parse_profile_usage_with_reset_credits(&refreshed_account.id, response, headers)
+            .await;
     }
 
-    parse_profile_usage_with_reset_credits(&fresh_account, response).await
+    parse_profile_usage_with_reset_credits(&fresh_account.id, response, headers).await
 }
 
-async fn send_profile_usage_request(account: &StoredAccount) -> anyhow::Result<reqwest::Response> {
+async fn fetch_codex_access_token_profile_usage(
+    account: &StoredAccount,
+) -> anyhow::Result<AccountUsageStats> {
+    let headers = build_codex_access_token_headers(account).await?;
+    let response = send_profile_usage_request(headers.clone()).await?;
+
+    parse_profile_usage_with_reset_credits(&account.id, response, headers).await
+}
+
+fn chatgpt_headers_for_account(account: &StoredAccount) -> anyhow::Result<HeaderMap> {
     let (access_token, chatgpt_account_id) = extract_chatgpt_auth(account)?;
+    build_chatgpt_headers(access_token, chatgpt_account_id)
+}
+
+async fn send_profile_usage_request(headers: HeaderMap) -> anyhow::Result<reqwest::Response> {
     let client = reqwest::Client::new();
 
     Ok(client
         .get(CHATGPT_PROFILE_USAGE_URL)
-        .headers(build_chatgpt_headers(access_token, chatgpt_account_id)?)
+        .headers(headers)
         .send()
         .await?)
 }
 
 async fn parse_profile_usage_with_reset_credits(
-    account: &StoredAccount,
+    account_id: &str,
     response: reqwest::Response,
+    headers: HeaderMap,
 ) -> anyhow::Result<AccountUsageStats> {
-    let mut stats = parse_profile_usage_response(&account.id, response).await?;
+    let mut stats = parse_profile_usage_response(account_id, response).await?;
 
     if stats.available {
-        stats.reset_credits = fetch_reset_credits(account).await.ok();
+        stats.reset_credits = fetch_reset_credits(headers).await.ok();
     }
 
     Ok(stats)
@@ -257,15 +291,11 @@ async fn parse_profile_usage_response(
     Ok(map_profile_usage(account_id, payload))
 }
 
-async fn fetch_reset_credits(account: &StoredAccount) -> anyhow::Result<AccountResetCredits> {
-    let (access_token, chatgpt_account_id) = extract_chatgpt_auth(account)?;
+async fn fetch_reset_credits(headers: HeaderMap) -> anyhow::Result<AccountResetCredits> {
     let client = reqwest::Client::new();
     let response = client
         .get(CHATGPT_RESET_CREDITS_URL)
-        .headers(build_reset_credits_headers(
-            access_token,
-            chatgpt_account_id,
-        )?)
+        .headers(build_reset_credits_headers(headers))
         .send()
         .await?;
 
@@ -421,11 +451,7 @@ fn build_chatgpt_headers(
     Ok(headers)
 }
 
-fn build_reset_credits_headers(
-    access_token: &str,
-    chatgpt_account_id: Option<&str>,
-) -> anyhow::Result<HeaderMap> {
-    let mut headers = build_chatgpt_headers(access_token, chatgpt_account_id)?;
+fn build_reset_credits_headers(mut headers: HeaderMap) -> HeaderMap {
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
     headers.insert(
         HeaderName::from_static("openai-beta"),
@@ -435,7 +461,7 @@ fn build_reset_credits_headers(
         HeaderName::from_static("originator"),
         HeaderValue::from_static("Codex Desktop"),
     );
-    Ok(headers)
+    headers
 }
 
 fn extract_chatgpt_auth(account: &StoredAccount) -> anyhow::Result<(&str, Option<&str>)> {
@@ -445,13 +471,70 @@ fn extract_chatgpt_auth(account: &StoredAccount) -> anyhow::Result<(&str, Option
             account_id,
             ..
         } => Ok((access_token.as_str(), account_id.as_deref())),
-        AuthData::ApiKey { .. } => anyhow::bail!("Account is not using ChatGPT OAuth"),
+        AuthData::ApiKey { .. } | AuthData::CodexAccessToken { .. } => {
+            anyhow::bail!("Account is not using ChatGPT OAuth")
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_stats_support_chatgpt_and_codex_access_tokens() {
+        assert!(supports_usage_stats(AuthMode::ChatGPT));
+        assert!(supports_usage_stats(AuthMode::CodexAccessToken));
+        assert!(!supports_usage_stats(AuthMode::ApiKey));
+        assert_eq!(
+            api_key_unavailable_message(),
+            "Usage stats are unavailable for API key accounts."
+        );
+    }
+
+    #[test]
+    fn reset_credit_headers_preserve_agent_identity_authentication() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("AgentAssertion signed-assertion"),
+        );
+        headers.insert(
+            HeaderName::from_static("chatgpt-account-id"),
+            HeaderValue::from_static("account-123"),
+        );
+
+        let headers = build_reset_credits_headers(headers);
+
+        assert_eq!(
+            headers
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("AgentAssertion signed-assertion")
+        );
+        assert_eq!(
+            headers
+                .get("chatgpt-account-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("account-123")
+        );
+        assert_eq!(
+            headers.get(ACCEPT).and_then(|value| value.to_str().ok()),
+            Some("application/json")
+        );
+        assert_eq!(
+            headers
+                .get("openai-beta")
+                .and_then(|value| value.to_str().ok()),
+            Some("codex-1")
+        );
+        assert_eq!(
+            headers
+                .get("originator")
+                .and_then(|value| value.to_str().ok()),
+            Some("Codex Desktop")
+        );
+    }
 
     #[test]
     fn profile_usage_response_maps_profile_stats() {

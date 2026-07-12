@@ -5,7 +5,7 @@ use base64::Engine;
 use chrono::Utc;
 use tokio::time::{sleep, Duration};
 
-use super::{load_accounts, switch_to_account, update_account_chatgpt_tokens};
+use super::{mutate_accounts, switch_to_account};
 use crate::types::{parse_chatgpt_id_token_claims, AuthData, StoredAccount};
 
 const DEFAULT_ISSUER: &str = "https://auth.openai.com";
@@ -25,7 +25,7 @@ struct RefreshTokenResponse {
 /// Returns an updated account when a refresh was performed.
 pub async fn ensure_chatgpt_tokens_fresh(account: &StoredAccount) -> Result<StoredAccount> {
     match &account.auth_data {
-        AuthData::ApiKey { .. } => Ok(account.clone()),
+        AuthData::ApiKey { .. } | AuthData::CodexAccessToken { .. } => Ok(account.clone()),
         AuthData::ChatGPT { access_token, .. } => {
             if token_expired_or_near_expiry(access_token) {
                 println!(
@@ -43,7 +43,7 @@ pub async fn ensure_chatgpt_tokens_fresh(account: &StoredAccount) -> Result<Stor
 /// Force-refresh ChatGPT OAuth tokens for an account.
 pub async fn refresh_chatgpt_tokens(account: &StoredAccount) -> Result<StoredAccount> {
     let (current_id_token, current_refresh_token, current_account_id) = match &account.auth_data {
-        AuthData::ApiKey { .. } => return Ok(account.clone()),
+        AuthData::ApiKey { .. } | AuthData::CodexAccessToken { .. } => return Ok(account.clone()),
         AuthData::ChatGPT {
             id_token,
             refresh_token,
@@ -65,27 +65,58 @@ pub async fn refresh_chatgpt_tokens(account: &StoredAccount) -> Result<StoredAcc
     let claims = parse_chatgpt_id_token_claims(&next_id_token);
     let next_account_id = claims.account_id.or(current_account_id);
 
-    let is_active = load_accounts()?.active_account_id.as_deref() == Some(account.id.as_str());
+    mutate_accounts(|store| {
+        let stored = store
+            .accounts
+            .iter_mut()
+            .find(|a| a.id == account.id)
+            .context("Account not found")?;
 
-    let updated = update_account_chatgpt_tokens(
-        &account.id,
-        next_id_token,
-        refreshed.access_token,
-        next_refresh_token,
-        next_account_id,
-        claims.email,
-        claims.plan_type,
-        claims.subscription_expires_at,
-    )?;
-
-    // Keep ~/.codex/auth.json in sync when this is the active account.
-    if is_active {
-        if let Err(err) = switch_to_account(&updated) {
-            println!("[Auth] Failed to sync active auth.json after token refresh: {err}");
+        match &mut stored.auth_data {
+            AuthData::ChatGPT {
+                id_token,
+                access_token,
+                refresh_token,
+                account_id,
+            } => {
+                *id_token = next_id_token;
+                *access_token = refreshed.access_token;
+                *refresh_token = next_refresh_token;
+                if let Some(new_account_id) = next_account_id {
+                    *account_id = Some(new_account_id);
+                }
+            }
+            AuthData::ApiKey { .. } | AuthData::CodexAccessToken { .. } => {
+                anyhow::bail!("Cannot update OAuth tokens for this account type");
+            }
         }
-    }
 
-    Ok(updated)
+        if let Some(email) = claims.email {
+            stored.email = Some(email);
+        }
+        if let Some(plan_type) = claims.plan_type {
+            stored.plan_type = Some(plan_type);
+        }
+        if let Some(expires_at) = claims.subscription_expires_at {
+            stored.subscription_expires_at = Some(expires_at);
+        }
+
+        let updated = stored.clone();
+
+        // Keep ~/.codex/auth.json in sync when this is the active account.
+        // Checked and written under the store lock so a concurrent switch
+        // can't interleave and end up with auth.json holding stale tokens or
+        // the wrong account. Best-effort: the refreshed tokens must persist
+        // even if this sync write fails (the old refresh token may already
+        // be invalidated server-side).
+        if store.active_account_id.as_deref() == Some(updated.id.as_str()) {
+            if let Err(err) = switch_to_account(&updated) {
+                println!("[Auth] Failed to sync active auth.json after token refresh: {err}");
+            }
+        }
+
+        Ok(updated)
+    })
 }
 
 /// Build a new ChatGPT account from a refresh token.

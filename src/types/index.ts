@@ -1,6 +1,6 @@
 // Types matching the Rust backend
 
-export type AuthMode = "api_key" | "chat_g_p_t";
+export type AuthMode = "api_key" | "chat_g_p_t" | "codex_access_token";
 export type DockDisplayMode = "show_in_dock" | "menu_bar_only";
 
 export interface AccountInfo {

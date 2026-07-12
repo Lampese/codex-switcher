@@ -1,8 +1,8 @@
 //! Usage query Tauri commands
 
 use crate::api::usage::{
-    fetch_chatgpt_account_metadata, get_account_usage, refresh_all_usage,
-    warmup_account as send_warmup,
+    fetch_chatgpt_account_metadata, fetch_codex_access_token_account_metadata, get_account_usage,
+    refresh_all_usage, warmup_account as send_warmup,
 };
 use crate::auth::{get_account, load_accounts, refresh_chatgpt_tokens, update_account_metadata};
 use crate::types::{AccountInfo, AuthData, UsageInfo, WarmupSummary};
@@ -53,7 +53,21 @@ pub async fn refresh_account_metadata(account_id: String) -> Result<AccountInfo,
             update_account_metadata(
                 &account_id,
                 None,
+                live_metadata.email,
+                live_metadata.plan_type,
+                Some(live_metadata.subscription_expires_at),
+            )
+            .map_err(|e| e.to_string())?
+        }
+        AuthData::CodexAccessToken { .. } => {
+            let live_metadata = fetch_codex_access_token_account_metadata(&account)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            update_account_metadata(
+                &account_id,
                 None,
+                live_metadata.email,
                 live_metadata.plan_type,
                 Some(live_metadata.subscription_expires_at),
             )

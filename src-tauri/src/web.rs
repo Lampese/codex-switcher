@@ -10,13 +10,13 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use tokio::runtime::Runtime;
 
 use crate::commands::{
-    add_account_from_auth_json_text, add_account_from_file, cancel_login, check_codex_processes,
-    complete_login, delete_account, export_accounts_full_encrypted_bytes,
-    export_accounts_slim_text, fetch_usage, get_account_usage_stats, get_active_account_info,
-    get_masked_account_ids, import_accounts_full_encrypted_bytes, import_accounts_slim_text,
-    kill_codex_processes, list_accounts, refresh_account_metadata, refresh_all_accounts_usage,
-    rename_account, set_masked_account_ids, start_login, switch_account, warmup_account,
-    warmup_all_accounts,
+    add_account_from_access_token, add_account_from_auth_json_text, add_account_from_file,
+    cancel_login, check_codex_processes, complete_login, delete_account,
+    export_accounts_full_encrypted_bytes, export_accounts_slim_text, fetch_usage,
+    get_account_usage_stats, get_active_account_info, get_masked_account_ids,
+    import_accounts_full_encrypted_bytes, import_accounts_slim_text, kill_codex_processes,
+    list_accounts, refresh_account_metadata, refresh_all_accounts_usage, rename_account,
+    set_masked_account_ids, start_login, switch_account, warmup_account, warmup_all_accounts,
 };
 
 #[derive(Debug, Deserialize)]
@@ -56,6 +56,14 @@ struct MaskedIdsArgs {
 struct UploadAuthJsonArgs {
     name: String,
     contents: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AccessTokenAccountArgs {
+    name: String,
+    #[serde(alias = "access_token")]
+    access_token: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,6 +145,10 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
         "add_account_from_auth_json_text" => {
             let args: UploadAuthJsonArgs = parse_args(payload)?;
             to_json(add_account_from_auth_json_text(args.name, args.contents).await?)
+        }
+        "add_account_from_access_token" => {
+            let args: AccessTokenAccountArgs = parse_args(payload)?;
+            to_json(add_account_from_access_token(args.name, args.access_token).await?)
         }
         "get_usage" => {
             let args: AccountIdArgs = parse_args(payload)?;
