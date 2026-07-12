@@ -356,7 +356,7 @@ export function AccountUsageStats({
     const requestId = ++requestSeq.current;
 
     if (!enabled) {
-      const next = emptyStats(accountId, "Usage stats are available for ChatGPT accounts only.");
+      const next = emptyStats(accountId, "Usage stats are unavailable for API key accounts.");
       setStats(next);
       onStatsLoaded?.(next);
       setLoading(false);

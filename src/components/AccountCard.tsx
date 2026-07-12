@@ -242,6 +242,8 @@ export function AccountCard({
 
   const planKey = account.plan_type?.toLowerCase() || account.auth_mode;
   const planColorClass = planColors[planKey] || planColors.free;
+  const supportsUsageStats =
+    account.auth_mode === "chat_g_p_t" || account.auth_mode === "codex_access_token";
   const showSubscriptionStatus = account.auth_mode === "chat_g_p_t";
   const subscriptionStatus = getSubscriptionStatus(account.subscription_expires_at);
   const resetCreditsCount = formatResetCreditsCount(resetCredits);
@@ -417,7 +419,7 @@ export function AccountCard({
 
       <AccountUsageStats
         accountId={account.id}
-        enabled={account.auth_mode === "chat_g_p_t"}
+        enabled={supportsUsageStats}
         defaultOpen={account.is_active}
         onStatsLoaded={handleStatsLoaded}
       />

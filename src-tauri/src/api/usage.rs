@@ -362,7 +362,7 @@ fn build_chatgpt_headers(
     Ok(headers)
 }
 
-async fn build_codex_access_token_headers(account: &StoredAccount) -> Result<HeaderMap> {
+pub(crate) async fn build_codex_access_token_headers(account: &StoredAccount) -> Result<HeaderMap> {
     let AuthData::CodexAccessToken {
         token,
         account_id,
