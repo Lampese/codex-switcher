@@ -378,7 +378,10 @@ fn active_session_title(active_account_id: Option<&str>) -> Option<String> {
     let active_account_id = active_account_id?;
     let cache = TRAY_USAGE.lock().ok()?;
     let usage = cache.get(active_account_id)?;
-    session_remaining_title(usage.primary_used_percent, usage.error.is_some())
+    session_remaining_title(
+        usage.primary_used_percent.or(usage.secondary_used_percent),
+        usage.error.is_some(),
+    )
 }
 
 fn active_tray_title(active_account_id: Option<&str>, mode: TrayDisplayMode) -> Option<String> {
@@ -399,19 +402,28 @@ fn active_usage_title(active_account_id: Option<&str>) -> String {
         .ok()
         .and_then(|cache| cache.get(active_account_id).cloned());
 
-    let (primary, secondary) = match usage {
-        Some(usage) if usage.error.is_none() => (
-            remaining_percent_label(usage.primary_used_percent),
-            remaining_percent_label(usage.secondary_used_percent),
-        ),
-        _ => (None, None),
-    };
+    match usage {
+        Some(usage) if usage.error.is_none() => {
+            usage_title(usage.primary_used_percent, usage.secondary_used_percent)
+        }
+        _ => "H:-- W:--".to_string(),
+    }
+}
 
-    format!(
-        "H:{} W:{}",
-        primary.as_deref().unwrap_or("--"),
-        secondary.as_deref().unwrap_or("--")
-    )
+fn usage_title(primary_used_percent: Option<f64>, secondary_used_percent: Option<f64>) -> String {
+    let mut parts = Vec::new();
+    if let Some(remaining) = remaining_percent_label(primary_used_percent) {
+        parts.push(format!("H:{remaining}"));
+    }
+    if let Some(remaining) = remaining_percent_label(secondary_used_percent) {
+        parts.push(format!("W:{remaining}"));
+    }
+
+    if parts.is_empty() {
+        "H:-- W:--".to_string()
+    } else {
+        parts.join(" ")
+    }
 }
 
 fn session_remaining_title(used_percent: Option<f64>, has_error: bool) -> Option<String> {
@@ -588,6 +600,14 @@ mod tests {
             session_remaining_title(Some(105.0), false),
             Some("0%".to_string())
         );
+    }
+
+    #[test]
+    fn usage_title_omits_missing_windows() {
+        assert_eq!(usage_title(Some(27.0), Some(82.0)), "H:73% W:18%");
+        assert_eq!(usage_title(None, Some(35.0)), "W:65%");
+        assert_eq!(usage_title(Some(27.0), None), "H:73%");
+        assert_eq!(usage_title(None, None), "H:-- W:--");
     }
 
     #[test]

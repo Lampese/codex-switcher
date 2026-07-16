@@ -113,6 +113,14 @@ function isLimitFull(usedPercent: number | null | undefined): boolean {
   return usedPercent !== null && usedPercent !== undefined && usedPercent >= LIMIT_FULL_THRESHOLD;
 }
 
+function getPreferredUsedPercent(usage: UsageInfo | undefined): number | null | undefined {
+  return usage?.primary_used_percent ?? usage?.secondary_used_percent;
+}
+
+function getPreferredResetsAt(usage: UsageInfo | undefined): number | null | undefined {
+  return usage?.primary_resets_at ?? usage?.secondary_resets_at;
+}
+
 function getTimedWarmupTargets(accounts: AccountWithUsage[]): AccountWithUsage[] {
   return accounts.filter(
     (account) =>
@@ -1167,13 +1175,13 @@ function App() {
         if (subscriptionDiff !== 0) return subscriptionDiff;
 
         const deadlineDiff =
-          getResetDeadline(a.usage?.primary_resets_at) -
-          getResetDeadline(b.usage?.primary_resets_at);
+          getResetDeadline(getPreferredResetsAt(a.usage)) -
+          getResetDeadline(getPreferredResetsAt(b.usage));
         if (deadlineDiff !== 0) return deadlineDiff;
 
         const remainingDiff =
-          getRemainingPercent(b.usage?.primary_used_percent) -
-          getRemainingPercent(a.usage?.primary_used_percent);
+          getRemainingPercent(getPreferredUsedPercent(b.usage)) -
+          getRemainingPercent(getPreferredUsedPercent(a.usage));
         if (remainingDiff !== 0) return remainingDiff;
 
         return a.name.localeCompare(b.name);
@@ -1181,21 +1189,21 @@ function App() {
 
       if (otherAccountsSort === "deadline_asc" || otherAccountsSort === "deadline_desc") {
         const deadlineDiff =
-          getResetDeadline(a.usage?.primary_resets_at) -
-          getResetDeadline(b.usage?.primary_resets_at);
+          getResetDeadline(getPreferredResetsAt(a.usage)) -
+          getResetDeadline(getPreferredResetsAt(b.usage));
         if (deadlineDiff !== 0) {
           return otherAccountsSort === "deadline_asc" ? deadlineDiff : -deadlineDiff;
         }
         const remainingDiff =
-          getRemainingPercent(b.usage?.primary_used_percent) -
-          getRemainingPercent(a.usage?.primary_used_percent);
+          getRemainingPercent(getPreferredUsedPercent(b.usage)) -
+          getRemainingPercent(getPreferredUsedPercent(a.usage));
         if (remainingDiff !== 0) return remainingDiff;
         return a.name.localeCompare(b.name);
       }
 
       const remainingDiff =
-        getRemainingPercent(b.usage?.primary_used_percent) -
-        getRemainingPercent(a.usage?.primary_used_percent);
+        getRemainingPercent(getPreferredUsedPercent(b.usage)) -
+        getRemainingPercent(getPreferredUsedPercent(a.usage));
       if (otherAccountsSort === "remaining_desc" && remainingDiff !== 0) {
         return remainingDiff;
       }
@@ -1203,8 +1211,8 @@ function App() {
         return -remainingDiff;
       }
       const deadlineDiff =
-        getResetDeadline(a.usage?.primary_resets_at) -
-        getResetDeadline(b.usage?.primary_resets_at);
+        getResetDeadline(getPreferredResetsAt(a.usage)) -
+        getResetDeadline(getPreferredResetsAt(b.usage));
       if (deadlineDiff !== 0) return deadlineDiff;
       return a.name.localeCompare(b.name);
     });

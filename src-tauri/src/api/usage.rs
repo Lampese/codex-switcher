@@ -23,6 +23,8 @@ const CHATGPT_ACCOUNTS_CHECK_API: &str =
 const CHATGPT_CODEX_RESPONSES_API: &str = "https://chatgpt.com/backend-api/codex/responses";
 const OPENAI_API: &str = "https://api.openai.com/v1";
 const CODEX_USER_AGENT: &str = "codex-cli/1.0.0";
+const SESSION_WINDOW_SECONDS: i32 = 5 * 60 * 60;
+const WEEKLY_WINDOW_SECONDS: i32 = 7 * 24 * 60 * 60;
 
 #[derive(Debug, Clone)]
 pub struct ChatGptAccountMetadata {
@@ -479,10 +481,31 @@ fn convert_payload_to_usage_info(account_id: &str, payload: RateLimitStatusPaylo
 fn extract_rate_limits(
     rate_limit: Option<RateLimitDetails>,
 ) -> (Option<RateLimitWindow>, Option<RateLimitWindow>) {
-    match rate_limit {
-        Some(details) => (details.primary_window, details.secondary_window),
-        None => (None, None),
+    let Some(details) = rate_limit else {
+        return (None, None);
+    };
+
+    match (details.primary_window, details.secondary_window) {
+        // The backend can temporarily omit the 5-hour window and promote the
+        // weekly window into primary_window. Keep UsageInfo semantic so every
+        // consumer still treats primary as session and secondary as weekly.
+        (Some(primary), None) if is_weekly_window(&primary) => (None, Some(primary)),
+        (None, Some(secondary)) if is_session_window(&secondary) => (Some(secondary), None),
+        (Some(primary), Some(secondary))
+            if is_weekly_window(&primary) && is_session_window(&secondary) =>
+        {
+            (Some(secondary), Some(primary))
+        }
+        (primary, secondary) => (primary, secondary),
     }
+}
+
+fn is_session_window(window: &RateLimitWindow) -> bool {
+    window.limit_window_seconds == Some(SESSION_WINDOW_SECONDS)
+}
+
+fn is_weekly_window(window: &RateLimitWindow) -> bool {
+    window.limit_window_seconds == Some(WEEKLY_WINDOW_SECONDS)
 }
 
 fn extract_credits(credits: Option<CreditStatusDetails>) -> Option<CreditStatusDetails> {
@@ -510,4 +533,67 @@ pub async fn refresh_all_usage(accounts: &[StoredAccount]) -> Vec<UsageInfo> {
 
     println!("[Usage] Refresh complete");
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rate_limit_window(used_percent: f64, window_seconds: i32) -> RateLimitWindow {
+        RateLimitWindow {
+            used_percent,
+            limit_window_seconds: Some(window_seconds),
+            reset_at: Some(1_800_000_000),
+        }
+    }
+
+    #[test]
+    fn keeps_legacy_session_and_weekly_windows_in_place() {
+        let (session, weekly) = extract_rate_limits(Some(RateLimitDetails {
+            primary_window: Some(rate_limit_window(27.0, SESSION_WINDOW_SECONDS)),
+            secondary_window: Some(rate_limit_window(82.0, WEEKLY_WINDOW_SECONDS)),
+        }));
+
+        assert_eq!(
+            session.and_then(|window| window.limit_window_seconds),
+            Some(SESSION_WINDOW_SECONDS)
+        );
+        assert_eq!(
+            weekly.and_then(|window| window.limit_window_seconds),
+            Some(WEEKLY_WINDOW_SECONDS)
+        );
+    }
+
+    #[test]
+    fn moves_weekly_only_primary_window_to_weekly_slot() {
+        let (session, weekly) = extract_rate_limits(Some(RateLimitDetails {
+            primary_window: Some(rate_limit_window(35.0, WEEKLY_WINDOW_SECONDS)),
+            secondary_window: None,
+        }));
+
+        assert!(session.is_none());
+        assert_eq!(weekly.map(|window| window.used_percent), Some(35.0));
+    }
+
+    #[test]
+    fn restores_semantic_order_if_backend_reverses_windows() {
+        let (session, weekly) = extract_rate_limits(Some(RateLimitDetails {
+            primary_window: Some(rate_limit_window(82.0, WEEKLY_WINDOW_SECONDS)),
+            secondary_window: Some(rate_limit_window(27.0, SESSION_WINDOW_SECONDS)),
+        }));
+
+        assert_eq!(session.map(|window| window.used_percent), Some(27.0));
+        assert_eq!(weekly.map(|window| window.used_percent), Some(82.0));
+    }
+
+    #[test]
+    fn preserves_unknown_windows_by_backend_position() {
+        let (primary, secondary) = extract_rate_limits(Some(RateLimitDetails {
+            primary_window: Some(rate_limit_window(11.0, 60 * 60)),
+            secondary_window: Some(rate_limit_window(22.0, 30 * 24 * 60 * 60)),
+        }));
+
+        assert_eq!(primary.map(|window| window.used_percent), Some(11.0));
+        assert_eq!(secondary.map(|window| window.used_percent), Some(22.0));
+    }
 }
