@@ -35,7 +35,8 @@ Choose the file for your platform:
 
 - **macOS Apple Silicon:** `Codex.Switcher_*_aarch64.dmg`
 - **macOS Intel:** `Codex.Switcher_*_x64.dmg`
-- **Windows:** `Codex.Switcher_*_x64-setup.exe` or `Codex.Switcher_*_x64_en-US.msi`
+- **Windows (installer):** `Codex.Switcher_*_x64-setup.exe` or `Codex.Switcher_*_x64_en-US.msi`
+- **Windows (portable):** `codex-switcher.exe` — single executable, no installation required
 - **Linux Debian/Ubuntu:** `Codex.Switcher_*_amd64.deb`
 - **Linux AppImage:** `Codex.Switcher_*_amd64.AppImage`
 - **Linux RPM:** `Codex.Switcher-*-1.x86_64.rpm`
@@ -47,6 +48,28 @@ Choose the file for your platform:
 > sudo xattr -dr com.apple.quarantine "/Applications/Codex Switcher.app"
 > open "/Applications/Codex Switcher.app"
 > ```
+
+### Windows Portable EXE
+
+The Windows `codex-switcher.exe` is a **self-contained executable** — no installer, no runtime, no
+registry entries. Just download and run:
+
+1. Download `codex-switcher.exe` from the latest release
+2. Place it anywhere you like (e.g. `Desktop` or `C:\Tools`)
+3. Double-click to launch
+
+All account data (tokens, settings) is stored in `%USERPROFILE%\.codex-switcher\` and
+`%USERPROFILE%\.codex\auth.json` — completely separate from the executable file.
+
+### Updating
+
+To update to a newer version:
+
+1. Right-click the Codex Switcher tray icon → **Quit**
+2. Replace the old `codex-switcher.exe` with the new one
+3. Launch the new executable
+
+Your accounts and settings are preserved — no re-login needed.
 
 ### Auto Updates
 
