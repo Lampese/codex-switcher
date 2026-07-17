@@ -142,3 +142,41 @@ pub fn has_active_login() -> Result<bool> {
         None => Ok(false),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::import_from_auth_json_contents;
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use serde_json::json;
+
+    fn auth_json(payload: serde_json::Value, account_id: &str) -> String {
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        serde_json::json!({
+            "tokens": {
+                "id_token": format!("header.{payload}.signature"),
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "account_id": account_id
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn import_blank_name_uses_email() {
+        let account = import_from_auth_json_contents(
+            &auth_json(json!({"email": "imported@example.com"}), "acct-import"),
+            "".into(),
+        )
+        .unwrap();
+        assert_eq!(account.name, "imported@example.com");
+    }
+
+    #[test]
+    fn import_without_email_uses_account_id_fallback() {
+        let account =
+            import_from_auth_json_contents(&auth_json(json!({}), "acct-87654321"), "".into())
+                .unwrap();
+        assert_eq!(account.name, "ChatGPT account (87654321)");
+    }
+}

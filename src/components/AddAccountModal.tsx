@@ -55,15 +55,10 @@ export function AddAccountModal({
   };
 
   const handleOAuthLogin = async () => {
-    if (!name.trim()) {
-      setError("Please enter an account name");
-      return;
-    }
-
     try {
       setLoading(true);
       setError(null);
-      const info = await onStartOAuth(name.trim());
+      const info = await onStartOAuth(name);
       setAuthUrl(info.auth_url);
       setOauthPending(true);
       setLoading(false);
@@ -88,10 +83,6 @@ export function AddAccountModal({
   };
 
   const handleImportFile = async () => {
-    if (!name.trim()) {
-      setError("Please enter an account name");
-      return;
-    }
     if (!fileSource) {
       setError("Please select an auth.json file");
       return;
@@ -100,7 +91,7 @@ export function AddAccountModal({
     try {
       setLoading(true);
       setError(null);
-      await onImportFile(fileSource, name.trim());
+      await onImportFile(fileSource, name);
       handleClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -152,16 +143,16 @@ export function AddAccountModal({
 
         {/* Content */}
         <div className="p-5 space-y-4">
-          {/* Account Name (always shown) */}
+          {/* Account name is optional; the backend derives one when blank. */}
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              Account Name
+              Account Name (optional)
             </label>
             <input
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="e.g., Work Account"
+              placeholder="Leave blank to use email"
               className="w-full px-4 py-2.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-gray-400 dark:focus:border-gray-500 focus:ring-1 focus:ring-gray-400 dark:focus:ring-gray-500 transition-colors"
             />
           </div>
