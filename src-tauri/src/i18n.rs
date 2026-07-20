@@ -99,9 +99,9 @@ pub fn resolved_code(language: &AppLanguage) -> &'static str {
         .unwrap_or(AppLanguage::DEFAULT_CODE)
 }
 
-pub fn text<'a>(language: &AppLanguage, key: &'a str) -> &'a str {
+pub fn text_for_code<'a>(language_code: &str, key: &'a str) -> &'a str {
     NATIVE_TRANSLATIONS
-        .get(resolved_code(language))
+        .get(language_code)
         .and_then(|translations| translations.get(key))
         .or_else(|| {
             NATIVE_TRANSLATIONS
@@ -110,6 +110,10 @@ pub fn text<'a>(language: &AppLanguage, key: &'a str) -> &'a str {
         })
         .map(String::as_str)
         .unwrap_or(key)
+}
+
+pub fn text<'a>(language: &AppLanguage, key: &'a str) -> &'a str {
+    text_for_code(resolved_code(language), key)
 }
 
 #[cfg(test)]

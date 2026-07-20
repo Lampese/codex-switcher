@@ -16,7 +16,7 @@ use crate::{
         is_codex_running_switch_block, restore_main_window, switch_account_by_id,
         window::TRAY_WINDOW,
     },
-    types::{AccountsStore, TrayDisplayMode, UsageInfo},
+    types::{AccountsStore, AppSettings, TrayDisplayMode, UsageInfo},
 };
 
 static TRAY_USAGE: LazyLock<Mutex<HashMap<String, UsageInfo>>> =
@@ -44,7 +44,9 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     #[cfg(not(target_os = "linux"))]
     create_tray_window(app)?;
 
-    let menu = build_menu(app, &load_accounts().unwrap_or_default())?;
+    let store = load_accounts().unwrap_or_default();
+    let settings = load_app_settings().unwrap_or_default();
+    let menu = build_menu(app, &store, &settings)?;
 
     #[cfg(target_os = "linux")]
     let icon = app
@@ -180,10 +182,14 @@ fn position_near_cursor<R: Runtime>(
 // Native menu (the only tray interaction on Linux; right-click on macOS/Windows)
 // ============================================================================
 
-fn build_menu<R: Runtime>(app: &AppHandle<R>, store: &AccountsStore) -> tauri::Result<Menu<R>> {
+fn build_menu<R: Runtime>(
+    app: &AppHandle<R>,
+    store: &AccountsStore,
+    settings: &AppSettings,
+) -> tauri::Result<Menu<R>> {
     let menu = Menu::new(app)?;
-    let language = load_app_settings().unwrap_or_default().language;
-    let t = |key| crate::i18n::text(&language, key);
+    let resolved_code = crate::i18n::resolved_code(&settings.language);
+    let t = |key| crate::i18n::text_for_code(resolved_code, key);
 
     if store.accounts.is_empty() {
         menu.append(
@@ -204,7 +210,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, store: &AccountsStore) -> tauri::R
 
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     #[cfg(target_os = "macos")]
-    append_dock_settings_menu(app, &menu)?;
+    append_dock_settings_menu(app, &menu, settings, resolved_code)?;
     #[cfg(target_os = "macos")]
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&MenuItemBuilder::with_id(OPEN_ITEM_ID, t("openApp")).build(app)?)?;
@@ -213,9 +219,13 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, store: &AccountsStore) -> tauri::R
 }
 
 #[cfg(target_os = "macos")]
-fn append_dock_settings_menu<R: Runtime>(app: &AppHandle<R>, menu: &Menu<R>) -> tauri::Result<()> {
-    let settings = load_app_settings().unwrap_or_default();
-    let t = |key| crate::i18n::text(&settings.language, key);
+fn append_dock_settings_menu<R: Runtime>(
+    app: &AppHandle<R>,
+    menu: &Menu<R>,
+    settings: &AppSettings,
+    resolved_code: &str,
+) -> tauri::Result<()> {
+    let t = |key| crate::i18n::text_for_code(resolved_code, key);
     let dock_settings = Submenu::with_items(
         app,
         t("dockIcon"),
@@ -307,7 +317,7 @@ fn refresh_menu_on_main_thread<R: Runtime>(app: &AppHandle<R>) {
                 store.active_account_id.as_deref(),
                 settings.tray_display_mode,
             );
-            let menu = build_menu(app, &store).map_err(|error| error.to_string())?;
+            let menu = build_menu(app, &store, &settings).map_err(|error| error.to_string())?;
             Ok((menu, title, settings.tray_display_mode))
         }) {
         Ok((menu, title, mode)) => {

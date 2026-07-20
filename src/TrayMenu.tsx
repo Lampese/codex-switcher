@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
-import type { AccountInfo, AccountUsageStats, DockDisplayMode, UsageInfo } from "./types";
+import {
+  ACCOUNT_USAGE_SOURCE_CHATGPT_BACKEND,
+  type AccountInfo,
+  type AccountUsageStats,
+  type DockDisplayMode,
+  type UsageInfo,
+} from "./types";
 import { invokeBackend, isTauriRuntime } from "./lib/platform";
 import {
   applyTheme,
@@ -151,7 +157,7 @@ function TrayMenu() {
         }
       })
     );
-  }, []);
+  }, [t]);
 
   const loadActiveStats = useCallback(async (list: AccountInfo[]) => {
     const active = list.find((account) => account.is_active);
@@ -168,7 +174,7 @@ function TrayMenu() {
         [active.id]: {
           account_id: active.id,
           available: false,
-          source: "chatgpt_backend",
+          source: ACCOUNT_USAGE_SOURCE_CHATGPT_BACKEND,
           generated_at: null,
           stats_as_of: null,
           summary: {
@@ -193,7 +199,7 @@ function TrayMenu() {
         },
       }));
     }
-  }, []);
+  }, [t]);
 
   const loadDockDisplayMode = useCallback(async () => {
     try {
@@ -218,7 +224,7 @@ function TrayMenu() {
     } finally {
       setLoading(false);
     }
-  }, [loadActiveStats, loadDockDisplayMode, loadUsage]);
+  }, [loadActiveStats, loadDockDisplayMode, loadUsage, t]);
 
   // Manual refresh: re-pull accounts and actively fetch fresh usage once.
   const handleRefresh = useCallback(async () => {
@@ -234,7 +240,7 @@ function TrayMenu() {
     } finally {
       setRefreshing(false);
     }
-  }, [loadActiveStats, loadUsage]);
+  }, [loadActiveStats, loadUsage, t]);
 
   const handleAutoWarmupToggle = useCallback(async () => {
     const next = !autoWarmupAllEnabled;
@@ -249,7 +255,7 @@ function TrayMenu() {
       setAutoWarmupAllEnabled(!next);
       setError(formatError(err, t));
     }
-  }, [autoWarmupAllEnabled]);
+  }, [autoWarmupAllEnabled, t]);
 
   const handleDockDisplayMode = useCallback(
     async (mode: DockDisplayMode) => {
@@ -265,7 +271,7 @@ function TrayMenu() {
         setError(formatError(err, t));
       }
     },
-    [dockDisplayMode]
+    [dockDisplayMode, t]
   );
 
   // Reload when the tray is reopened or accounts change elsewhere.

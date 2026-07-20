@@ -80,6 +80,8 @@ export interface AccountResetCredits {
   credits: AccountResetCredit[];
 }
 
+export const ACCOUNT_USAGE_SOURCE_CHATGPT_BACKEND = "chatgpt_backend";
+
 export interface AccountUsageStats {
   account_id: string;
   available: boolean;

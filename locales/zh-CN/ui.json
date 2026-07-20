@@ -46,7 +46,7 @@
     "sentFor": "已为 {{name}} 发送预热请求", "failedFor": "{{name}} 预热失败：{{error}}", "noneAvailable": "没有可预热的账户",
     "sentForAll": "已为全部 {{count}} 个账户发送预热请求", "sentForAll_other": "已为全部 {{count}} 个账户发送预热请求",
     "summary": "已预热 {{warmed}}/{{total}}，失败：{{failed}}", "allFailed": "全部预热失败：{{error}}",
-    "autoSentFor": "已为 {{name}} 自动预热", "autoSessionSentFor": "已为 {{name}} 执行 5 小时额度窗口自动预热", "autoWeeklySentFor": "已为 {{name}} 执行每周额度窗口自动预热", "autoFailedFor": "{{name}} 自动预热失败：{{error}}",
+    "autoSessionSentFor": "已为 {{name}} 执行 5 小时额度窗口自动预热", "autoWeeklySentFor": "已为 {{name}} 执行每周额度窗口自动预热", "autoFailedFor": "{{name}} 自动预热失败：{{error}}",
     "timedSent": "已定时预热 {{count}} 个账户", "timedSent_other": "已定时预热 {{count}} 个账户",
     "timedSummary": "定时预热：成功 {{warmed}} 个，失败 {{failed}} 个"
   },
@@ -114,14 +114,14 @@
     "source": "通过 ChatGPT 后端获取的 Codex 用量统计", "chatgptOnly": "用量统计仅适用于 ChatGPT 账户。", "unavailable": "用量统计不可用。",
     "title": "用量统计", "updated": "更新于 {{time}}", "asOf": "统计截至 {{date}}", "backend": "ChatGPT 后端", "refresh": "刷新用量统计",
     "lifetime": "累计", "today": "今天", "lastSevenDays": "最近 7 天", "lastThirtyDays": "最近 30 天", "currentStreak": "当前连续天数",
-    "peakDay": "峰值日", "tokens": "tokens", "reported": "已统计", "days": "{{count}} 天", "days_other": "{{count}} 天",
+    "peakDay": "峰值日", "tokens": "tokens", "reported": "已统计", "days": "{{count, number}} 天", "days_other": "{{count, number}} 天",
     "justNow": "刚刚", "minutesAgo": "{{count}} 分钟前", "hoursAgo": "{{count}} 小时前",
     "rangeThirty": "最近 30 天", "rangeThreeMonths": "最近 3 个月", "rangeSixMonths": "最近 6 个月", "rangeAll": "全部统计",
     "optionThirty": "30 天", "optionThreeMonths": "3 个月", "optionSixMonths": "6 个月", "optionAll": "全部",
     "dailyUnavailable": "每日活动数据不可用", "tokenActivity": "Token 活动", "tokenActivityRange": "Token 活动范围",
     "moreDetails": "更多用量详情", "longestTask": "最长任务", "longestStreak": "最长连续天数", "activityInsights": "活动分析",
     "fastMode": "快速模式", "reasoning": "推理", "skillsExplored": "使用过的技能", "totalThreads": "总线程数",
-    "mostUsedPlugins": "最常用插件", "runs": "运行 {{count}} 次", "runs_other": "运行 {{count}} 次"
+    "mostUsedPlugins": "最常用插件", "runs": "运行 {{count, number}} 次", "runs_other": "运行 {{count, number}} 次"
   },
   "fileDialog": {
     "selectAuth": "选择 auth.json 文件", "exportFull": "导出完整加密账户配置", "importFull": "导入完整加密账户配置", "noFile": "未选择文件"

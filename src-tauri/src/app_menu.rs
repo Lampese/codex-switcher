@@ -185,7 +185,8 @@ fn apply_dock_display_mode<R: Runtime>(app: &AppHandle<R>, mode: DockDisplayMode
 }
 
 fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::Result<Menu<R>> {
-    let t = |key| crate::i18n::text(&settings.language, key);
+    let resolved_code = crate::i18n::resolved_code(&settings.language);
+    let t = |key| crate::i18n::text_for_code(resolved_code, key);
     let pkg_info = app.package_info();
     let config = app.config();
     let about_metadata = AboutMetadata {

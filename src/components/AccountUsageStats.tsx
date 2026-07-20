@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type {
-  AccountDailyUsage,
-  AccountTopInvocation,
-  AccountUsageStats as AccountUsageStatsInfo,
+import {
+  ACCOUNT_USAGE_SOURCE_CHATGPT_BACKEND,
+  type AccountDailyUsage,
+  type AccountTopInvocation,
+  type AccountUsageStats as AccountUsageStatsInfo,
 } from "../types";
 import { invokeBackend } from "../lib/platform";
 import { useTranslation } from "react-i18next";
@@ -21,7 +22,7 @@ function emptyStats(accountId: string, error: string): AccountUsageStatsInfo {
   return {
     account_id: accountId,
     available: false,
-    source: "chatgpt_backend",
+    source: ACCOUNT_USAGE_SOURCE_CHATGPT_BACKEND,
     generated_at: null,
     stats_as_of: null,
     summary: {
@@ -367,7 +368,7 @@ export function AccountUsageStats({
     const requestId = ++requestSeq.current;
 
     if (!enabled) {
-      const next = emptyStats(accountId, t("stats.chatgptOnly"));
+      const next = emptyStats(accountId, "");
       setStats(next);
       onStatsLoaded?.(next);
       setLoading(false);
@@ -392,7 +393,7 @@ export function AccountUsageStats({
         setLoading(false);
       }
     }
-  }, [accountId, enabled, onStatsLoaded, t]);
+  }, [accountId, enabled, onStatsLoaded]);
 
   useEffect(() => {
     requestSeq.current += 1;
@@ -449,7 +450,7 @@ export function AccountUsageStats({
           <p className="truncate text-[11px] text-gray-500 dark:text-gray-400">
             {currentStats?.stats_as_of
               ? t("stats.asOf", { date: currentStats.stats_as_of })
-              : currentStats?.source === "chatgpt_backend" || currentStats?.source === "Codex usage stats via ChatGPT backend"
+              : currentStats?.source === ACCOUNT_USAGE_SOURCE_CHATGPT_BACKEND || currentStats?.source === "Codex usage stats via ChatGPT backend"
                 ? t("stats.source")
                 : currentStats?.source ?? t("stats.backend")}
             {generatedAt && ` · ${t("stats.updated", { time: generatedAt })}`}
@@ -496,7 +497,9 @@ export function AccountUsageStats({
           </div>
         ) : (
           <div className="rounded-lg border border-dashed border-gray-200 px-3 py-3 text-xs text-gray-500 dark:border-gray-800 dark:text-gray-400">
-            {currentStats?.error ?? t("stats.unavailable")}
+            {!enabled
+              ? t("stats.chatgptOnly")
+              : currentStats?.error || t("stats.unavailable")}
           </div>
         )}
       </div>

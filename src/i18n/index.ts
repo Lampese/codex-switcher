@@ -6,6 +6,11 @@ import { invokeBackend, isTauriRuntime } from "../lib/platform";
 export type AppLanguage = string;
 export const SYSTEM_LANGUAGE = "system";
 
+export interface AppLanguageState {
+  preference: AppLanguage;
+  resolvedCode: AppLanguage;
+}
+
 export const supportedLanguages = manifest as Array<{
   code: AppLanguage;
   label: string;
@@ -29,6 +34,7 @@ const i18nReady = i18n.use(initReactI18next).init({
   resources,
   lng: "en-US",
   fallbackLng: "en-US",
+  initAsync: false,
   interpolation: { escapeValue: false },
   returnNull: false,
 });
@@ -36,52 +42,19 @@ const i18nReady = i18n.use(initReactI18next).init({
 let languagePreference: AppLanguage = SYSTEM_LANGUAGE;
 const preferenceListeners = new Set<(language: AppLanguage) => void>();
 
-function matchSupportedLanguage(locale: string): AppLanguage | null {
-  const normalized = locale.replace(/_/g, "-").toLowerCase();
-  const exact = supportedLanguages.find(({ code }) => code.toLowerCase() === normalized);
-  if (exact) return exact.code;
-
-  if (
-    normalized.startsWith("zh-") &&
-    !normalized.startsWith("zh-cn") &&
-    !normalized.startsWith("zh-sg") &&
-    !normalized.startsWith("zh-hans")
-  ) {
-    return null;
-  }
-
-  const primary = normalized.split("-")[0];
-  return supportedLanguages.find(({ code }) => code.split("-")[0].toLowerCase() === primary)?.code ?? null;
-}
-
-function resolveLanguage(preference: AppLanguage): AppLanguage {
-  if (preference !== SYSTEM_LANGUAGE) {
-    return supportedLanguages.some(({ code }) => code === preference) ? preference : "en-US";
-  }
-
-  const browserLanguages = typeof navigator === "undefined"
-    ? []
-    : navigator.languages?.length
-      ? navigator.languages
-      : [navigator.language];
-  for (const locale of browserLanguages) {
-    const matched = matchSupportedLanguage(locale);
-    if (matched) return matched;
-  }
-  return "en-US";
-}
-
 function applyDocumentLanguage(language: string): void {
   document.documentElement.lang = language;
 }
 
-async function applyLanguage(preference: AppLanguage): Promise<void> {
+async function applyLanguage(state: AppLanguageState): Promise<void> {
   await i18nReady;
-  const language = resolveLanguage(preference);
-  languagePreference = preference;
+  const language = supportedLanguages.some(({ code }) => code === state.resolvedCode)
+    ? state.resolvedCode
+    : "en-US";
+  languagePreference = state.preference;
   await i18n.changeLanguage(language);
   applyDocumentLanguage(language);
-  preferenceListeners.forEach((listener) => listener(preference));
+  preferenceListeners.forEach((listener) => listener(state.preference));
 }
 
 export function getLanguagePreference(): AppLanguage {
@@ -96,10 +69,10 @@ export function subscribeLanguagePreference(
 }
 
 export async function initializeI18n(): Promise<void> {
-  await i18nReady;
   try {
-    const language = await invokeBackend<AppLanguage>("get_app_language");
-    await applyLanguage(language);
+    await i18nReady;
+    const state = await invokeBackend<AppLanguageState>("get_app_language");
+    await applyLanguage(state);
   } catch (error) {
     console.error("Failed to load app language:", error);
     applyDocumentLanguage("en-US");
@@ -108,8 +81,10 @@ export async function initializeI18n(): Promise<void> {
   if (isTauriRuntime()) {
     try {
       const { listen } = await import("@tauri-apps/api/event");
-      await listen<AppLanguage>("language-changed", ({ payload }) => {
-        void applyLanguage(payload);
+      await listen<AppLanguageState>("language-changed", ({ payload }) => {
+        void applyLanguage(payload).catch((error) => {
+          console.error("Failed to apply app language change:", error);
+        });
       });
     } catch (error) {
       console.error("Failed to listen for app language changes:", error);
@@ -118,8 +93,8 @@ export async function initializeI18n(): Promise<void> {
 }
 
 export async function changeAppLanguage(language: AppLanguage): Promise<void> {
-  const saved = await invokeBackend<AppLanguage>("set_app_language", { language });
-  await applyLanguage(saved);
+  const state = await invokeBackend<AppLanguageState>("set_app_language", { language });
+  await applyLanguage(state);
 }
 
 export default i18n;

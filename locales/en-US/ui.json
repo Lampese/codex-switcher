@@ -16,7 +16,7 @@
   },
   "language": {
     "label": "Language",
-    "system": "system",
+    "system": "System Default",
     "changeFailed": "Could not change language: {{error}}"
   },
   "window": {
@@ -71,7 +71,6 @@
     "sentForAll_other": "Warm-up sent for all {{count}} accounts",
     "summary": "Warmed {{warmed}}/{{total}}. Failed: {{failed}}",
     "allFailed": "Warm-up all failed: {{error}}",
-    "autoSentFor": "Auto warm-up sent for {{name}}",
     "autoSessionSentFor": "Auto 5h warm-up sent for {{name}}",
     "autoWeeklySentFor": "Auto weekly warm-up sent for {{name}}",
     "autoFailedFor": "Auto warm-up failed for {{name}}: {{error}}",
@@ -256,8 +255,8 @@
     "peakDay": "Peak day",
     "tokens": "tokens",
     "reported": "reported",
-    "days": "{{count}} day",
-    "days_other": "{{count}} days",
+    "days": "{{count, number}} day",
+    "days_other": "{{count, number}} days",
     "justNow": "just now",
     "minutesAgo": "{{count}}m ago",
     "hoursAgo": "{{count}}h ago",
@@ -281,8 +280,8 @@
     "skillsExplored": "Skills explored",
     "totalThreads": "Total threads",
     "mostUsedPlugins": "Most used plugins",
-    "runs": "{{count}} run",
-    "runs_other": "{{count}} runs"
+    "runs": "{{count, number}} run",
+    "runs_other": "{{count, number}} runs"
   },
   "fileDialog": {
     "selectAuth": "Select auth.json file",
