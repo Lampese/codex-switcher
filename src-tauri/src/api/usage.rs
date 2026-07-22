@@ -26,8 +26,7 @@ const CHATGPT_ORIGIN: &str = "https://chatgpt.com";
 
 /// A browser-like User-Agent to avoid Cloudflare bot detection.
 /// Matches a recent Chrome on Windows, the same platform Codex CLI runs from.
-const BROWSER_USER_AGENT: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
+const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
      AppleWebKit/537.36 (KHTML, like Gecko) \
      Chrome/136.0.0.0 Safari/537.36";
 const SESSION_WINDOW_SECONDS: i32 = 5 * 60 * 60;
@@ -117,9 +116,9 @@ pub async fn fetch_chatgpt_account_metadata(
         let body = response.text().await.unwrap_or_default();
         if status == StatusCode::FORBIDDEN {
             anyhow::bail!(
-                "Accounts check API blocked by Cloudflare (403). \
-                 This usually means your session tokens are stale. \
-                 Try removing and re-adding the account."
+                "Accounts check API returned 403 Forbidden. \
+                 The request was likely blocked by Cloudflare bot detection. \
+                 This is a transient network issue — please try again in a moment."
             );
         }
         anyhow::bail!("Accounts check API error: {status} - {body}");
@@ -312,9 +311,7 @@ fn build_chatgpt_headers(
     access_token: &str,
     chatgpt_account_id: Option<&str>,
 ) -> Result<HeaderMap> {
-    use reqwest::header::{
-        ACCEPT, ACCEPT_LANGUAGE, ORIGIN, REFERER,
-    };
+    use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, ORIGIN, REFERER};
 
     let mut headers = HeaderMap::new();
 
@@ -334,15 +331,9 @@ fn build_chatgpt_headers(
         ACCEPT,
         HeaderValue::from_static("application/json, text/plain, */*"),
     );
-    headers.insert(
-        ACCEPT_LANGUAGE,
-        HeaderValue::from_static("en-US,en;q=0.9"),
-    );
+    headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
     headers.insert(ORIGIN, HeaderValue::from_static(CHATGPT_ORIGIN));
-    headers.insert(
-        REFERER,
-        HeaderValue::from_static(CHATGPT_ORIGIN),
-    );
+    headers.insert(REFERER, HeaderValue::from_static(CHATGPT_ORIGIN));
 
     // Fetch metadata headers sent by the browser
     if let Ok(name) = HeaderName::from_bytes(b"sec-fetch-dest") {
