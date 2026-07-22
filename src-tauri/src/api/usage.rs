@@ -22,7 +22,14 @@ const CHATGPT_ACCOUNTS_CHECK_API: &str =
     "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27";
 const CHATGPT_CODEX_RESPONSES_API: &str = "https://chatgpt.com/backend-api/codex/responses";
 const OPENAI_API: &str = "https://api.openai.com/v1";
-const CODEX_USER_AGENT: &str = "codex-cli/1.0.0";
+const CHATGPT_ORIGIN: &str = "https://chatgpt.com";
+
+/// A browser-like User-Agent to avoid Cloudflare bot detection.
+/// Matches a recent Chrome on Windows, the same platform Codex CLI runs from.
+const BROWSER_USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
+     AppleWebKit/537.36 (KHTML, like Gecko) \
+     Chrome/136.0.0.0 Safari/537.36";
 const SESSION_WINDOW_SECONDS: i32 = 5 * 60 * 60;
 const WEEKLY_WINDOW_SECONDS: i32 = 7 * 24 * 60 * 60;
 
@@ -108,6 +115,13 @@ pub async fn fetch_chatgpt_account_metadata(
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
+        if status == StatusCode::FORBIDDEN {
+            anyhow::bail!(
+                "Accounts check API blocked by Cloudflare (403). \
+                 This usually means your session tokens are stale. \
+                 Try removing and re-adding the account."
+            );
+        }
         anyhow::bail!("Accounts check API error: {status} - {body}");
     }
 
@@ -139,6 +153,10 @@ async fn get_usage_with_chatgpt_auth(account: &StoredAccount) -> Result<UsageInf
     let (access_token, chatgpt_account_id) = extract_chatgpt_auth(&fresh_account)?;
 
     let response = send_chatgpt_usage_request(access_token, chatgpt_account_id).await?;
+
+    // 401 means the token is genuinely expired — refresh and retry once.
+    // 403 is a Cloudflare challenge or permissions error; refreshing the token
+    // would burn the refresh token unnecessarily (refresh_token_reused error).
     if response.status() == StatusCode::UNAUTHORIZED {
         println!(
             "[Usage] Unauthorized for account {}, refreshing token and retrying once",
@@ -203,6 +221,10 @@ async fn warmup_with_chatgpt_auth(account: &StoredAccount) -> Result<()> {
     let (access_token, chatgpt_account_id) = extract_chatgpt_auth(&fresh_account)?;
 
     let mut response = send_chatgpt_warmup_request(access_token, chatgpt_account_id, true).await?;
+
+    // Only refresh tokens on 401 (genuinely expired). A 403 is a Cloudflare
+    // challenge and does not indicate stale tokens — refreshing on 403 burns
+    // the refresh token and causes a refresh_token_reused error on the next call.
     if response.status() == StatusCode::UNAUTHORIZED {
         println!(
             "[Warmup] Unauthorized for account {}, refreshing token and retrying once",
@@ -231,7 +253,7 @@ async fn warmup_with_api_key(api_key: &str) -> Result<()> {
     let payload = build_warmup_payload(false, true);
     let response = client
         .post(format!("{OPENAI_API}/responses"))
-        .header(USER_AGENT, CODEX_USER_AGENT)
+        .header(USER_AGENT, BROWSER_USER_AGENT)
         .header(AUTHORIZATION, format!("Bearer {api_key}"))
         .json(&payload)
         .send()
@@ -290,12 +312,48 @@ fn build_chatgpt_headers(
     access_token: &str,
     chatgpt_account_id: Option<&str>,
 ) -> Result<HeaderMap> {
+    use reqwest::header::{
+        ACCEPT, ACCEPT_LANGUAGE, ORIGIN, REFERER,
+    };
+
     let mut headers = HeaderMap::new();
-    headers.insert(USER_AGENT, HeaderValue::from_static(CODEX_USER_AGENT));
+
+    // Use a real browser User-Agent so Cloudflare does not flag the request as
+    // a bot.  The codex-cli/1.0.0 string was the previous value and it
+    // reliably triggers the CF "Enable JavaScript and cookies" challenge.
+    headers.insert(USER_AGENT, HeaderValue::from_static(BROWSER_USER_AGENT));
+
     headers.insert(
         AUTHORIZATION,
         HeaderValue::from_str(&format!("Bearer {access_token}")).context("Invalid access token")?,
     );
+
+    // Browser-like headers that Cloudflare uses to distinguish real browsers
+    // from automated HTTP clients.
+    headers.insert(
+        ACCEPT,
+        HeaderValue::from_static("application/json, text/plain, */*"),
+    );
+    headers.insert(
+        ACCEPT_LANGUAGE,
+        HeaderValue::from_static("en-US,en;q=0.9"),
+    );
+    headers.insert(ORIGIN, HeaderValue::from_static(CHATGPT_ORIGIN));
+    headers.insert(
+        REFERER,
+        HeaderValue::from_static(CHATGPT_ORIGIN),
+    );
+
+    // Fetch metadata headers sent by the browser
+    if let Ok(name) = HeaderName::from_bytes(b"sec-fetch-dest") {
+        headers.insert(name, HeaderValue::from_static("empty"));
+    }
+    if let Ok(name) = HeaderName::from_bytes(b"sec-fetch-mode") {
+        headers.insert(name, HeaderValue::from_static("cors"));
+    }
+    if let Ok(name) = HeaderName::from_bytes(b"sec-fetch-site") {
+        headers.insert(name, HeaderValue::from_static("same-origin"));
+    }
 
     if let Some(acc_id) = chatgpt_account_id {
         println!("[Usage] Using ChatGPT Account ID: {acc_id}");
