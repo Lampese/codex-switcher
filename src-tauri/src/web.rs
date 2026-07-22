@@ -13,11 +13,12 @@ use crate::commands::{
     add_account_from_auth_json_text, add_account_from_file, cancel_login, check_codex_processes,
     complete_login, delete_account, export_accounts_full_encrypted_bytes,
     export_accounts_slim_text, fetch_usage, get_account_usage_stats, get_active_account_info,
-    get_masked_account_ids, import_accounts_full_encrypted_bytes, import_accounts_slim_text,
-    kill_codex_processes, list_accounts, refresh_account_metadata, refresh_all_accounts_usage,
-    rename_account, set_masked_account_ids, start_login, switch_account, warmup_account,
-    warmup_all_accounts,
+    get_app_language, get_masked_account_ids, import_accounts_full_encrypted_bytes,
+    import_accounts_slim_text, kill_codex_processes, list_accounts, refresh_account_metadata,
+    refresh_all_accounts_usage, rename_account, set_masked_account_ids, start_login,
+    switch_account, warmup_account, warmup_all_accounts,
 };
+use crate::types::AppLanguage;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -69,6 +70,11 @@ struct UploadEncryptedArgs {
 struct FileImportArgs {
     path: String,
     name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LanguageArgs {
+    language: AppLanguage,
 }
 
 pub fn run_lan_server(host: &str, port: u16) -> anyhow::Result<()> {
@@ -194,6 +200,11 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
         "set_masked_account_ids" => {
             let args: MaskedIdsArgs = parse_args(payload)?;
             to_json(set_masked_account_ids(args.ids).await?)
+        }
+        "get_app_language" => to_json(get_app_language()),
+        "set_app_language" => {
+            let args: LanguageArgs = parse_args(payload)?;
+            to_json(crate::commands::settings::save_language(args.language)?)
         }
         "check_codex_processes" => to_json(check_codex_processes().await?),
         "kill_codex_processes" => to_json(kill_codex_processes().await?),

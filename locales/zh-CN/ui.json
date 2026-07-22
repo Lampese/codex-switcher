@@ -1,0 +1,129 @@
+{
+  "common": {
+    "add": "添加",
+    "cancel": "取消",
+    "close": "关闭",
+    "copy": "复制",
+    "copied": "已复制",
+    "dismiss": "关闭",
+    "import": "导入",
+    "later": "稍后",
+    "open": "打开",
+    "refresh": "刷新",
+    "restart": "重启",
+    "unknown": "未知",
+    "unknownError": "未知错误"
+  },
+  "language": { "label": "语言", "system": "跟随系统", "changeFailed": "语言切换失败：{{error}}" },
+  "window": { "minimize": "最小化", "maximize": "最大化", "restore": "还原", "close": "关闭" },
+  "header": {
+    "codexRunning": "{{count}} 个 Codex 正在运行",
+    "forceClose": "强制关闭",
+    "forceCloseTitle": "强制关闭正在运行的 Codex 进程",
+    "openCodex": "打开 Codex",
+    "opening": "正在打开...",
+    "showAll": "显示所有账户名称和邮箱",
+    "hideAll": "隐藏所有账户名称和邮箱",
+    "refreshingAll": "正在刷新全部用量",
+    "refreshAll": "刷新全部用量",
+    "warmupAll": "使用所有账户发送最小流量",
+    "disableAutoAll": "关闭所有账户的自动预热",
+    "enableAutoAll": "开启所有账户的自动预热",
+    "timedTitle": "设置每天为所有账户执行预热的时间",
+    "timedWarmup": "定时预热",
+    "noTimes": "尚未添加时间。",
+    "removeTime": "移除 {{time}}",
+    "lightMode": "切换到浅色模式",
+    "darkMode": "切换到深色模式",
+    "accountMenu": "账户",
+    "addAccount": "+ 添加账户"
+  },
+  "warmup": {
+    "warming": "预热中...", "autoOn": "自动：开", "autoOff": "自动：关", "autoSession": "自动：5 小时", "autoWeekly": "自动：每周", "autoWarming": "自动预热中...",
+    "waitingWeekly": "等待每周额度重置", "timedWarming": "定时预热中...", "timedOff": "定时：关", "timedNext": "定时：{{time}}",
+    "switchedFromTray": "已从托盘切换账户。", "switchFailed": "切换失败：{{error}}", "switchBlocked": "账户切换被阻止。",
+    "closeFailed": "关闭失败：{{error}}", "switchedAfterClose": "强制关闭 Codex 后已切换账户。", "switchAfterCloseFailed": "强制关闭后切换失败：{{error}}",
+    "sentFor": "已为 {{name}} 发送预热请求", "failedFor": "{{name}} 预热失败：{{error}}", "noneAvailable": "没有可预热的账户",
+    "sentForAll": "已为全部 {{count}} 个账户发送预热请求", "sentForAll_other": "已为全部 {{count}} 个账户发送预热请求",
+    "summary": "已预热 {{warmed}}/{{total}}，失败：{{failed}}", "allFailed": "全部预热失败：{{error}}",
+    "autoSessionSentFor": "已为 {{name}} 执行 5 小时额度窗口自动预热", "autoWeeklySentFor": "已为 {{name}} 执行每周额度窗口自动预热", "autoFailedFor": "{{name}} 自动预热失败：{{error}}",
+    "timedSent": "已定时预热 {{count}} 个账户", "timedSent_other": "已定时预热 {{count}} 个账户",
+    "timedSummary": "定时预热：成功 {{warmed}} 个，失败 {{failed}} 个"
+  },
+  "backup": {
+    "exportSlim": "导出精简文本", "importSlim": "导入精简文本", "exportFull": "导出完整加密文件", "importFull": "导入完整加密文件",
+    "exporting": "正在导出...", "importing": "正在导入...", "slimExported": "已导出精简文本（{{count}} 个账户）。", "slimExportFailed": "精简文本导出失败",
+    "pasteFirst": "请先粘贴精简文本。", "importSummary": "已导入 {{imported}}，跳过 {{skipped}}（共 {{total}}）", "slimImportFailed": "精简文本导入失败",
+    "fullExported": "完整加密文件已导出。", "fullExportFailed": "完整文件导出失败", "fullImportFailed": "完整文件导入失败",
+    "keepExisting": "现有账户会被保留，只导入缺少的账户。", "secretWarning": "精简文本包含账户密钥，请妥善保管。",
+    "generating": "正在生成...", "exportPlaceholder": "导出的文本将显示在这里", "importPlaceholder": "在此粘贴配置文本",
+    "clipboardUnavailable": "剪贴板不可用，请手动复制。", "copyString": "复制文本", "importMissing": "导入缺少的账户"
+  },
+  "codex": { "opened": "Codex 已打开。", "openFailed": "打开 Codex 失败：{{error}}" },
+  "accounts": {
+    "loading": "正在加载账户...", "loadFailed": "账户加载失败", "emptyTitle": "还没有账户", "emptyBody": "添加第一个 Codex 账户以开始使用",
+    "add": "添加账户", "activeHeading": "当前账户", "otherHeading": "其他账户（{{count}}）", "sort": "排序",
+    "sortResetAsc": "重置时间：从早到晚", "sortResetDesc": "重置时间：从晚到早", "sortRemainingDesc": "剩余额度：从高到低",
+    "sortRemainingAsc": "剩余额度：从低到高", "sortExpiryAsc": "到期时间：从早到晚", "sortExpiryDesc": "到期时间：从晚到早",
+    "refreshSuccess": "用量刷新成功", "deleteConfirm": "再次点击删除以确认移除"
+  },
+  "forceClose": {
+    "switch": "强制关闭并切换账户", "processes": "强制关闭正在运行的 Codex 进程", "title": "强制关闭正在运行的 Codex 进程？",
+    "body": "这将强制关闭当前阻止账户切换的 {{count}} 个 Codex 进程。", "body_other": "这将强制关闭当前阻止账户切换的 {{count}} 个 Codex 进程。",
+    "thenSwitch": "关闭 Codex 后，Codex Switcher 将切换到 {{name}}。", "warning": "Codex 中未保存的工作可能会丢失。", "closing": "正在强制关闭...",
+    "noneFound": "未发现正在运行的 Codex 进程。", "closed": "已强制关闭 {{count}} 个 Codex 会话。", "closed_other": "已强制关闭 {{count}} 个 Codex 会话。",
+    "partial": "已强制关闭 {{closed}}/{{total}} 个 Codex 会话，仍有 {{remaining}} 个正在运行。", "couldNotClose": "无法强制关闭 {{count}} 个 Codex 会话。",
+    "couldNotClose_other": "无法强制关闭 {{count}} 个 Codex 会话。", "failed": "强制关闭失败：{{error}}"
+  },
+  "closeBehavior": {
+    "title": "在程序坞中保留 Codex Switcher？", "body": "窗口关闭后，Codex Switcher 可以保留在程序坞中，也可以仅显示在菜单栏。",
+    "changeLater": "之后可随时在托盘弹窗中更改。", "dontAsk": "不再询问", "keepDock": "保留在程序坞", "menuBarOnly": "仅菜单栏"
+  },
+  "addAccount": {
+    "title": "添加账户", "chatgptLogin": "ChatGPT 登录", "importFile": "导入文件", "name": "账户名称", "namePlaceholder": "例如：工作账户",
+    "nameRequired": "请输入账户名称", "fileRequired": "请选择 auth.json 文件", "waiting": "正在等待浏览器登录...",
+    "openLink": "请在浏览器中打开以下链接继续：", "copyLinkManually": "剪贴板不可用，请手动复制链接。", "copied": "已复制！",
+    "remoteOauthWarning": "OAuth 登录必须在运行本程序的同一台主机上完成，因为回调会跳转到 localhost。",
+    "loginHelp": "点击下方按钮生成登录链接，然后在浏览器中打开并完成认证。", "selectFile": "选择 auth.json 文件", "browse": "浏览...",
+    "importHelp": "从已有的 Codex auth.json 文件导入凭据", "adding": "正在添加...", "generateLink": "生成登录链接"
+  },
+  "accountCard": {
+    "never": "从未", "justNow": "刚刚", "secondsAgo": "{{count}} 秒前", "minutesAgo": "{{count}} 分钟前", "hoursAgo": "{{count}} 小时前",
+    "expiryUnavailable": "到期时间不可用", "expired": "已于 {{date}} 到期", "until": "有效期至 {{date}}", "resetCount": "{{count}} 次重置",
+    "resetCount_other": "{{count}} 次重置", "closest": "最近 {{date}}", "closestExpires": "最近一批于 {{date}} 到期", "apiKey": "API 密钥",
+    "rename": "点击重命名", "showInfo": "显示信息", "hideInfo": "隐藏信息", "lastUpdated": "最后更新：{{time}}", "active": "当前使用",
+    "closeProcesses": "请先关闭所有 Codex 进程", "switching": "切换中...", "codexRunning": "Codex 正在运行", "switch": "切换",
+    "warmupSending": "正在发送预热请求...", "warmupSend": "发送最小预热请求", "autoAll": "已为所有账户开启自动预热",
+    "autoDisable": "关闭此账户的自动预热", "autoEnable": "开启此账户的自动预热", "refreshUsage": "刷新用量", "remove": "移除账户"
+  },
+  "usage": {
+    "now": "现在", "seconds": "{{count}} 秒", "minutes": "{{count}} 分钟", "hours": "{{count}} 小时", "hoursMinutes": "{{hours}} 小时 {{minutes}} 分钟", "days": "{{count}} 天",
+    "left": "剩余 {{percent}}%", "resets": "{{time}} 后重置", "fetching": "正在获取用量...", "noData": "没有速率限制数据",
+    "fiveHour": "5 小时限制", "weekly": "每周限制", "credits": "余额：{{balance}}"
+  },
+  "updates": {
+    "available": "发现新版本：v{{version}}", "update": "更新", "downloading": "正在下载更新...", "ready": "更新已就绪，重启后生效。", "failed": "更新失败：{{error}}"
+  },
+  "tray": {
+    "loading": "正在加载...", "noAccounts": "尚未配置账户", "session": "会话", "weekly": "每周",
+    "resetsNow": "现在重置", "resetsIn": "{{time}} 后重置", "usageUnavailable": "用量不可用",
+    "today": "今天", "lastSevenDays": "最近 7 天", "dock": "程序坞", "show": "显示", "menuBar": "菜单栏",
+    "openApp": "打开 Codex Switcher", "quit": "退出"
+  },
+  "stats": {
+    "source": "通过 ChatGPT 后端获取的 Codex 用量统计", "chatgptOnly": "用量统计仅适用于 ChatGPT 账户。", "unavailable": "用量统计不可用。",
+    "title": "用量统计", "updated": "更新于 {{time}}", "asOf": "统计截至 {{date}}", "backend": "ChatGPT 后端", "refresh": "刷新用量统计",
+    "lifetime": "累计", "today": "今天", "lastSevenDays": "最近 7 天", "lastThirtyDays": "最近 30 天", "currentStreak": "当前连续天数",
+    "peakDay": "峰值日", "tokens": "tokens", "reported": "已统计", "days": "{{count, number}} 天", "days_other": "{{count, number}} 天",
+    "justNow": "刚刚", "minutesAgo": "{{count}} 分钟前", "hoursAgo": "{{count}} 小时前",
+    "rangeThirty": "最近 30 天", "rangeThreeMonths": "最近 3 个月", "rangeSixMonths": "最近 6 个月", "rangeAll": "全部统计",
+    "optionThirty": "30 天", "optionThreeMonths": "3 个月", "optionSixMonths": "6 个月", "optionAll": "全部",
+    "dailyUnavailable": "每日活动数据不可用", "tokenActivity": "Token 活动", "tokenActivityRange": "Token 活动范围",
+    "moreDetails": "更多用量详情", "longestTask": "最长任务", "longestStreak": "最长连续天数", "activityInsights": "活动分析",
+    "fastMode": "快速模式", "reasoning": "推理", "skillsExplored": "使用过的技能", "totalThreads": "总线程数",
+    "mostUsedPlugins": "最常用插件", "runs": "运行 {{count, number}} 次", "runs_other": "运行 {{count, number}} 次"
+  },
+  "fileDialog": {
+    "selectAuth": "选择 auth.json 文件", "exportFull": "导出完整加密账户配置", "importFull": "导入完整加密账户配置", "noFile": "未选择文件"
+  }
+}

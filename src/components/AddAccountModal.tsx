@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import {
   describeFileSource,
   isTauriRuntime,
@@ -26,6 +27,7 @@ export function AddAccountModal({
   onCompleteOAuth,
   onCancelOAuth,
 }: AddAccountModalProps) {
+  const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<Tab>("oauth");
   const [name, setName] = useState("");
   const [fileSource, setFileSource] = useState<FileSource | null>(null);
@@ -56,7 +58,7 @@ export function AddAccountModal({
 
   const handleOAuthLogin = async () => {
     if (!name.trim()) {
-      setError("Please enter an account name");
+      setError(t("addAccount.nameRequired"));
       return;
     }
 
@@ -80,7 +82,7 @@ export function AddAccountModal({
 
   const handleSelectFile = async () => {
     try {
-      const selected = await pickAuthJsonFile();
+      const selected = await pickAuthJsonFile(t("fileDialog.selectAuth"));
       if (selected) setFileSource(selected);
     } catch (err) {
       console.error("Failed to open file dialog:", err);
@@ -89,11 +91,11 @@ export function AddAccountModal({
 
   const handleImportFile = async () => {
     if (!name.trim()) {
-      setError("Please enter an account name");
+      setError(t("addAccount.nameRequired"));
       return;
     }
     if (!fileSource) {
-      setError("Please select an auth.json file");
+      setError(t("addAccount.fileRequired"));
       return;
     }
 
@@ -115,7 +117,7 @@ export function AddAccountModal({
       <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-md mx-4 shadow-xl">
         {/* Header */}
         <div className="flex items-center justify-between p-5 border-b border-gray-100 dark:border-gray-800">
-          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Add Account</h2>
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">{t("addAccount.title")}</h2>
           <button
             onClick={handleClose}
             className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
@@ -145,7 +147,7 @@ export function AddAccountModal({
                   : "text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300"
                 }`}
             >
-              {tab === "oauth" ? "ChatGPT Login" : "Import File"}
+              {tab === "oauth" ? t("addAccount.chatgptLogin") : t("addAccount.importFile")}
             </button>
           ))}
         </div>
@@ -155,13 +157,13 @@ export function AddAccountModal({
           {/* Account Name (always shown) */}
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              Account Name
+              {t("addAccount.name")}
             </label>
             <input
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="e.g., Work Account"
+              placeholder={t("addAccount.namePlaceholder")}
               className="w-full px-4 py-2.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-gray-400 dark:focus:border-gray-500 focus:ring-1 focus:ring-gray-400 dark:focus:ring-gray-500 transition-colors"
             />
           </div>
@@ -172,9 +174,9 @@ export function AddAccountModal({
               {oauthPending ? (
                 <div className="text-center py-4">
                   <div className="animate-spin h-8 w-8 border-2 border-gray-900 dark:border-gray-100 border-t-transparent rounded-full mx-auto mb-3"></div>
-                  <p className="text-gray-700 dark:text-gray-300 font-medium mb-2">Waiting for browser login...</p>
+                  <p className="text-gray-700 dark:text-gray-300 font-medium mb-2">{t("addAccount.waiting")}</p>
                   <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
-                    Please open the following link in your browser to proceed:
+                    {t("addAccount.openLink")}
                   </p>
                   <div className="flex items-center gap-2 mb-2 bg-gray-50 dark:bg-gray-800 p-2 rounded-lg border border-gray-200 dark:border-gray-700">
                     <input
@@ -192,7 +194,7 @@ export function AddAccountModal({
                             setTimeout(() => setCopied(false), 2000);
                           })
                           .catch(() => {
-                            setError("Clipboard unavailable. Copy the link manually.");
+                            setError(t("addAccount.copyLinkManually"));
                           });
                       }}
                       className={`px-3 py-1.5 border rounded text-xs font-medium transition-colors shrink-0 
@@ -201,7 +203,7 @@ export function AddAccountModal({
                           : "bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-800"
                         }`}
                     >
-                      {copied ? "Copied!" : "Copy"}
+                      {copied ? t("addAccount.copied") : t("common.copy")}
                     </button>
                     <button
                       onClick={() => {
@@ -209,20 +211,18 @@ export function AddAccountModal({
                       }}
                       className="px-3 py-1.5 bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 border border-gray-900 dark:border-gray-100 rounded text-xs font-medium text-white dark:text-gray-900 transition-colors shrink-0"
                     >
-                      Open
+                      {t("common.open")}
                     </button>
                   </div>
                   {!tauriRuntime && (
                     <p className="text-xs text-amber-600">
-                      OAuth login must finish on the same host machine because the callback
-                      redirects to `localhost`.
+                      {t("addAccount.remoteOauthWarning")}
                     </p>
                   )}
                 </div>
               ) : (
                 <p>
-                  Click the button below to generate a login link.
-                  You will need to open it in your browser to authenticate.
+                  {t("addAccount.loginHelp")}
                 </p>
               )}
             </div>
@@ -231,21 +231,21 @@ export function AddAccountModal({
           {activeTab === "import" && (
             <div>
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Select auth.json file
+                {t("addAccount.selectFile")}
               </label>
               <div className="flex gap-2">
                 <div className="flex-1 px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-sm text-gray-600 dark:text-gray-300 truncate">
-                  {describeFileSource(fileSource)}
+                  {fileSource ? describeFileSource(fileSource) : t("fileDialog.noFile")}
                 </div>
                 <button
                   onClick={handleSelectFile}
                   className="px-4 py-2.5 bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 border border-gray-200 dark:border-gray-700 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-200 transition-colors whitespace-nowrap"
                 >
-                  Browse...
+                  {t("addAccount.browse")}
                 </button>
               </div>
               <p className="text-xs text-gray-400 dark:text-gray-500 mt-2">
-                Import credentials from an existing Codex auth.json file
+                {t("addAccount.importHelp")}
               </p>
             </div>
           )}
@@ -264,7 +264,7 @@ export function AddAccountModal({
             onClick={handleClose}
             className="flex-1 px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors"
           >
-            Cancel
+            {t("common.cancel")}
           </button>
           <button
             onClick={activeTab === "oauth" ? handleOAuthLogin : handleImportFile}
@@ -272,10 +272,10 @@ export function AddAccountModal({
             className="flex-1 px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors disabled:opacity-50"
           >
             {loading
-              ? "Adding..."
+              ? t("addAccount.adding")
               : activeTab === "oauth"
-                ? "Generate Login Link"
-                : "Import"}
+                ? t("addAccount.generateLink")
+                : t("common.import")}
           </button>
         </div>
       </div>

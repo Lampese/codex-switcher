@@ -6,7 +6,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "pnpm check:i18n && tsc && vite build",
+    "check:i18n": "node scripts/check-i18n.mjs",
+    "check:i18n:strict": "node scripts/check-i18n.mjs --strict",
     "preview": "vite preview",
     "tauri": "sh ./scripts/tauri.sh",
     "tauri:win": "tauri",
@@ -26,8 +28,10 @@
     "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-process": "^2",
     "@tauri-apps/plugin-updater": "^2.10.0",
+    "i18next": "^26.3.4",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "react-i18next": "^17.0.8"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.18",

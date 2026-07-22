@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type {
-  AccountDailyUsage,
-  AccountTopInvocation,
-  AccountUsageStats as AccountUsageStatsInfo,
+import {
+  ACCOUNT_USAGE_SOURCE_CHATGPT_BACKEND,
+  type AccountDailyUsage,
+  type AccountTopInvocation,
+  type AccountUsageStats as AccountUsageStatsInfo,
 } from "../types";
 import { invokeBackend } from "../lib/platform";
+import { useTranslation } from "react-i18next";
+import appI18n from "../i18n";
 
 const PROFILE_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
@@ -19,7 +22,7 @@ function emptyStats(accountId: string, error: string): AccountUsageStatsInfo {
   return {
     account_id: accountId,
     available: false,
-    source: "Codex usage stats via ChatGPT backend",
+    source: ACCOUNT_USAGE_SOURCE_CHATGPT_BACKEND,
     generated_at: null,
     stats_as_of: null,
     summary: {
@@ -55,7 +58,7 @@ function formatTokens(tokens: number | null | undefined): string {
 
 function formatNumber(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return "--";
-  return new Intl.NumberFormat().format(value);
+  return new Intl.NumberFormat(appI18n.resolvedLanguage ?? "en-US").format(value);
 }
 
 function formatPercent(value: number | null | undefined): string {
@@ -65,17 +68,19 @@ function formatPercent(value: number | null | undefined): string {
 
 function formatDuration(seconds: number | null | undefined): string {
   if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return "--";
-  if (seconds < 60) return `${seconds}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 60) return appI18n.t("usage.seconds", { count: seconds });
+  if (seconds < 3600) return appI18n.t("usage.minutes", { count: Math.floor(seconds / 60) });
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
-  return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+  return minutes > 0
+    ? appI18n.t("usage.hoursMinutes", { hours, minutes })
+    : appI18n.t("usage.hours", { count: hours });
 }
 
 function formatDateLabel(date: string): string {
   const parsed = new Date(`${date}T12:00:00`);
   if (Number.isNaN(parsed.getTime())) return date;
-  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(parsed);
+  return new Intl.DateTimeFormat(appI18n.resolvedLanguage ?? "en-US", { month: "short", day: "numeric" }).format(parsed);
 }
 
 function formatGeneratedAt(value: string | null): string {
@@ -83,10 +88,10 @@ function formatGeneratedAt(value: string | null): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
   const diff = Date.now() - date.getTime();
-  if (diff < 60_000) return "just now";
-  if (diff < 60 * 60_000) return `${Math.floor(diff / 60_000)}m ago`;
-  if (diff < 24 * 60 * 60_000) return `${Math.floor(diff / (60 * 60_000))}h ago`;
-  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(date);
+  if (diff < 60_000) return appI18n.t("stats.justNow");
+  if (diff < 60 * 60_000) return appI18n.t("stats.minutesAgo", { count: Math.floor(diff / 60_000) });
+  if (diff < 24 * 60 * 60_000) return appI18n.t("stats.hoursAgo", { count: Math.floor(diff / (60 * 60_000)) });
+  return new Intl.DateTimeFormat(appI18n.resolvedLanguage ?? "en-US", { month: "short", day: "numeric" }).format(date);
 }
 
 function dayKey(offset: number): string {
@@ -105,13 +110,6 @@ function sumDays(daily: AccountDailyUsage[], days: number): number {
 
 type ActivityRange = 30 | 90 | 180 | "all";
 
-const ACTIVITY_RANGE_OPTIONS: { value: ActivityRange; label: string }[] = [
-  { value: 30, label: "30d" },
-  { value: 90, label: "3 mo" },
-  { value: 180, label: "6 mo" },
-  { value: "all", label: "All" },
-];
-
 function activityRangeDays(range: ActivityRange, daily: AccountDailyUsage[]): number {
   if (range !== "all") return range;
   return Math.max(30, daily.length);
@@ -120,13 +118,13 @@ function activityRangeDays(range: ActivityRange, daily: AccountDailyUsage[]): nu
 function activityRangeLabel(range: ActivityRange): string {
   switch (range) {
     case 30:
-      return "Last 30 days";
+      return appI18n.t("stats.rangeThirty");
     case 90:
-      return "Last 3 months";
+      return appI18n.t("stats.rangeThreeMonths");
     case 180:
-      return "Last 6 months";
+      return appI18n.t("stats.rangeSixMonths");
     case "all":
-      return "All reported";
+      return appI18n.t("stats.rangeAll");
   }
 }
 
@@ -161,6 +159,7 @@ function StatTile({ label, value, sub }: { label: string; value: string; sub?: s
 }
 
 function TokenActivity({ daily }: { daily: AccountDailyUsage[] }) {
+  const { t } = useTranslation();
   const [range, setRange] = useState<ActivityRange>(30);
   const [hoveredDate, setHoveredDate] = useState<string | null>(null);
   const bars = useMemo(() => recentDailyBars(daily, range), [daily, range]);
@@ -170,7 +169,7 @@ function TokenActivity({ daily }: { daily: AccountDailyUsage[] }) {
   if (bars.length === 0 || !bars.some((day) => day.tokens > 0)) {
     return (
       <div className="flex h-14 items-center justify-center rounded-lg border border-dashed border-gray-200 text-[11px] text-gray-400 dark:border-gray-800 dark:text-gray-500">
-        Daily activity unavailable
+        {t("stats.dailyUnavailable")}
       </div>
     );
   }
@@ -178,7 +177,7 @@ function TokenActivity({ daily }: { daily: AccountDailyUsage[] }) {
   return (
     <div className="rounded-lg border border-gray-200 bg-white px-3 pb-3 pt-2 dark:border-gray-800 dark:bg-gray-950/40">
       <div className="mb-2 flex items-center justify-between text-[11px]">
-        <span className="font-medium text-gray-600 dark:text-gray-300">Token activity</span>
+        <span className="font-medium text-gray-600 dark:text-gray-300">{t("stats.tokenActivity")}</span>
         <div className="flex items-center gap-2">
           <span className="text-gray-400 dark:text-gray-500">{activityRangeLabel(range)}</span>
           <select
@@ -188,9 +187,14 @@ function TokenActivity({ daily }: { daily: AccountDailyUsage[] }) {
               setRange(value === "all" ? "all" : (Number(value) as ActivityRange));
             }}
             className="h-6 rounded-md border border-gray-200 bg-gray-50 px-1.5 text-[11px] text-gray-600 outline-none dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300"
-            aria-label="Token activity range"
+            aria-label={t("stats.tokenActivityRange")}
           >
-            {ACTIVITY_RANGE_OPTIONS.map((option) => (
+            {([
+              { value: 30, label: t("stats.optionThirty") },
+              { value: 90, label: t("stats.optionThreeMonths") },
+              { value: 180, label: t("stats.optionSixMonths") },
+              { value: "all", label: t("stats.optionAll") },
+            ] as { value: ActivityRange; label: string }[]).map((option) => (
               <option key={option.label} value={option.value}>
                 {option.label}
               </option>
@@ -245,6 +249,7 @@ function DetailPanel({
   summary: AccountUsageStatsInfo["summary"];
   topInvocations: AccountTopInvocation[];
 }) {
+  const { t } = useTranslation();
   const hasActivity =
     activity.fast_mode_percent !== null ||
     activity.reasoning_effort !== null ||
@@ -259,7 +264,7 @@ function DetailPanel({
       className="rounded-lg border border-gray-200 bg-gray-50 transition-colors dark:border-gray-800 dark:bg-gray-950/50"
     >
       <summary className="flex cursor-pointer list-none items-center justify-between rounded-lg px-3 py-2 text-[12px] font-semibold text-gray-700 transition-colors hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-900">
-        More usage details
+        {t("stats.moreDetails")}
         <span className="flex h-6 w-6 items-center justify-center rounded-md bg-white text-gray-500 transition-colors dark:bg-gray-900 dark:text-gray-400">
           <svg
             className={`h-3.5 w-3.5 transition-transform ${open ? "rotate-180" : ""}`}
@@ -277,33 +282,38 @@ function DetailPanel({
       </summary>
       <div className="grid gap-3 border-t border-gray-200 p-3 dark:border-gray-800 sm:grid-cols-2">
         <div className="grid grid-cols-3 gap-2 sm:col-span-2">
-          <StatTile label="Last 30 days" value={formatTokens(thirtyDayTokens)} sub="reported" />
-          <StatTile label="Longest task" value={formatDuration(summary.longest_task_seconds)} />
-          <StatTile label="Longest streak" value={`${formatNumber(summary.longest_streak_days)} days`} />
+          <StatTile label={t("stats.lastThirtyDays")} value={formatTokens(thirtyDayTokens)} sub={t("stats.reported")} />
+          <StatTile label={t("stats.longestTask")} value={formatDuration(summary.longest_task_seconds)} />
+          <StatTile
+            label={t("stats.longestStreak")}
+            value={summary.longest_streak_days === null
+              ? "--"
+              : t("stats.days", { count: summary.longest_streak_days })}
+          />
         </div>
 
         {hasActivity && (
           <div className="space-y-1.5">
             <div className="mb-1 text-[11px] font-semibold text-gray-600 dark:text-gray-300">
-              Activity insights
+              {t("stats.activityInsights")}
             </div>
             <div className="flex justify-between gap-2 text-[11px]">
-              <span className="text-gray-500 dark:text-gray-400">Fast mode</span>
+              <span className="text-gray-500 dark:text-gray-400">{t("stats.fastMode")}</span>
               <span className="text-gray-800 dark:text-gray-100">{formatPercent(activity.fast_mode_percent)}</span>
             </div>
             <div className="flex justify-between gap-2 text-[11px]">
-              <span className="text-gray-500 dark:text-gray-400">Reasoning</span>
+              <span className="text-gray-500 dark:text-gray-400">{t("stats.reasoning")}</span>
               <span className="text-gray-800 dark:text-gray-100">
                 {activity.reasoning_effort ?? "--"}
                 {activity.reasoning_effort_percent !== null && ` · ${formatPercent(activity.reasoning_effort_percent)}`}
               </span>
             </div>
             <div className="flex justify-between gap-2 text-[11px]">
-              <span className="text-gray-500 dark:text-gray-400">Skills explored</span>
+              <span className="text-gray-500 dark:text-gray-400">{t("stats.skillsExplored")}</span>
               <span className="text-gray-800 dark:text-gray-100">{formatNumber(activity.skills_explored)}</span>
             </div>
             <div className="flex justify-between gap-2 text-[11px]">
-              <span className="text-gray-500 dark:text-gray-400">Total threads</span>
+              <span className="text-gray-500 dark:text-gray-400">{t("stats.totalThreads")}</span>
               <span className="text-gray-800 dark:text-gray-100">{formatNumber(activity.total_threads)}</span>
             </div>
           </div>
@@ -312,7 +322,7 @@ function DetailPanel({
         {topInvocations.length > 0 && (
           <div className="space-y-1.5">
             <div className="mb-1 text-[11px] font-semibold text-gray-600 dark:text-gray-300">
-              Most used plugins
+              {t("stats.mostUsedPlugins")}
             </div>
             {topInvocations.slice(0, 5).map((invocation) => (
               <InvocationRow
@@ -328,6 +338,7 @@ function DetailPanel({
 }
 
 function InvocationRow({ invocation }: { invocation: AccountTopInvocation }) {
+  const { t } = useTranslation();
   const prefix = invocation.kind === "plugin" ? "@" : "$";
   return (
     <div className="flex items-center justify-between gap-2 text-[11px]">
@@ -335,7 +346,7 @@ function InvocationRow({ invocation }: { invocation: AccountTopInvocation }) {
         {prefix}{invocation.display_name}
       </span>
       <span className="shrink-0 text-gray-500 dark:text-gray-400">
-        {formatNumber(invocation.usage_count)} runs
+        {t("stats.runs", { count: invocation.usage_count })}
       </span>
     </div>
   );
@@ -347,6 +358,7 @@ export function AccountUsageStats({
   defaultOpen = false,
   onStatsLoaded,
 }: AccountUsageStatsProps) {
+  const { t } = useTranslation();
   const [panelOpen, setPanelOpen] = useState(defaultOpen);
   const [stats, setStats] = useState<AccountUsageStatsInfo | null>(null);
   const [loading, setLoading] = useState(false);
@@ -356,7 +368,7 @@ export function AccountUsageStats({
     const requestId = ++requestSeq.current;
 
     if (!enabled) {
-      const next = emptyStats(accountId, "Usage stats are available for ChatGPT accounts only.");
+      const next = emptyStats(accountId, "");
       setStats(next);
       onStatsLoaded?.(next);
       setLoading(false);
@@ -423,10 +435,10 @@ export function AccountUsageStats({
               <path d="M4 19h16" strokeLinecap="round" />
               <path d="M8 15l3-4 3 2 4-6" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
-          <span className="truncate">Usage Stats</span>
+          <span className="truncate">{t("stats.title")}</span>
           {generatedAt && (
             <span className="truncate text-[11px] font-normal text-gray-500 dark:text-gray-400">
-              updated {generatedAt}
+              {t("stats.updated", { time: generatedAt })}
             </span>
           )}
         </span>
@@ -436,14 +448,18 @@ export function AccountUsageStats({
       <div className="pt-3">
         <div className="mb-3 flex items-center justify-between gap-3">
           <p className="truncate text-[11px] text-gray-500 dark:text-gray-400">
-            {currentStats?.stats_as_of ? `Stats as of ${currentStats.stats_as_of}` : currentStats?.source ?? "ChatGPT backend"}
-            {generatedAt && ` · updated ${generatedAt}`}
+            {currentStats?.stats_as_of
+              ? t("stats.asOf", { date: currentStats.stats_as_of })
+              : currentStats?.source === ACCOUNT_USAGE_SOURCE_CHATGPT_BACKEND || currentStats?.source === "Codex usage stats via ChatGPT backend"
+                ? t("stats.source")
+                : currentStats?.source ?? t("stats.backend")}
+            {generatedAt && ` · ${t("stats.updated", { time: generatedAt })}`}
           </p>
           <button
             onClick={() => void loadStats()}
             disabled={loading || !enabled}
             className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gray-100 text-gray-600 transition-colors hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
-            title="Refresh usage stats"
+            title={t("stats.refresh")}
           >
             <span className={loading ? "inline-block animate-spin" : ""}>↻</span>
           </button>
@@ -458,11 +474,16 @@ export function AccountUsageStats({
         ) : currentStats?.available ? (
           <div className="space-y-3">
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-              <StatTile label="Lifetime" value={formatTokens(currentStats.summary.lifetime_tokens)} sub="tokens" />
-              <StatTile label="Today" value={formatTokens(todayTokens)} sub="reported" />
-              <StatTile label="Last 7 days" value={formatTokens(sevenDayTokens)} sub="reported" />
-              <StatTile label="Current streak" value={`${formatNumber(currentStats.summary.current_streak_days)} days`} />
-              <StatTile label="Peak day" value={formatTokens(currentStats.summary.peak_daily_tokens)} sub="tokens" />
+              <StatTile label={t("stats.lifetime")} value={formatTokens(currentStats.summary.lifetime_tokens)} sub={t("stats.tokens")} />
+              <StatTile label={t("stats.today")} value={formatTokens(todayTokens)} sub={t("stats.reported")} />
+              <StatTile label={t("stats.lastSevenDays")} value={formatTokens(sevenDayTokens)} sub={t("stats.reported")} />
+              <StatTile
+                label={t("stats.currentStreak")}
+                value={currentStats.summary.current_streak_days === null
+                  ? "--"
+                  : t("stats.days", { count: currentStats.summary.current_streak_days })}
+              />
+              <StatTile label={t("stats.peakDay")} value={formatTokens(currentStats.summary.peak_daily_tokens)} sub={t("stats.tokens")} />
             </div>
 
             <TokenActivity daily={currentStats.daily} />
@@ -476,7 +497,9 @@ export function AccountUsageStats({
           </div>
         ) : (
           <div className="rounded-lg border border-dashed border-gray-200 px-3 py-3 text-xs text-gray-500 dark:border-gray-800 dark:text-gray-400">
-            {currentStats?.error ?? "Usage stats unavailable."}
+            {!enabled
+              ? t("stats.chatgptOnly")
+              : currentStats?.error || t("stats.unavailable")}
           </div>
         )}
       </div>
