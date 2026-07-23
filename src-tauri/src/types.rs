@@ -95,11 +95,38 @@ pub struct StoredAccount {
 }
 
 impl StoredAccount {
+    fn resolved_name(
+        name: String,
+        email: Option<&String>,
+        account_id: Option<&String>,
+        kind: &str,
+    ) -> String {
+        let name = name.trim();
+        if !name.is_empty() {
+            return name.to_string();
+        }
+        if let Some(email) = email.filter(|email| !email.trim().is_empty()) {
+            return email.clone();
+        }
+        if let Some(account_id) = account_id.filter(|id| !id.trim().is_empty()) {
+            let suffix: String = account_id
+                .chars()
+                .rev()
+                .take(8)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
+            return format!("{kind} account ({suffix})");
+        }
+        format!("{kind} account")
+    }
+
     /// Create a new account with API key authentication
     pub fn new_api_key(name: String, api_key: String) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
-            name,
+            name: Self::resolved_name(name, None, None, "API key"),
             email: None,
             plan_type: None,
             subscription_expires_at: None,
@@ -121,6 +148,7 @@ impl StoredAccount {
         refresh_token: String,
         account_id: Option<String>,
     ) -> Self {
+        let name = Self::resolved_name(name, email.as_ref(), account_id.as_ref(), "ChatGPT");
         Self {
             id: Uuid::new_v4().to_string(),
             name,
@@ -137,6 +165,71 @@ impl StoredAccount {
             created_at: Utc::now(),
             last_used_at: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod account_name_tests {
+    use super::StoredAccount;
+
+    #[test]
+    fn blank_name_defaults_to_email() {
+        let account = StoredAccount::new_chatgpt(
+            "".into(),
+            Some("user@example.com".into()),
+            None,
+            None,
+            "id".into(),
+            "access".into(),
+            "refresh".into(),
+            Some("acct-12345678".into()),
+        );
+        assert_eq!(account.name, "user@example.com");
+    }
+
+    #[test]
+    fn explicit_name_is_trimmed() {
+        let account = StoredAccount::new_chatgpt(
+            "  My Account  ".into(),
+            Some("user@example.com".into()),
+            None,
+            None,
+            "id".into(),
+            "access".into(),
+            "refresh".into(),
+            None,
+        );
+        assert_eq!(account.name, "My Account");
+    }
+
+    #[test]
+    fn missing_email_uses_account_id_suffix() {
+        let account = StoredAccount::new_chatgpt(
+            "".into(),
+            None,
+            None,
+            None,
+            "id".into(),
+            "access".into(),
+            "refresh".into(),
+            Some("acct-12345678".into()),
+        );
+        assert_eq!(account.name, "ChatGPT account (12345678)");
+    }
+
+    #[test]
+    fn missing_email_and_account_id_use_generic_fallback() {
+        let account = StoredAccount::new_chatgpt(
+            "".into(),
+            None,
+            None,
+            None,
+            "id".into(),
+            "access".into(),
+            "refresh".into(),
+            None,
+        );
+        assert_eq!(account.name, "ChatGPT account");
     }
 }
 
