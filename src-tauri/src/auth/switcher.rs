@@ -28,6 +28,12 @@ pub fn get_codex_auth_file() -> Result<PathBuf> {
 
 /// Switch to a specific account by writing its credentials to ~/.codex/auth.json
 pub fn switch_to_account(account: &StoredAccount) -> Result<()> {
+    // Before writing, check if ~/.codex/auth.json already has fresher tokens
+    // for this same account (Codex rotates tokens during normal use). If so,
+    // absorb those tokens into accounts.json first so we never write stale
+    // credentials and trigger a refresh_token_reused error.
+    let account = &sync_tokens_from_auth_json(account)?;
+
     let codex_home = get_codex_home()?;
 
     // Ensure the codex home directory exists
@@ -52,6 +58,81 @@ pub fn switch_to_account(account: &StoredAccount) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// If ~/.codex/auth.json holds a newer token set for the same ChatGPT account,
+/// update accounts.json with those tokens before we proceed. This prevents
+/// writing an old refresh token back and causing `refresh_token_reused`.
+fn sync_tokens_from_auth_json(account: &StoredAccount) -> Result<StoredAccount> {
+    use crate::auth::storage::update_account_chatgpt_tokens;
+    use crate::types::parse_chatgpt_id_token_claims;
+
+    // Only relevant for ChatGPT OAuth accounts.
+    let (stored_refresh_token, stored_account_id) = match &account.auth_data {
+        AuthData::ChatGPT {
+            refresh_token,
+            account_id,
+            ..
+        } => (refresh_token.clone(), account_id.clone()),
+        AuthData::ApiKey { .. } => return Ok(account.clone()),
+    };
+
+    let auth_file = match read_current_auth()? {
+        Some(auth) => auth,
+        None => return Ok(account.clone()),
+    };
+
+    let disk_tokens = match auth_file.tokens {
+        Some(tokens) => tokens,
+        None => return Ok(account.clone()),
+    };
+
+    // Only sync if the auth.json belongs to the same ChatGPT account.
+    let disk_account_id = disk_tokens
+        .account_id
+        .clone()
+        .or_else(|| parse_chatgpt_id_token_claims(&disk_tokens.id_token).account_id);
+
+    let same_account = match (&stored_account_id, &disk_account_id) {
+        (Some(stored), Some(disk)) => stored == disk,
+        // No account_id on either side — compare refresh tokens as a fallback.
+        _ => disk_tokens.refresh_token == stored_refresh_token,
+    };
+
+    if !same_account {
+        return Ok(account.clone());
+    }
+
+    // Tokens differ — auth.json is newer (Codex rotated them). Absorb them.
+    if disk_tokens.refresh_token == stored_refresh_token
+        && disk_tokens.access_token
+            == match &account.auth_data {
+                AuthData::ChatGPT { access_token, .. } => access_token.clone(),
+                _ => String::new(),
+            }
+    {
+        // Tokens are identical — nothing to sync.
+        return Ok(account.clone());
+    }
+
+    println!(
+        "[Auth] auth.json has fresher tokens for account '{}', syncing into accounts.json before switch",
+        account.name
+    );
+
+    let claims = parse_chatgpt_id_token_claims(&disk_tokens.id_token);
+    let updated = update_account_chatgpt_tokens(
+        &account.id,
+        disk_tokens.id_token,
+        disk_tokens.access_token,
+        disk_tokens.refresh_token,
+        disk_account_id,
+        claims.email,
+        claims.plan_type,
+        claims.subscription_expires_at,
+    )?;
+
+    Ok(updated)
 }
 
 /// Create an AuthDotJson structure from a StoredAccount

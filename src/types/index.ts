@@ -115,6 +115,7 @@ export interface WarmupSummary {
   total_accounts: number;
   warmed_accounts: number;
   failed_account_ids: string[];
+  failed_account_errors: [string, string][]; // [account_name, error_message]
 }
 
 export interface ImportAccountsSummary {

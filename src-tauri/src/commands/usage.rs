@@ -90,25 +90,44 @@ pub async fn warmup_all_accounts() -> Result<WarmupSummary, String> {
     let total_accounts = store.accounts.len();
     let concurrency = total_accounts.min(10).max(1);
 
-    let results: Vec<(String, bool)> = stream::iter(store.accounts.into_iter())
+    // Collect (account_id, account_name, Option<error>)
+    let results: Vec<(String, String, Option<String>)> = stream::iter(store.accounts.into_iter())
         .map(|account| async move {
-            let account_id = account.id.clone();
-            let failed = send_warmup(&account).await.is_err();
-            (account_id, failed)
+            let id = account.id.clone();
+            let name = account.name.clone();
+            match send_warmup(&account).await {
+                Ok(()) => (id, name, None),
+                Err(e) => {
+                    // Truncate long error messages for the toast
+                    let msg = e.to_string();
+                    let short = if msg.len() > 120 {
+                        format!("{}…", &msg[..120])
+                    } else {
+                        msg
+                    };
+                    (id, name, Some(short))
+                }
+            }
         })
         .buffer_unordered(concurrency)
         .collect()
         .await;
 
-    let failed_account_ids = results
-        .into_iter()
-        .filter_map(|(account_id, failed)| failed.then_some(account_id))
-        .collect::<Vec<_>>();
+    let mut failed_account_ids = Vec::new();
+    let mut failed_account_errors = Vec::new();
+
+    for (id, name, err) in results {
+        if let Some(e) = err {
+            failed_account_ids.push(id);
+            failed_account_errors.push((name, e));
+        }
+    }
 
     let warmed_accounts = total_accounts.saturating_sub(failed_account_ids.len());
     Ok(WarmupSummary {
         total_accounts,
         warmed_accounts,
         failed_account_ids,
+        failed_account_errors,
     })
 }

@@ -378,41 +378,54 @@ function TrayMenu() {
             No accounts configured
           </div>
         ) : (
-          accounts.map((account) => {
-            const plan = formatPlan(account.plan_type);
-            const usage = usageById[account.id];
-            const stats = statsById[account.id];
-            const windows =
-              usage && !usage.error
-                ? ([
-                    {
-                      label: "Session",
-                      used: usage.primary_used_percent,
-                      resetAt: usage.primary_resets_at,
-                    },
-                    {
-                      label: "Weekly",
-                      used: usage.secondary_used_percent,
-                      resetAt: usage.secondary_resets_at,
-                    },
-                  ].filter((w) => w.used != null) as {
-                    label: string;
-                    used: number;
-                    resetAt: number | null;
-                  }[])
-                : [];
+          (() => {
+            // Always pin the active account at the top, followed by others in
+            // their original backend order.
+            const active = accounts.filter((a) => a.is_active);
+            const others = accounts.filter((a) => !a.is_active);
+            const sorted = [...active, ...others];
 
-            return (
-              <button
-                key={account.id}
-                onClick={() => void handleSwitch(account)}
-                disabled={switchingId !== null}
-                className={`flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors disabled:opacity-60 ${
-                  account.is_active
-                    ? "bg-gray-100 dark:bg-gray-800"
-                    : "hover:bg-gray-100 dark:hover:bg-gray-800"
-                }`}
-              >
+            return sorted.map((account, index) => {
+              const plan = formatPlan(account.plan_type);
+              const usage = usageById[account.id];
+              const stats = statsById[account.id];
+              const isFirstOther = account.is_active === false && index > 0 && sorted[index - 1].is_active;
+              const windows =
+                usage && !usage.error
+                  ? ([
+                      {
+                        label: "Session",
+                        used: usage.primary_used_percent,
+                        resetAt: usage.primary_resets_at,
+                      },
+                      {
+                        label: "Weekly",
+                        used: usage.secondary_used_percent,
+                        resetAt: usage.secondary_resets_at,
+                      },
+                    ].filter((w) => w.used != null) as {
+                      label: string;
+                      used: number;
+                      resetAt: number | null;
+                    }[])
+                  : [];
+
+              return (
+                <>
+                  {/* Separator between active and other accounts */}
+                  {isFirstOther && others.length > 0 && (
+                    <div className="my-1 border-t border-gray-100 dark:border-gray-800" />
+                  )}
+                  <button
+                    key={account.id}
+                    onClick={() => void handleSwitch(account)}
+                    disabled={switchingId !== null}
+                    className={`flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors disabled:opacity-60 ${
+                      account.is_active
+                        ? "bg-gray-100 dark:bg-gray-800"
+                        : "hover:bg-gray-100 dark:hover:bg-gray-800"
+                    }`}
+                  >
                 <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center">
                   {account.is_active && (
                     <svg
@@ -505,8 +518,10 @@ function TrayMenu() {
                   <span className="shrink-0 text-xs text-gray-400">...</span>
                 )}
               </button>
-            );
-          })
+                </>
+              );
+            });
+          })()
         )}
       </div>
 
@@ -550,6 +565,16 @@ function TrayMenu() {
           className="flex-1 rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-gray-100 dark:hover:bg-gray-800"
         >
           Open Codex Switcher
+        </button>
+        <button
+          onClick={async () => {
+            await invokeBackend("open_codex_app").catch(() => {});
+            void invokeBackend("hide_tray_window");
+          }}
+          className="rounded-lg px-2 py-1.5 text-sm text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
+          title="Launch the Codex desktop app"
+        >
+          Open Codex
         </button>
         <button
           onClick={() => void invokeBackend("quit_app")}

@@ -40,6 +40,14 @@ fn default_close_behavior_prompt_enabled() -> bool {
     true
 }
 
+fn default_launch_at_login() -> bool {
+    false
+}
+
+fn default_start_minimized() -> bool {
+    false
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
@@ -47,6 +55,10 @@ pub struct AppSettings {
     pub dock_display_mode: DockDisplayMode,
     #[serde(default = "default_close_behavior_prompt_enabled")]
     pub close_behavior_prompt_enabled: bool,
+    #[serde(default = "default_launch_at_login")]
+    pub launch_at_login: bool,
+    #[serde(default = "default_start_minimized")]
+    pub start_minimized: bool,
 }
 
 impl Default for AppSettings {
@@ -55,6 +67,8 @@ impl Default for AppSettings {
             tray_display_mode: TrayDisplayMode::default(),
             dock_display_mode: DockDisplayMode::default(),
             close_behavior_prompt_enabled: true,
+            launch_at_login: false,
+            start_minimized: false,
         }
     }
 }
@@ -349,6 +363,9 @@ pub struct WarmupSummary {
     pub warmed_accounts: usize,
     /// Account IDs whose warm-up request failed
     pub failed_account_ids: Vec<String>,
+    /// Per-failure details: (account_name, error_message)
+    #[serde(default)]
+    pub failed_account_errors: Vec<(String, String)>,
 }
 
 /// Import summary for account config import operations.

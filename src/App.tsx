@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAccounts } from "./hooks/useAccounts";
 import { useForceCloseCodexProcesses } from "./hooks/useForceCloseCodexProcesses";
-import { AccountCard, AddAccountModal, UpdateChecker } from "./components";
+import { AccountCard, AddAccountModal, ReAuthModal, UpdateChecker } from "./components";
 import type { AccountWithUsage, CodexProcessInfo, DockDisplayMode, UsageInfo } from "./types";
 import {
   exportFullBackupFile,
@@ -232,6 +232,13 @@ function App() {
   const [closeBehaviorPromptOpen, setCloseBehaviorPromptOpen] = useState(false);
   const [closeBehaviorDontAskAgain, setCloseBehaviorDontAskAgain] = useState(false);
   const [isCompletingCloseBehavior, setIsCompletingCloseBehavior] = useState(false);
+  const [launchAtLogin, setLaunchAtLogin] = useState(false);
+  const [startMinimized, setStartMinimized] = useState(false);
+  const [reAuthAccountId, setReAuthAccountId] = useState<string | null>(null);
+  const [openAfterSwitch, setOpenAfterSwitch] = useState<boolean>(() => {
+    try { return window.localStorage.getItem("codex-switcher-open-after-switch") === "true"; }
+    catch { return false; }
+  });
   const accountsRef = useRef(accounts);
   const autoWarmupAccountIdsRef = useRef(autoWarmupAccountIds);
   const autoWarmupLedgerRef = useRef(autoWarmupLedger);
@@ -490,12 +497,19 @@ function App() {
     // Check processes before switching
     const latestProcessInfo = await checkProcesses();
     if (latestProcessInfo && !latestProcessInfo.can_switch) {
+      // Codex is running — ask the user if they want to force-close it first,
+      // then switch. The confirm modal already handles this flow.
+      setPendingTraySwitchAccountId(accountId);
+      setForceCloseConfirmOpen(true);
       return;
     }
 
     try {
       setSwitchingId(accountId);
       await switchAccount(accountId);
+      if (openAfterSwitch && isTauriRuntime()) {
+        void invokeBackend("open_codex_app").catch(() => {});
+      }
     } catch (err) {
       console.error("Failed to switch account:", err);
     } finally {
@@ -523,16 +537,60 @@ function App() {
     setRefreshSuccess(false);
     try {
       await refreshUsage(undefined, { refreshMetadata: true });
-      setRefreshSuccess(true);
-      setTimeout(() => setRefreshSuccess(false), 2000);
+      // Count how many had errors after refresh
+      const failed = accounts.filter((a) => a.usage?.error).length;
+      if (failed > 0) {
+        const total = accounts.length;
+        const ok = total - failed;
+        const names = accounts
+          .filter((a) => a.usage?.error)
+          .map((a) => `${a.name}: ${a.usage!.error}`)
+          .join("\n");
+        showWarmupToast(
+          `Refreshed ${ok}/${total}. ${failed} failed:\n${names}`,
+          true
+        );
+      } else {
+        setRefreshSuccess(true);
+        setTimeout(() => setRefreshSuccess(false), 2000);
+      }
     } finally {
       setIsRefreshing(false);
     }
   };
 
+  // Load startup settings on mount
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    invokeBackend<[boolean, boolean]>("get_startup_settings").then(([lal, sm]) => {
+      setLaunchAtLogin(lal);
+      setStartMinimized(sm);
+    }).catch(console.error);
+  }, []);
+
+  const handleSetLaunchAtLogin = async (enabled: boolean) => {
+    try {
+      await invokeBackend("set_launch_at_login", { enabled });
+      setLaunchAtLogin(enabled);
+    } catch (err) {
+      console.error("Failed to set launch at login:", err);
+    }
+  };
+
+  const handleSetStartMinimized = async (enabled: boolean) => {
+    try {
+      await invokeBackend("set_start_minimized", { enabled });
+      setStartMinimized(enabled);
+    } catch (err) {
+      console.error("Failed to set start minimized:", err);
+    }
+  };
+
   const showWarmupToast = useCallback((message: string, isError = false) => {
     setWarmupToast({ message, isError });
-    setTimeout(() => setWarmupToast(null), 2500);
+    // Give error toasts with multi-line details longer to read
+    const duration = isError && message.includes("\n") ? 8000 : 2500;
+    setTimeout(() => setWarmupToast(null), duration);
   }, []);
 
   const formatWarmupError = useCallback((err: unknown) => {
@@ -683,6 +741,9 @@ function App() {
       await switchAccount(accountId);
       setPendingTraySwitchAccountId(null);
       showWarmupToast("Switched account after force closing Codex.");
+      if (openAfterSwitch && isTauriRuntime()) {
+        void invokeBackend("open_codex_app").catch(() => {});
+      }
     } catch (err) {
       console.error("Failed to switch account after force close:", err);
       setPendingTraySwitchAccountId(null);
@@ -742,8 +803,12 @@ function App() {
           }`
         );
       } else {
+        // Build a readable failure summary: "name: reason" per failed account
+        const details = (summary.failed_account_errors ?? [])
+          .map(([name, err]) => `• ${name}: ${err}`)
+          .join("\n");
         showWarmupToast(
-          `Warmed ${summary.warmed_accounts}/${summary.total_accounts}. Failed: ${summary.failed_account_ids.length}`,
+          `Warmed ${summary.warmed_accounts}/${summary.total_accounts}. ${summary.failed_account_ids.length} failed:\n${details}`,
           true
         );
       }
@@ -1450,7 +1515,7 @@ function App() {
                   onClick={() => setIsActionsMenuOpen((prev) => !prev)}
                   className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-900 text-white transition-colors hover:bg-gray-800 dark:bg-black dark:hover:bg-neutral-900 shrink-0 whitespace-nowrap"
                 >
-                  Account ▾
+                  Settings ▾
                 </button>
                 {isActionsMenuOpen && (
                   <div className="absolute right-0 z-50 mt-2 w-56 rounded-xl border border-gray-200 bg-white p-2 text-gray-700 shadow-xl dark:border-neutral-800 dark:bg-black dark:text-white">
@@ -1503,6 +1568,42 @@ function App() {
                     >
                       {isImportingFull ? "Importing..." : "Import Full Encrypted File"}
                     </button>
+                    {isTauriRuntime() && (
+                      <>
+                        <div className="my-1 border-t border-gray-100 dark:border-gray-800" />
+                        <label className="flex w-full cursor-pointer items-center justify-between rounded-lg px-3 py-2 text-sm transition-colors hover:bg-gray-100 dark:text-white dark:hover:bg-neutral-900">
+                          <span>Launch at Login</span>
+                          <input
+                            type="checkbox"
+                            checked={launchAtLogin}
+                            onChange={(e) => handleSetLaunchAtLogin(e.target.checked)}
+                            className="h-4 w-4 accent-gray-900 dark:accent-gray-100"
+                          />
+                        </label>
+                        <label className="flex w-full cursor-pointer items-center justify-between rounded-lg px-3 py-2 text-sm transition-colors hover:bg-gray-100 dark:text-white dark:hover:bg-neutral-900">
+                          <span>Start Minimized</span>
+                          <input
+                            type="checkbox"
+                            checked={startMinimized}
+                            onChange={(e) => handleSetStartMinimized(e.target.checked)}
+                            className="h-4 w-4 accent-gray-900 dark:accent-gray-100"
+                          />
+                        </label>
+                        <label className="flex w-full cursor-pointer items-center justify-between rounded-lg px-3 py-2 text-sm transition-colors hover:bg-gray-100 dark:text-white dark:hover:bg-neutral-900">
+                          <span title="Launch Codex automatically after switching accounts">Open Codex after switch</span>
+                          <input
+                            type="checkbox"
+                            checked={openAfterSwitch}
+                            onChange={(e) => {
+                              const v = e.target.checked;
+                              setOpenAfterSwitch(v);
+                              try { window.localStorage.setItem("codex-switcher-open-after-switch", String(v)); } catch {}
+                            }}
+                            className="h-4 w-4 accent-gray-900 dark:accent-gray-100"
+                          />
+                        </label>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -1560,6 +1661,7 @@ function App() {
                     refreshSingleUsage(activeAccount.id, { refreshMetadata: true })
                   }
                   onRename={(newName) => renameAccount(activeAccount.id, newName)}
+                  onReAuth={activeAccount.auth_mode === "chat_g_p_t" ? () => setReAuthAccountId(activeAccount.id) : undefined}
                   switching={switchingId === activeAccount.id}
                   switchDisabled={hasRunningProcesses ?? false}
                   warmingUp={
@@ -1652,6 +1754,7 @@ function App() {
                         refreshSingleUsage(account.id, { refreshMetadata: true })
                       }
                       onRename={(newName) => renameAccount(account.id, newName)}
+                      onReAuth={account.auth_mode === "chat_g_p_t" ? () => setReAuthAccountId(account.id) : undefined}
                       switching={switchingId === account.id}
                       switchDisabled={hasRunningProcesses ?? false}
                       warmingUp={
@@ -1690,7 +1793,7 @@ function App() {
       {/* Warm-up Toast */}
       {warmupToast && (
         <div
-          className={`fixed bottom-20 left-1/2 -translate-x-1/2 px-4 py-3 rounded-lg shadow-lg text-sm ${
+          className={`fixed bottom-20 left-1/2 -translate-x-1/2 px-4 py-3 rounded-lg shadow-lg text-sm max-w-sm whitespace-pre-line ${
             warmupToast.isError
               ? "bg-red-600 text-white"
               : "bg-amber-100 text-amber-900 border border-amber-300 dark:bg-amber-900/30 dark:text-amber-200 dark:border-amber-700"
@@ -1812,6 +1915,22 @@ function App() {
           </div>
         </div>
       )}
+
+      {/* Re-Auth Modal */}
+      {reAuthAccountId && (() => {
+        const account = accounts.find((a) => a.id === reAuthAccountId);
+        if (!account) return null;
+        return (
+          <ReAuthModal
+            account={account}
+            onClose={() => setReAuthAccountId(null)}
+            onSuccess={async () => {
+              setReAuthAccountId(null);
+              await refreshSingleUsage(reAuthAccountId, { refreshMetadata: true });
+            }}
+          />
+        );
+      })()}
 
       {/* Add Account Modal */}
       <AddAccountModal

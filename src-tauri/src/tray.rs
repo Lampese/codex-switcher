@@ -29,6 +29,7 @@ const ACCOUNTS_CHANGED_EVENT: &str = "accounts-changed";
 const SWITCH_ACCOUNT_BLOCKED_EVENT: &str = "switch-account-blocked";
 const ACCOUNT_ITEM_PREFIX: &str = "account:";
 const OPEN_ITEM_ID: &str = "open";
+const OPEN_CODEX_ITEM_ID: &str = "open-codex";
 const QUIT_ITEM_ID: &str = "quit";
 const TRAY_WIDTH: f64 = 300.0;
 const TRAY_HEIGHT: f64 = 420.0;
@@ -190,7 +191,17 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, store: &AccountsStore) -> tauri::R
                 .build(app)?,
         )?;
     } else {
-        for account in &store.accounts {
+        // Pin the active account at the top, then the rest in storage order.
+        let mut sorted = store.accounts.iter().collect::<Vec<_>>();
+        sorted.sort_by_key(|a| {
+            if store.active_account_id.as_deref() == Some(&a.id) {
+                0
+            } else {
+                1
+            }
+        });
+
+        for account in sorted {
             let label = format!("{}{}", account.name, usage_suffix(&account.id));
             let item =
                 CheckMenuItemBuilder::with_id(account_menu_id(&account.id), menu_label(&label))
@@ -206,6 +217,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, store: &AccountsStore) -> tauri::R
     #[cfg(target_os = "macos")]
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&MenuItemBuilder::with_id(OPEN_ITEM_ID, "Open Codex Switcher").build(app)?)?;
+    menu.append(&MenuItemBuilder::with_id(OPEN_CODEX_ITEM_ID, "Open Codex").build(app)?)?;
     menu.append(&MenuItemBuilder::with_id(QUIT_ITEM_ID, "Quit").build(app)?)?;
     Ok(menu)
 }
@@ -243,6 +255,11 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
 
     match item_id {
         OPEN_ITEM_ID => show_main_window(app),
+        OPEN_CODEX_ITEM_ID => {
+            tauri::async_runtime::spawn(async move {
+                let _ = crate::commands::open_codex_app().await;
+            });
+        }
         QUIT_ITEM_ID => app.exit(0),
         _ => {
             let Some(account_id) = item_id.strip_prefix(ACCOUNT_ITEM_PREFIX) else {

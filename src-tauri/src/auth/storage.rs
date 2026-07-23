@@ -65,8 +65,12 @@ pub fn save_app_settings(settings: &AppSettings) -> Result<()> {
     }
 
     let content = serde_json::to_string_pretty(settings).context("Failed to serialize settings")?;
-    fs::write(&path, content)
-        .with_context(|| format!("Failed to write settings file: {}", path.display()))?;
+
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, &content)
+        .with_context(|| format!("Failed to write tmp settings file: {}", tmp_path.display()))?;
+    fs::rename(&tmp_path, &path)
+        .with_context(|| format!("Failed to rename tmp to settings file: {}", path.display()))?;
 
     #[cfg(unix)]
     {
@@ -78,11 +82,12 @@ pub fn save_app_settings(settings: &AppSettings) -> Result<()> {
     Ok(())
 }
 
-/// Save the accounts store to disk
+/// Save the accounts store to disk using an atomic write.
+/// Writes to a temp file first then renames so a crash mid-write never
+/// leaves a truncated/corrupt accounts.json.
 pub fn save_accounts(store: &AccountsStore) -> Result<()> {
     let path = get_accounts_file()?;
 
-    // Ensure the config directory exists
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create config directory: {}", parent.display()))?;
@@ -91,10 +96,16 @@ pub fn save_accounts(store: &AccountsStore) -> Result<()> {
     let content =
         serde_json::to_string_pretty(store).context("Failed to serialize accounts store")?;
 
-    fs::write(&path, content)
-        .with_context(|| format!("Failed to write accounts file: {}", path.display()))?;
+    // Atomic write: serialize → tmp file → rename.
+    // If the process crashes after serialization but before rename the original
+    // accounts.json is untouched; the orphaned .tmp is harmless.
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, &content)
+        .with_context(|| format!("Failed to write tmp accounts file: {}", tmp_path.display()))?;
 
-    // Set restrictive permissions on Unix
+    fs::rename(&tmp_path, &path)
+        .with_context(|| format!("Failed to rename tmp to accounts file: {}", path.display()))?;
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

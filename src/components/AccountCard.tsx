@@ -13,6 +13,7 @@ interface AccountCardProps {
   onDelete: () => void;
   onRefresh: () => Promise<unknown>;
   onRename: (newName: string) => Promise<void>;
+  onReAuth?: () => void;
   switching?: boolean;
   switchDisabled?: boolean;
   warmingUp?: boolean;
@@ -155,6 +156,22 @@ function BlurredText({ children, blur }: { children: React.ReactNode; blur: bool
   );
 }
 
+/** Returns true when the usage error looks like an expired/invalid session. */
+function isAuthError(error: string | null | undefined): boolean {
+  if (!error) return false;
+  const lower = error.toLowerCase();
+  return (
+    lower.includes("401") ||
+    lower.includes("403") ||
+    lower.includes("unauthorized") ||
+    lower.includes("token") ||
+    lower.includes("refresh") ||
+    lower.includes("session") ||
+    lower.includes("login") ||
+    lower.includes("auth")
+  );
+}
+
 export function AccountCard({
   account,
   onSwitch,
@@ -162,6 +179,7 @@ export function AccountCard({
   onDelete,
   onRefresh,
   onRename,
+  onReAuth,
   switching,
   switchDisabled,
   warmingUp,
@@ -245,6 +263,11 @@ export function AccountCard({
   const compactResetCredits = !account.is_active;
   const resetCreditsExpiry = formatResetCreditsExpiry(resetCredits, compactResetCredits);
   const resetCreditsTone = getResetCreditsTone(resetCredits);
+  // Show re-auth prompt only for OAuth accounts with an auth-related error.
+  const showReAuth =
+    onReAuth &&
+    account.auth_mode === "chat_g_p_t" &&
+    isAuthError(account.usage?.error);
 
   const loadResetCredits = useCallback(async () => {
     const requestId = ++resetRequestSeq.current;
@@ -400,6 +423,22 @@ export function AccountCard({
         <UsageBar usage={account.usage} loading={isRefreshing || account.usageLoading} />
       </div>
 
+      {/* Re-auth banner */}
+      {showReAuth && (
+        <div className="flex items-center justify-between gap-3 mb-3 px-3 py-2 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700">
+          <p className="text-xs text-amber-800 dark:text-amber-200 flex items-center gap-1.5">
+            <span>⚠</span>
+            <span>Session expired — credentials need to be refreshed.</span>
+          </p>
+          <button
+            onClick={onReAuth}
+            className="shrink-0 px-2.5 py-1 text-xs font-medium rounded-md bg-amber-600 hover:bg-amber-700 text-white transition-colors"
+          >
+            Re-authenticate
+          </button>
+        </div>
+      )}
+
       {/* Last refresh time */}
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs mb-3">
         <div className="text-gray-400 dark:text-gray-500">
@@ -431,15 +470,15 @@ export function AccountCard({
         ) : (
           <button
             onClick={onSwitch}
-            disabled={switching || switchDisabled}
-            className={`flex-1 px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50 ${
+            disabled={switching}
+            className={`flex-1 px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50 whitespace-nowrap ${
               switchDisabled
-                ? "bg-gray-200 dark:bg-gray-800 text-gray-400 dark:text-gray-500 cursor-not-allowed"
+                ? "bg-amber-600 hover:bg-amber-700 text-white"
                 : "bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900"
             }`}
-            title={switchDisabled ? "Close all Codex processes first" : undefined}
+            title={switchDisabled ? "Codex is running — click to force-close and switch" : undefined}
           >
-            {switching ? "Switching..." : switchDisabled ? "Codex Running" : "Switch"}
+            {switching ? "Switching..." : switchDisabled ? "⚠ Switch & Close" : "Switch"}
           </button>
         )}
         <button

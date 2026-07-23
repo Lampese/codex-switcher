@@ -3,6 +3,8 @@
 use anyhow::{Context, Result};
 use base64::Engine;
 use chrono::Utc;
+use std::collections::HashSet;
+use std::sync::{LazyLock, Mutex};
 use tokio::time::{sleep, Duration};
 
 use super::{load_accounts, switch_to_account, update_account_chatgpt_tokens};
@@ -10,7 +12,18 @@ use crate::types::{parse_chatgpt_id_token_claims, AuthData, StoredAccount};
 
 const DEFAULT_ISSUER: &str = "https://auth.openai.com";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-const EXPIRY_SKEW_SECONDS: i64 = 60;
+/// Refresh the token only when it expires within 5 minutes.
+/// The old value was 60 seconds which caused unnecessary refreshes on
+/// every warmup/usage cycle, burning refresh tokens and causing
+/// refresh_token_reused errors when Codex CLI or another instance
+/// also refreshed at the same time.
+const EXPIRY_SKEW_SECONDS: i64 = 5 * 60;
+
+/// In-memory set of account IDs currently being refreshed.
+/// Prevents two concurrent calls from both starting a refresh for the
+/// same account (race that burns the refresh token).
+static REFRESHING_IDS: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[derive(Debug, serde::Deserialize)]
 struct RefreshTokenResponse {
@@ -41,6 +54,9 @@ pub async fn ensure_chatgpt_tokens_fresh(account: &StoredAccount) -> Result<Stor
 }
 
 /// Force-refresh ChatGPT OAuth tokens for an account.
+/// Uses a per-account in-memory lock so concurrent callers (warmup +
+/// usage refresh polling) never both trigger a refresh for the same
+/// account simultaneously — which would burn the refresh token.
 pub async fn refresh_chatgpt_tokens(account: &StoredAccount) -> Result<StoredAccount> {
     let (current_id_token, current_refresh_token, current_account_id) = match &account.auth_data {
         AuthData::ApiKey { .. } => return Ok(account.clone()),
@@ -56,7 +72,33 @@ pub async fn refresh_chatgpt_tokens(account: &StoredAccount) -> Result<StoredAcc
         anyhow::bail!("Missing refresh token for account {}", account.name);
     }
 
-    let refreshed = refresh_tokens_with_refresh_token(&current_refresh_token).await?;
+    // Try to acquire the per-account refresh lock.
+    // If another task is already refreshing this account, skip and return
+    // the current (still-valid-for-a-moment) account to avoid double-refresh.
+    let acquired = {
+        if let Ok(mut set) = REFRESHING_IDS.lock() {
+            set.insert(account.id.clone())
+        } else {
+            false
+        }
+    };
+
+    if !acquired {
+        println!(
+            "[Auth] Refresh already in progress for account {}, skipping duplicate",
+            account.name
+        );
+        return Ok(account.clone());
+    }
+
+    let result = refresh_tokens_with_refresh_token(&current_refresh_token).await;
+
+    // Always release the lock, even on error.
+    if let Ok(mut set) = REFRESHING_IDS.lock() {
+        set.remove(&account.id);
+    }
+
+    let refreshed = result?;
     let next_id_token = refreshed.id_token.unwrap_or(current_id_token);
     let next_refresh_token = refreshed
         .refresh_token
@@ -78,7 +120,6 @@ pub async fn refresh_chatgpt_tokens(account: &StoredAccount) -> Result<StoredAcc
         claims.subscription_expires_at,
     )?;
 
-    // Keep ~/.codex/auth.json in sync when this is the active account.
     if is_active {
         if let Err(err) = switch_to_account(&updated) {
             println!("[Auth] Failed to sync active auth.json after token refresh: {err}");
