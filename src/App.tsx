@@ -230,6 +230,7 @@ function App() {
   const [timedWarmupDraft, setTimedWarmupDraft] = useState("");
   const [maskedAccounts, setMaskedAccounts] = useState<Set<string>>(new Set());
   const [accountSearchQuery, setAccountSearchQuery] = useState("");
+  const isAccountSearchEnabled = accounts.length >= ACCOUNT_SEARCH_THRESHOLD;
   const [otherAccountsSort, setOtherAccountsSort] = useState<
     | "deadline_asc"
     | "deadline_desc"
@@ -259,6 +260,12 @@ function App() {
   useEffect(() => {
     accountsRef.current = accounts;
   }, [accounts]);
+
+  useEffect(() => {
+    if (!isAccountSearchEnabled && accountSearchQuery) {
+      setAccountSearchQuery("");
+    }
+  }, [accountSearchQuery, isAccountSearchEnabled]);
 
   useEffect(() => {
     autoWarmupAccountIdsRef.current = autoWarmupAccountIds;
@@ -1217,7 +1224,9 @@ function App() {
     });
   }, [otherAccounts, otherAccountsSort]);
 
-  const normalizedAccountSearchQuery = accountSearchQuery.trim().toLowerCase();
+  const normalizedAccountSearchQuery = isAccountSearchEnabled
+    ? accountSearchQuery.trim().toLowerCase()
+    : "";
   const hasMatchingActiveAccount =
     activeAccount !== undefined &&
     matchesAccountSearch(activeAccount, normalizedAccountSearchQuery);
@@ -1573,7 +1582,7 @@ function App() {
           </div>
         ) : (
           <div className="space-y-8">
-            {accounts.length >= ACCOUNT_SEARCH_THRESHOLD && (
+            {isAccountSearchEnabled && (
               <div className="relative max-w-lg">
                 <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-gray-400 dark:text-gray-500">
                   <svg
