@@ -42,6 +42,7 @@ import "./App.css";
 const AUTO_WARMUP_CHECK_INTERVAL_MS = 30 * 1000;
 const AUTO_WARMUP_RETRY_BACKOFF_MS = 60 * 1000;
 const LIMIT_FULL_THRESHOLD = 99.5;
+const ACCOUNT_SEARCH_THRESHOLD = 8;
 const SWITCH_ACCOUNT_BLOCKED_EVENT = "switch-account-blocked";
 const CLOSE_BEHAVIOR_REQUESTED_EVENT = "close-behavior-requested";
 interface SwitchAccountBlockedPayload {
@@ -147,6 +148,18 @@ function getTimedWarmupTargets(accounts: AccountWithUsage[]): AccountWithUsage[]
   );
 }
 
+function matchesAccountSearch(
+  account: AccountWithUsage,
+  normalizedQuery: string
+): boolean {
+  if (!normalizedQuery) return true;
+
+  return (
+    account.name.toLowerCase().includes(normalizedQuery) ||
+    account.email?.toLowerCase().includes(normalizedQuery) === true
+  );
+}
+
 function App() {
   const {
     accounts,
@@ -216,6 +229,8 @@ function App() {
   const [timedWarmupRunning, setTimedWarmupRunning] = useState(false);
   const [timedWarmupDraft, setTimedWarmupDraft] = useState("");
   const [maskedAccounts, setMaskedAccounts] = useState<Set<string>>(new Set());
+  const [accountSearchQuery, setAccountSearchQuery] = useState("");
+  const isAccountSearchEnabled = accounts.length >= ACCOUNT_SEARCH_THRESHOLD;
   const [otherAccountsSort, setOtherAccountsSort] = useState<
     | "deadline_asc"
     | "deadline_desc"
@@ -245,6 +260,12 @@ function App() {
   useEffect(() => {
     accountsRef.current = accounts;
   }, [accounts]);
+
+  useEffect(() => {
+    if (!isAccountSearchEnabled && accountSearchQuery) {
+      setAccountSearchQuery("");
+    }
+  }, [accountSearchQuery, isAccountSearchEnabled]);
 
   useEffect(() => {
     autoWarmupAccountIdsRef.current = autoWarmupAccountIds;
@@ -1203,6 +1224,24 @@ function App() {
     });
   }, [otherAccounts, otherAccountsSort]);
 
+  const normalizedAccountSearchQuery = isAccountSearchEnabled
+    ? accountSearchQuery.trim().toLowerCase()
+    : "";
+  const hasMatchingActiveAccount =
+    activeAccount !== undefined &&
+    matchesAccountSearch(activeAccount, normalizedAccountSearchQuery);
+  const visibleOtherAccounts = useMemo(
+    () =>
+      sortedOtherAccounts.filter((account) =>
+        matchesAccountSearch(account, normalizedAccountSearchQuery)
+      ),
+    [normalizedAccountSearchQuery, sortedOtherAccounts]
+  );
+  const hasNoMatchingAccounts =
+    normalizedAccountSearchQuery.length > 0 &&
+    !hasMatchingActiveAccount &&
+    visibleOtherAccounts.length === 0;
+
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
       <header className="sticky top-0 z-40 border-b border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-900">
@@ -1543,52 +1582,113 @@ function App() {
           </div>
         ) : (
           <div className="space-y-8">
-            {/* Active Account */}
-            {activeAccount && (
-              <section>
-                <h2 className="text-sm font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-4">
-                  Active Account
-                </h2>
-                <AccountCard
-                  account={activeAccount}
-                  onSwitch={() => { }}
-                  onWarmup={() =>
-                    handleWarmupAccount(activeAccount.id, activeAccount.name)
-                  }
-                  onDelete={() => handleDelete(activeAccount.id)}
-                  onRefresh={() =>
-                    refreshSingleUsage(activeAccount.id, { refreshMetadata: true })
-                  }
-                  onRename={(newName) => renameAccount(activeAccount.id, newName)}
-                  switching={switchingId === activeAccount.id}
-                  switchDisabled={hasRunningProcesses ?? false}
-                  warmingUp={
-                    isWarmingAll ||
-                    warmingUpId === activeAccount.id ||
-                    autoWarmupRunningIds.has(activeAccount.id)
-                  }
-                  masked={maskedAccounts.has(activeAccount.id)}
-                  onToggleMask={() => toggleMask(activeAccount.id)}
-                  autoWarmupEnabled={
-                    autoWarmupAllEnabled || autoWarmupAccountIds.has(activeAccount.id)
-                  }
-                  autoWarmupManagedByAll={autoWarmupAllEnabled}
-                  autoWarmupLabel={getAutoWarmupLabel(
-                    activeAccount.usage,
-                    autoWarmupAllEnabled || autoWarmupAccountIds.has(activeAccount.id),
-                    autoWarmupRunningIds.has(activeAccount.id)
-                  )}
-                  onToggleAutoWarmup={() => toggleAutoWarmupAccount(activeAccount.id)}
+            {isAccountSearchEnabled && (
+              <div className="relative max-w-lg">
+                <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-gray-400 dark:text-gray-500">
+                  <svg
+                    className="h-4 w-4"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    aria-hidden="true"
+                  >
+                    <circle cx="11" cy="11" r="7" />
+                    <path d="m20 20-3.5-3.5" strokeLinecap="round" />
+                  </svg>
+                </span>
+                <input
+                  type="search"
+                  value={accountSearchQuery}
+                  onChange={(event) => setAccountSearchQuery(event.target.value)}
+                  placeholder="Search accounts by name or email"
+                  aria-label="Search accounts"
+                  className="w-full rounded-xl border border-gray-300 bg-white py-2.5 pl-10 pr-10 text-sm text-gray-900 shadow-sm transition-colors placeholder:text-gray-400 focus:border-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-200 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100 dark:placeholder:text-gray-500 dark:focus:border-gray-600 dark:focus:ring-gray-800"
                 />
-              </section>
+                {accountSearchQuery.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setAccountSearchQuery("")}
+                    aria-label="Clear account search"
+                    className="absolute inset-y-0 right-2 flex items-center px-2 text-gray-400 transition-colors hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-200"
+                  >
+                    <svg
+                      className="h-4 w-4"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      aria-hidden="true"
+                    >
+                      <path d="m8 8 8 8M16 8l-8 8" strokeLinecap="round" />
+                    </svg>
+                  </button>
+                )}
+              </div>
             )}
 
+            {hasNoMatchingAccounts && (
+              <div className="rounded-2xl border border-dashed border-gray-300 px-6 py-12 text-center dark:border-gray-700">
+                <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">
+                  No matching accounts
+                </h2>
+                <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                  Try a different account name or email address.
+                </p>
+              </div>
+            )}
+
+            {/* Active Account */}
+            {activeAccount &&
+              matchesAccountSearch(activeAccount, normalizedAccountSearchQuery) && (
+                <section>
+                  <h2 className="text-sm font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-4">
+                    Active Account
+                  </h2>
+                  <AccountCard
+                    account={activeAccount}
+                    onSwitch={() => { }}
+                    onWarmup={() =>
+                      handleWarmupAccount(activeAccount.id, activeAccount.name)
+                    }
+                    onDelete={() => handleDelete(activeAccount.id)}
+                    onRefresh={() =>
+                      refreshSingleUsage(activeAccount.id, { refreshMetadata: true })
+                    }
+                    onRename={(newName) => renameAccount(activeAccount.id, newName)}
+                    switching={switchingId === activeAccount.id}
+                    switchDisabled={hasRunningProcesses ?? false}
+                    warmingUp={
+                      isWarmingAll ||
+                      warmingUpId === activeAccount.id ||
+                      autoWarmupRunningIds.has(activeAccount.id)
+                    }
+                    masked={maskedAccounts.has(activeAccount.id)}
+                    onToggleMask={() => toggleMask(activeAccount.id)}
+                    autoWarmupEnabled={
+                      autoWarmupAllEnabled || autoWarmupAccountIds.has(activeAccount.id)
+                    }
+                    autoWarmupManagedByAll={autoWarmupAllEnabled}
+                    autoWarmupLabel={getAutoWarmupLabel(
+                      activeAccount.usage,
+                      autoWarmupAllEnabled || autoWarmupAccountIds.has(activeAccount.id),
+                      autoWarmupRunningIds.has(activeAccount.id)
+                    )}
+                    onToggleAutoWarmup={() => toggleAutoWarmupAccount(activeAccount.id)}
+                  />
+                </section>
+              )}
+
             {/* Other Accounts */}
-            {otherAccounts.length > 0 && (
+            {visibleOtherAccounts.length > 0 && (
               <section>
                 <div className="flex items-center justify-between gap-3 mb-4">
                   <h2 className="text-sm font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    Other Accounts ({otherAccounts.length})
+                    Other Accounts ({
+                      normalizedAccountSearchQuery
+                        ? `${visibleOtherAccounts.length} of ${otherAccounts.length}`
+                        : otherAccounts.length
+                    })
                   </h2>
                   <div className="flex items-center gap-2">
                     <label htmlFor="other-accounts-sort" className="text-xs text-gray-500 dark:text-gray-400">
@@ -1641,7 +1741,7 @@ function App() {
                   </div>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {sortedOtherAccounts.map((account) => (
+                  {visibleOtherAccounts.map((account) => (
                     <AccountCard
                       key={account.id}
                       account={account}
