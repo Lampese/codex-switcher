@@ -65,6 +65,7 @@ export function subscribeLanguagePreference(
   listener: (language: AppLanguage) => void
 ): () => void {
   preferenceListeners.add(listener);
+  listener(languagePreference);
   return () => preferenceListeners.delete(listener);
 }
 
