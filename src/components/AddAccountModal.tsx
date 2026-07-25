@@ -57,11 +57,6 @@ export function AddAccountModal({
   };
 
   const handleOAuthLogin = async () => {
-    if (!name.trim()) {
-      setError(t("addAccount.nameRequired"));
-      return;
-    }
-
     try {
       setLoading(true);
       setError(null);
@@ -90,10 +85,6 @@ export function AddAccountModal({
   };
 
   const handleImportFile = async () => {
-    if (!name.trim()) {
-      setError(t("addAccount.nameRequired"));
-      return;
-    }
     if (!fileSource) {
       setError(t("addAccount.fileRequired"));
       return;
@@ -152,19 +143,19 @@ export function AddAccountModal({
           ))}
         </div>
 
-        {/* Content */}
-        <div className="p-5 space-y-4">
-          {/* Account Name (always shown) */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              {t("addAccount.name")}
-            </label>
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder={t("addAccount.namePlaceholder")}
-              className="w-full px-4 py-2.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-gray-400 dark:focus:border-gray-500 focus:ring-1 focus:ring-gray-400 dark:focus:ring-gray-500 transition-colors"
+          {/* Content */}
+          <div className="p-5 space-y-4">
+            {/* Account name is optional; the backend derives one when blank. */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                {t("addAccount.name")}
+              </label>
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder={t("addAccount.namePlaceholder")}
+                className="w-full px-4 py-2.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-gray-400 dark:focus:border-gray-500 focus:ring-1 focus:ring-gray-400 dark:focus:ring-gray-500 transition-colors"
             />
           </div>
 

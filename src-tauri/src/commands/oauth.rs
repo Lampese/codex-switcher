@@ -29,7 +29,7 @@ pub async fn start_login(account_name: String) -> Result<OAuthLoginInfo, String>
         previous.cancelled.store(true, Ordering::Relaxed);
     }
 
-    let (info, rx, cancelled) = start_oauth_login(account_name)
+    let (info, rx, cancelled) = start_oauth_login(account_name.trim().to_string())
         .await
         .map_err(|e| e.to_string())?;
 

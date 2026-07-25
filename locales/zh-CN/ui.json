@@ -62,7 +62,9 @@
   "codex": { "opened": "Codex 已打开。", "openFailed": "打开 Codex 失败：{{error}}" },
   "accounts": {
     "loading": "正在加载账户...", "loadFailed": "账户加载失败", "emptyTitle": "还没有账户", "emptyBody": "添加第一个 Codex 账户以开始使用",
-    "add": "添加账户", "activeHeading": "当前账户", "otherHeading": "其他账户（{{count}}）", "sort": "排序",
+    "add": "添加账户", "activeHeading": "当前账户", "otherHeading": "其他账户（{{count}}）",
+    "searchPlaceholder": "按名称或邮箱搜索账户", "searchLabel": "搜索账户", "clearSearch": "清除账户搜索",
+    "noMatchingTitle": "没有匹配的账户", "noMatchingBody": "请尝试其他账户名称或邮箱地址。", "sort": "排序",
     "sortResetAsc": "重置时间：从早到晚", "sortResetDesc": "重置时间：从晚到早", "sortRemainingDesc": "剩余额度：从高到低",
     "sortRemainingAsc": "剩余额度：从低到高", "sortExpiryAsc": "到期时间：从早到晚", "sortExpiryDesc": "到期时间：从晚到早",
     "refreshSuccess": "用量刷新成功", "deleteConfirm": "再次点击删除以确认移除"
@@ -80,7 +82,7 @@
     "changeLater": "之后可随时在托盘弹窗中更改。", "dontAsk": "不再询问", "keepDock": "保留在程序坞", "menuBarOnly": "仅菜单栏"
   },
   "addAccount": {
-    "title": "添加账户", "chatgptLogin": "ChatGPT 登录", "importFile": "导入文件", "name": "账户名称", "namePlaceholder": "例如：工作账户",
+    "title": "添加账户", "chatgptLogin": "ChatGPT 登录", "importFile": "导入文件", "name": "账户名称（可选）", "namePlaceholder": "留空则使用邮箱",
     "nameRequired": "请输入账户名称", "fileRequired": "请选择 auth.json 文件", "waiting": "正在等待浏览器登录...",
     "openLink": "请在浏览器中打开以下链接继续：", "copyLinkManually": "剪贴板不可用，请手动复制链接。", "copied": "已复制！",
     "remoteOauthWarning": "OAuth 登录必须在运行本程序的同一台主机上完成，因为回调会跳转到 localhost。",
