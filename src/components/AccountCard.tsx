@@ -2,6 +2,7 @@ import { useCallback, useState, useRef, useEffect } from "react";
 import type { AccountResetCredits, AccountUsageStats as AccountUsageStatsInfo, AccountWithUsage } from "../types";
 import { invokeBackend } from "../lib/platform";
 import { AccountUsageStats } from "./AccountUsageStats";
+import { ResetCreditsMenu } from "./ResetCreditsMenu";
 import { UsageBar } from "./UsageBar";
 
 const RESET_CREDITS_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -79,69 +80,6 @@ function getSubscriptionStatus(timestamp: string | null | undefined): {
     label: `Until ${formattedDate}`,
     className: "text-gray-400 dark:text-gray-500",
   };
-}
-
-function formatResetCreditsCount(resetCredits: AccountResetCredits | null): string | null {
-  if (!resetCredits) return null;
-  const count = resetCredits.available_count;
-  if (count <= 0) return null;
-  return count === 1 ? "1 reset" : `${count} resets`;
-}
-
-function formatResetCreditsExpiry(
-  resetCredits: AccountResetCredits | null,
-  compact = false,
-): string | null {
-  if (!resetCredits?.next_expires_at) return null;
-
-  const expiry = new Date(resetCredits.next_expires_at);
-  if (Number.isNaN(expiry.getTime())) return null;
-
-  const formattedDate = new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    ...(compact ? {} : { year: "numeric" }),
-  }).format(expiry);
-
-  return compact ? `closest ${formattedDate}` : `closest expires ${formattedDate}`;
-}
-
-function getResetCreditsTone(resetCredits: AccountResetCredits | null): {
-  container: string;
-  badge: string;
-  text: string;
-} {
-  const fallback = {
-    container: "border-sky-200 bg-sky-50/70 dark:border-sky-800 dark:bg-sky-950/30",
-    badge: "border-sky-200 bg-sky-100 text-sky-700 dark:border-sky-700 dark:bg-sky-900/50 dark:text-sky-300",
-    text: "text-sky-700/80 dark:text-sky-300/80",
-  };
-
-  if (!resetCredits?.next_expires_at) return fallback;
-
-  const expiry = new Date(resetCredits.next_expires_at);
-  if (Number.isNaN(expiry.getTime())) return fallback;
-
-  const remainingMs = expiry.getTime() - Date.now();
-  const dayMs = 24 * 60 * 60 * 1000;
-
-  if (remainingMs <= 3 * dayMs) {
-    return {
-      container: "border-red-200 bg-red-50/70 dark:border-red-800 dark:bg-red-950/30",
-      badge: "border-red-200 bg-red-100 text-red-700 dark:border-red-700 dark:bg-red-900/50 dark:text-red-300",
-      text: "text-red-700/80 dark:text-red-300/80",
-    };
-  }
-
-  if (remainingMs <= 10 * dayMs) {
-    return {
-      container: "border-amber-200 bg-amber-50/70 dark:border-amber-800 dark:bg-amber-950/30",
-      badge: "border-amber-200 bg-amber-100 text-amber-700 dark:border-amber-700 dark:bg-amber-900/50 dark:text-amber-300",
-      text: "text-amber-700/80 dark:text-amber-300/80",
-    };
-  }
-
-  return fallback;
 }
 
 function BlurredText({ children, blur }: { children: React.ReactNode; blur: boolean }) {
@@ -241,10 +179,7 @@ export function AccountCard({
   const planColorClass = planColors[planKey] || planColors.free;
   const showSubscriptionStatus = account.auth_mode === "chat_g_p_t";
   const subscriptionStatus = getSubscriptionStatus(account.subscription_expires_at);
-  const resetCreditsCount = formatResetCreditsCount(resetCredits);
   const compactResetCredits = !account.is_active;
-  const resetCreditsExpiry = formatResetCreditsExpiry(resetCredits, compactResetCredits);
-  const resetCreditsTone = getResetCreditsTone(resetCredits);
 
   const loadResetCredits = useCallback(async () => {
     const requestId = ++resetRequestSeq.current;
@@ -363,35 +298,10 @@ export function AccountCard({
           >
             {planDisplay}
           </span>
-          {resetCreditsCount && compactResetCredits && (
-            <div
-              className={`flex min-w-0 max-w-full items-center gap-1.5 rounded-full border px-2 py-1 text-[11px] leading-none ${resetCreditsTone.container} ${resetCreditsTone.text}`}
-              title={[resetCreditsCount, resetCreditsExpiry].filter(Boolean).join(" · ")}
-            >
-              <span className="shrink-0 whitespace-nowrap font-semibold">
-                {resetCreditsCount}
-              </span>
-              {resetCreditsExpiry && (
-                <span className="truncate">
-                  · {resetCreditsExpiry}
-                </span>
-              )}
-            </div>
-          )}
-          {resetCreditsCount && !compactResetCredits && (
-            <div
-              className={`flex max-w-full items-center gap-2 rounded-lg border px-2 py-1.5 text-xs ${resetCreditsTone.container}`}
-            >
-              <span className={`whitespace-nowrap rounded-full border px-2.5 py-0.5 font-medium ${resetCreditsTone.badge}`}>
-                {resetCreditsCount}
-              </span>
-              {resetCreditsExpiry && (
-                <span className={`truncate ${resetCreditsTone.text}`}>
-                  {resetCreditsExpiry}
-                </span>
-              )}
-            </div>
-          )}
+          <ResetCreditsMenu
+            compact={compactResetCredits}
+            resetCredits={resetCredits}
+          />
         </div>
       </div>
 

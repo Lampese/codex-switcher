@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test:reset-credits": "node --experimental-strip-types --test tests/resetCredits.test.ts",
     "preview": "vite preview",
     "tauri": "sh ./scripts/tauri.sh",
     "tauri:win": "tauri",
