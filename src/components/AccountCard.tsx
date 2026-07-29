@@ -9,13 +9,13 @@ const RESET_CREDITS_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 interface AccountCardProps {
   account: AccountWithUsage;
-  onSwitch: () => void;
+  onSwitch: (force?: boolean) => void;
   onWarmup: () => Promise<void>;
   onDelete: () => void;
   onRefresh: () => Promise<unknown>;
   onRename: (newName: string) => Promise<void>;
   switching?: boolean;
-  switchDisabled?: boolean;
+  codexRunning?: boolean;
   warmingUp?: boolean;
   masked?: boolean;
   onToggleMask?: () => void;
@@ -101,7 +101,7 @@ export function AccountCard({
   onRefresh,
   onRename,
   switching,
-  switchDisabled,
+  codexRunning = false,
   warmingUp,
   masked = false,
   onToggleMask,
@@ -117,6 +117,7 @@ export function AccountCard({
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState(account.name);
   const [resetCredits, setResetCredits] = useState<AccountResetCredits | null>(null);
+  const [confirmRunningSwitch, setConfirmRunningSwitch] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const resetRequestSeq = useRef(0);
 
@@ -330,34 +331,84 @@ export function AccountCard({
       />
 
       {/* Actions */}
-      <div className="flex gap-2 mt-3">
+      <div className="flex items-center justify-center gap-2 mt-3">
         {account.is_active ? (
           <button
             disabled
-            className="flex-1 px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700 cursor-default"
+            className="flex-1 h-9 px-4 flex items-center justify-center text-sm font-medium rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700 cursor-default"
           >
             ✓ Active
           </button>
         ) : (
-          <button
-            onClick={onSwitch}
-            disabled={switching || switchDisabled}
-            className={`flex-1 px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50 ${
-              switchDisabled
-                ? "bg-gray-200 dark:bg-gray-800 text-gray-400 dark:text-gray-500 cursor-not-allowed"
-                : "bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900"
-            }`}
-            title={switchDisabled ? "Close all Codex processes first" : undefined}
-          >
-            {switching ? "Switching..." : switchDisabled ? "Codex Running" : "Switch"}
-          </button>
+          <>
+            <button
+              onClick={() => {
+                if (codexRunning) {
+                  setConfirmRunningSwitch(true);
+                } else {
+                  onSwitch();
+                }
+              }}
+              disabled={switching}
+              className={`shrink-0 h-9 px-4 flex items-center justify-center text-sm font-medium rounded-lg transition-colors disabled:opacity-50 whitespace-nowrap ${
+                codexRunning
+                  ? "bg-amber-600 hover:bg-amber-700 text-white"
+                  : "bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900"
+              }`}
+              title={codexRunning ? "Codex is running — click to force-close and switch" : undefined}
+            >
+              {switching ? "Switching..." : codexRunning ? "Switch & Close" : "Switch"}
+            </button>
+
+            {/* Confirmation dialog when Codex is running */}
+            {confirmRunningSwitch && (
+              <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+                <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-md mx-4 shadow-xl">
+                  <div className="p-5 border-b border-gray-100 dark:border-gray-800">
+                    <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+                      Switch while Codex is running?
+                    </h2>
+                  </div>
+                  <div className="p-5 space-y-3">
+                    <p className="text-sm text-gray-600 dark:text-gray-300">
+                      Codex will be force-closed and the account will be switched to{" "}
+                      <span className="font-medium text-gray-900 dark:text-gray-100">
+                        {account.name}
+                      </span>
+                      .
+                    </p>
+                    <p className="text-sm text-red-600 dark:text-red-300">
+                      Unsaved Codex work may be lost.
+                    </p>
+                  </div>
+                  <div className="flex justify-end gap-3 p-5 border-t border-gray-100 dark:border-gray-800">
+                    <button
+                      onClick={() => setConfirmRunningSwitch(false)}
+                      className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={() => {
+                        setConfirmRunningSwitch(false);
+                        onSwitch(true);
+                      }}
+                      className="px-4 py-2.5 text-sm font-medium rounded-lg bg-red-600 hover:bg-red-700 text-white transition-colors"
+                    >
+                      Force close &amp; switch
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </>
         )}
         <button
           onClick={() => {
             void onWarmup();
           }}
           disabled={warmingUp}
-          className={`px-3 py-2 text-sm rounded-lg transition-colors ${
+          className={`h-9 w-9 flex items-center justify-center text-sm rounded-lg transition-colors ${
             warmingUp
               ? "bg-amber-100 dark:bg-amber-900/30 text-amber-500 dark:text-amber-300"
               : "bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-100 dark:hover:bg-amber-900/40 text-amber-700 dark:text-amber-300"
@@ -370,7 +421,7 @@ export function AccountCard({
           <button
             onClick={onToggleAutoWarmup}
             disabled={autoWarmupManagedByAll}
-            className={`px-3 py-2 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
+            className={`h-9 px-3 min-w-0 max-w-[8rem] truncate flex items-center justify-center text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
               autoWarmupEnabled
                 ? "bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-300"
                 : "bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300"
@@ -389,7 +440,7 @@ export function AccountCard({
         <button
           onClick={handleRefresh}
           disabled={isRefreshing}
-          className={`px-3 py-2 text-sm rounded-lg transition-colors ${
+          className={`h-9 w-9 flex items-center justify-center text-sm rounded-lg transition-colors ${
             isRefreshing
               ? "bg-gray-200 dark:bg-gray-800 text-gray-400 dark:text-gray-500"
               : "bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300"
@@ -400,7 +451,7 @@ export function AccountCard({
         </button>
         <button
           onClick={onDelete}
-          className="px-3 py-2 text-sm rounded-lg bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-300 transition-colors"
+          className="h-9 w-9 flex items-center justify-center text-sm rounded-lg bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-300 transition-colors"
           title="Remove account"
         >
           ✕

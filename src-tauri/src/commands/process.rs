@@ -1066,7 +1066,7 @@ pub async fn open_codex_app() -> Result<(), String> {
         .map_err(|e| e.to_string())?
 }
 
-fn open_codex_app_blocking() -> Result<(), String> {
+pub(crate) fn open_codex_app_blocking() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         if command_succeeds(Command::new("open").args(["-b", "com.openai.codex"])) {

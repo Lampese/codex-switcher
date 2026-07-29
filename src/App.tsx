@@ -24,11 +24,17 @@ import {
   TIMED_WARMUP_LEDGER_STORAGE_KEY,
   normalizeTimedWarmupTimes,
   readAutoWarmupAllEnabled,
+  readAutoWarmupIntervalMs,
   readTimedWarmupEnabled,
   readTimedWarmupTimes,
+  readUsageRefreshIntervalMs,
   writeAutoWarmupAllEnabled,
+  writeAutoWarmupIntervalMs,
   writeTimedWarmupEnabled,
   writeTimedWarmupTimes,
+  writeUsageRefreshIntervalMs,
+  USAGE_REFRESH_INTERVAL_PRESETS,
+  AUTO_WARMUP_INTERVAL_PRESETS,
 } from "./lib/autoWarmup";
 import {
   getAutoWarmupWindowKey,
@@ -161,6 +167,20 @@ function matchesAccountSearch(
 }
 
 function App() {
+  // Usage refresh interval — read from storage once on mount; the interval
+  // state re-mounts the useAccounts timer whenever the user changes it.
+  const [usageRefreshIntervalMs, setUsageRefreshIntervalMs] = useState(
+    () => readUsageRefreshIntervalMs()
+  );
+  // Custom interval input (ms), shown when user picks "Custom"
+  const [customIntervalMinutes, setCustomIntervalMinutes] = useState("");
+
+  // Auto warm-up minimum interval between successive warm-ups per account.
+  const [autoWarmupIntervalMs, setAutoWarmupIntervalMs] = useState(
+    () => readAutoWarmupIntervalMs()
+  );
+  const [customWarmupIntervalMinutes, setCustomWarmupIntervalMinutes] = useState("");
+
   const {
     accounts,
     loading,
@@ -181,7 +201,7 @@ function App() {
     cancelOAuthLogin,
     loadMaskedAccountIds,
     saveMaskedAccountIds,
-  } = useAccounts();
+  } = useAccounts(usageRefreshIntervalMs);
 
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isConfigModalOpen, setIsConfigModalOpen] = useState(false);
@@ -242,11 +262,18 @@ function App() {
   const [isActionsMenuOpen, setIsActionsMenuOpen] = useState(false);
   const actionsMenuRef = useRef<HTMLDivElement | null>(null);
   const timedWarmupRef = useRef<HTMLDivElement | null>(null);
+  const sortMenuRef = useRef<HTMLDivElement | null>(null);
+  const [isSortMenuOpen, setIsSortMenuOpen] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>(readStoredTheme);
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
   const [closeBehaviorPromptOpen, setCloseBehaviorPromptOpen] = useState(false);
   const [closeBehaviorDontAskAgain, setCloseBehaviorDontAskAgain] = useState(false);
   const [isCompletingCloseBehavior, setIsCompletingCloseBehavior] = useState(false);
+
+  // App settings: open-after-switch, launch-at-login, start-minimized
+  const [openCodexAfterSwitch, setOpenCodexAfterSwitch] = useState(false);
+  const [launchAtLogin, setLaunchAtLogin] = useState(false);
+  const [startMinimized, setStartMinimized] = useState(false);
   const accountsRef = useRef(accounts);
   const autoWarmupAccountIdsRef = useRef(autoWarmupAccountIds);
   const autoWarmupLedgerRef = useRef(autoWarmupLedger);
@@ -433,6 +460,18 @@ function App() {
     });
   }, [loadMaskedAccountIds]);
 
+  // Load app settings on mount — handlers are defined after showWarmupToast/formatWarmupError below
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    invokeBackend<{ openCodexAfterSwitch: boolean; launchAtLogin: boolean; startMinimized: boolean }>(
+      "get_app_settings"
+    ).then((s) => {
+      setOpenCodexAfterSwitch(s.openCodexAfterSwitch);
+      setLaunchAtLogin(s.launchAtLogin);
+      setStartMinimized(s.startMinimized);
+    }).catch(() => {});
+  }, []);
+
   useEffect(() => {
     if (!isActionsMenuOpen) return;
 
@@ -460,6 +499,18 @@ function App() {
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [isTimedWarmupOpen]);
+
+  useEffect(() => {
+    if (!isSortMenuOpen) return;
+    const handleClickOutside = (event: MouseEvent) => {
+      if (!sortMenuRef.current) return;
+      if (!sortMenuRef.current.contains(event.target as Node)) {
+        setIsSortMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [isSortMenuOpen]);
 
   useEffect(() => {
     applyTheme(themeMode);
@@ -507,18 +558,29 @@ function App() {
     };
   }, []);
 
-  const handleSwitch = async (accountId: string) => {
-    // Check processes before switching
-    const latestProcessInfo = await checkProcesses();
-    if (latestProcessInfo && !latestProcessInfo.can_switch) {
-      return;
+  const handleSwitch = async (accountId: string, force = false) => {
+    // If force=true the user already confirmed the dialog in AccountCard.
+    // We still need to kill Codex processes before switching.
+    if (force) {
+      const killed = await forceCloseCodexProcesses();
+      if (!killed?.can_switch) {
+        showWarmupToast("Could not close Codex processes. Switch aborted.", true);
+        return;
+      }
+    } else {
+      // Check processes before switching (non-force path)
+      const latestProcessInfo = await checkProcesses();
+      if (latestProcessInfo && !latestProcessInfo.can_switch) {
+        return;
+      }
     }
 
     try {
       setSwitchingId(accountId);
-      await switchAccount(accountId);
+      await switchAccount(accountId, force);
     } catch (err) {
       console.error("Failed to switch account:", err);
+      showWarmupToast(`Switch failed: ${formatWarmupError(err)}`, true);
     } finally {
       setSwitchingId(null);
     }
@@ -544,16 +606,27 @@ function App() {
     setRefreshSuccess(false);
     try {
       await refreshUsage(undefined, { refreshMetadata: true });
-      setRefreshSuccess(true);
-      setTimeout(() => setRefreshSuccess(false), 2000);
+      // Check if any accounts have usage errors
+      const failedAccounts = accounts.filter(
+        (a) => a.usage?.error
+      );
+      if (failedAccounts.length > 0) {
+        const names = failedAccounts.map((a) => `${a.name}: ${a.usage!.error}`).join("\n• ");
+        showWarmupToast(`Refresh done. Errors:\n• ${names}`, true);
+      } else {
+        setRefreshSuccess(true);
+        setTimeout(() => setRefreshSuccess(false), 2000);
+      }
     } finally {
       setIsRefreshing(false);
     }
   };
 
   const showWarmupToast = useCallback((message: string, isError = false) => {
+    // Multi-line toasts (contain newlines) stay for 8 s; short ones for 2.5 s.
+    const duration = message.includes("\n") ? 8000 : 2500;
     setWarmupToast({ message, isError });
-    setTimeout(() => setWarmupToast(null), 2500);
+    setTimeout(() => setWarmupToast(null), duration);
   }, []);
 
   const formatWarmupError = useCallback((err: unknown) => {
@@ -566,6 +639,41 @@ function App() {
       return "Unknown error";
     }
   }, []);
+
+  // Settings toggle handlers — must be after showWarmupToast / formatWarmupError
+  const handleToggleOpenCodexAfterSwitch = useCallback(async () => {
+    const next = !openCodexAfterSwitch;
+    setOpenCodexAfterSwitch(next);
+    try {
+      await invokeBackend("set_app_settings", { openCodexAfterSwitch: next });
+    } catch (err) {
+      setOpenCodexAfterSwitch(!next);
+      showWarmupToast(`Failed to save setting: ${formatWarmupError(err)}`, true);
+    }
+  }, [openCodexAfterSwitch, formatWarmupError, showWarmupToast]);
+
+  const handleToggleLaunchAtLogin = useCallback(async () => {
+    const next = !launchAtLogin;
+    setLaunchAtLogin(next);
+    try {
+      const result = await invokeBackend<{ launchAtLogin: boolean }>("set_app_settings", { launchAtLogin: next });
+      setLaunchAtLogin(result.launchAtLogin);
+    } catch (err) {
+      setLaunchAtLogin(!next);
+      showWarmupToast(`Failed to save setting: ${formatWarmupError(err)}`, true);
+    }
+  }, [launchAtLogin, formatWarmupError, showWarmupToast]);
+
+  const handleToggleStartMinimized = useCallback(async () => {
+    const next = !startMinimized;
+    setStartMinimized(next);
+    try {
+      await invokeBackend("set_app_settings", { startMinimized: next });
+    } catch (err) {
+      setStartMinimized(!next);
+      showWarmupToast(`Failed to save setting: ${formatWarmupError(err)}`, true);
+    }
+  }, [startMinimized, formatWarmupError, showWarmupToast]);
 
   const markSuccessfulWarmup = useCallback(
     (accountId: string, timestamp = Date.now(), window?: AutoWarmupWindow) => {
@@ -621,7 +729,7 @@ function App() {
           if (accountId && latestProcessInfo?.can_switch) {
             try {
               setSwitchingId(accountId);
-              await switchAccount(accountId);
+              await switchAccount(accountId, false);
               setPendingTraySwitchAccountId(null);
               showWarmupToast("Switched account from tray.");
             } catch (err) {
@@ -701,7 +809,7 @@ function App() {
 
     try {
       setSwitchingId(accountId);
-      await switchAccount(accountId);
+      await switchAccount(accountId, true);
       setPendingTraySwitchAccountId(null);
       showWarmupToast("Switched account after force closing Codex.");
     } catch (err) {
@@ -763,8 +871,12 @@ function App() {
           }`
         );
       } else {
+        // Build per-account error details
+        const failedNames = summary.failed_account_ids
+          .map((id) => accounts.find((a) => a.id === id)?.name ?? id)
+          .join("\n• ");
         showWarmupToast(
-          `Warmed ${summary.warmed_accounts}/${summary.total_accounts}. Failed: ${summary.failed_account_ids.length}`,
+          `Warmed ${summary.warmed_accounts}/${summary.total_accounts}\nFailed:\n• ${failedNames}`,
           true
         );
       }
@@ -790,9 +902,14 @@ function App() {
 
   const getDueAutoWarmupForAccount = useCallback(
     (accountId: string, usage: UsageInfo | undefined) => {
-      return getDueAutoWarmupWindow(usage, autoWarmupLedgerRef.current[accountId]);
+      return getDueAutoWarmupWindow(
+        usage,
+        autoWarmupLedgerRef.current[accountId],
+        Date.now(),
+        autoWarmupIntervalMs
+      );
     },
-    []
+    [autoWarmupIntervalMs]
   );
 
   const getAutoWarmupLabel = useCallback(
@@ -1489,10 +1606,10 @@ function App() {
                   onClick={() => setIsActionsMenuOpen((prev) => !prev)}
                   className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-900 text-white transition-colors hover:bg-gray-800 dark:bg-black dark:hover:bg-neutral-900 shrink-0 whitespace-nowrap"
                 >
-                  Account ▾
+                  Settings ▾
                 </button>
                 {isActionsMenuOpen && (
-                  <div className="absolute right-0 z-50 mt-2 w-56 rounded-xl border border-gray-200 bg-white p-2 text-gray-700 shadow-xl dark:border-neutral-800 dark:bg-black dark:text-white">
+                  <div className="absolute right-0 z-50 mt-2 w-64 rounded-xl border border-gray-200 bg-white p-2 text-gray-700 shadow-xl dark:border-neutral-800 dark:bg-black dark:text-white">
                     <button
                       onClick={() => {
                         setIsActionsMenuOpen(false);
@@ -1542,6 +1659,174 @@ function App() {
                     >
                       {isImportingFull ? "Importing..." : "Import Full Encrypted File"}
                     </button>
+
+                    {/* Settings toggles — Tauri only */}
+                    {isTauriRuntime() && (
+                      <>
+                        <div className="my-1 border-t border-gray-200 dark:border-neutral-800" />
+                        <label className="flex items-center justify-between rounded-lg px-3 py-2 text-sm cursor-pointer hover:bg-gray-100 dark:hover:bg-neutral-900">
+                          <span className="dark:text-white">Open Codex after switch</span>
+                          <input
+                            type="checkbox"
+                            checked={openCodexAfterSwitch}
+                            onChange={() => void handleToggleOpenCodexAfterSwitch()}
+                            className="h-4 w-4 accent-gray-900 dark:accent-gray-100"
+                          />
+                        </label>
+                        <label className="flex items-center justify-between rounded-lg px-3 py-2 text-sm cursor-pointer hover:bg-gray-100 dark:hover:bg-neutral-900">
+                          <span className="dark:text-white">Launch at Login</span>
+                          <input
+                            type="checkbox"
+                            checked={launchAtLogin}
+                            onChange={() => void handleToggleLaunchAtLogin()}
+                            className="h-4 w-4 accent-gray-900 dark:accent-gray-100"
+                          />
+                        </label>
+                        <label className="flex items-center justify-between rounded-lg px-3 py-2 text-sm cursor-pointer hover:bg-gray-100 dark:hover:bg-neutral-900">
+                          <span className="dark:text-white">Start Minimized</span>
+                          <input
+                            type="checkbox"
+                            checked={startMinimized}
+                            onChange={() => void handleToggleStartMinimized()}
+                            className="h-4 w-4 accent-gray-900 dark:accent-gray-100"
+                          />
+                        </label>
+                      </>
+                    )}
+
+                    {/* Usage refresh interval — always shown */}
+                    <div className="my-1 border-t border-gray-200 dark:border-neutral-800" />
+                    <div className="px-3 py-2">
+                      <div className="mb-0.5 text-xs font-medium text-gray-700 dark:text-gray-200">
+                        Usage bar refresh interval
+                      </div>
+                      <div className="mb-1.5 text-[11px] text-gray-400 dark:text-gray-500">
+                        How often usage bars re-fetch. Does not affect auto warm-up.
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {USAGE_REFRESH_INTERVAL_PRESETS.map((preset) => (
+                          <button
+                            key={preset.ms}
+                            onClick={() => {
+                              setUsageRefreshIntervalMs(preset.ms);
+                              writeUsageRefreshIntervalMs(preset.ms);
+                              setCustomIntervalMinutes("");
+                            }}
+                            className={`rounded-md px-2 py-1 text-xs font-medium transition-colors ${
+                              usageRefreshIntervalMs === preset.ms &&
+                              customIntervalMinutes === ""
+                                ? "bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900"
+                                : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
+                            }`}
+                          >
+                            {preset.label}
+                          </button>
+                        ))}
+                      </div>
+                      {/* Custom interval */}
+                      <div className="mt-2 flex items-center gap-2">
+                        <input
+                          type="number"
+                          min={1}
+                          max={60}
+                          placeholder="Custom min"
+                          value={customIntervalMinutes}
+                          onChange={(e) => setCustomIntervalMinutes(e.target.value)}
+                          className="h-7 w-24 rounded-md border border-gray-300 bg-white px-2 text-xs text-gray-800 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+                        />
+                        <button
+                          onClick={() => {
+                            const mins = Number(customIntervalMinutes);
+                            if (!Number.isFinite(mins) || mins < 1 || mins > 60) return;
+                            const ms = Math.round(mins * 60_000);
+                            setUsageRefreshIntervalMs(ms);
+                            writeUsageRefreshIntervalMs(ms);
+                          }}
+                          disabled={
+                            !customIntervalMinutes ||
+                            Number(customIntervalMinutes) < 1 ||
+                            Number(customIntervalMinutes) > 60
+                          }
+                          className="h-7 rounded-md bg-gray-900 px-2 text-xs font-semibold text-white transition-colors hover:bg-gray-800 disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-gray-200"
+                        >
+                          Set
+                        </button>
+                        {customIntervalMinutes === "" &&
+                          !USAGE_REFRESH_INTERVAL_PRESETS.some(
+                            (p) => p.ms === usageRefreshIntervalMs
+                          ) && (
+                            <span className="text-xs text-gray-500 dark:text-gray-400">
+                              {(usageRefreshIntervalMs / 60_000).toFixed(1)} min
+                            </span>
+                          )}
+                      </div>
+                    </div>
+                    {/* ── Auto warm-up interval ── */}
+                    <div className="my-1 border-t border-gray-200 dark:border-neutral-800" />
+                    <div className="px-3 py-2">
+                      <div className="mb-0.5 text-xs font-medium text-gray-700 dark:text-gray-200">
+                        Auto warm-up interval
+                      </div>
+                      <div className="mb-1.5 text-[11px] text-gray-400 dark:text-gray-500">
+                        Minimum gap between successive auto warm-ups per account.
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {AUTO_WARMUP_INTERVAL_PRESETS.map((preset) => (
+                          <button
+                            key={preset.ms}
+                            onClick={() => {
+                              setAutoWarmupIntervalMs(preset.ms);
+                              writeAutoWarmupIntervalMs(preset.ms);
+                              setCustomWarmupIntervalMinutes("");
+                            }}
+                            className={`rounded-md px-2 py-1 text-xs font-medium transition-colors ${
+                              autoWarmupIntervalMs === preset.ms &&
+                              customWarmupIntervalMinutes === ""
+                                ? "bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900"
+                                : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
+                            }`}
+                          >
+                            {preset.label}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="mt-2 flex items-center gap-2">
+                        <input
+                          type="number"
+                          min={5}
+                          max={1440}
+                          placeholder="Custom min"
+                          value={customWarmupIntervalMinutes}
+                          onChange={(e) => setCustomWarmupIntervalMinutes(e.target.value)}
+                          className="h-7 w-24 rounded-md border border-gray-300 bg-white px-2 text-xs text-gray-800 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+                        />
+                        <button
+                          onClick={() => {
+                            const mins = Number(customWarmupIntervalMinutes);
+                            if (!Number.isFinite(mins) || mins < 5 || mins > 1440) return;
+                            const ms = Math.round(mins * 60_000);
+                            setAutoWarmupIntervalMs(ms);
+                            writeAutoWarmupIntervalMs(ms);
+                          }}
+                          disabled={
+                            !customWarmupIntervalMinutes ||
+                            Number(customWarmupIntervalMinutes) < 5 ||
+                            Number(customWarmupIntervalMinutes) > 1440
+                          }
+                          className="h-7 rounded-md bg-gray-900 px-2 text-xs font-semibold text-white transition-colors hover:bg-gray-800 disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-gray-200"
+                        >
+                          Set
+                        </button>
+                        {customWarmupIntervalMinutes === "" &&
+                          !AUTO_WARMUP_INTERVAL_PRESETS.some(
+                            (p) => p.ms === autoWarmupIntervalMs
+                          ) && (
+                            <span className="text-xs text-gray-500 dark:text-gray-400">
+                              {(autoWarmupIntervalMs / 60_000).toFixed(0)} min
+                            </span>
+                          )}
+                      </div>
+                    </div>
                   </div>
                 )}
               </div>
@@ -1657,7 +1942,7 @@ function App() {
                     }
                     onRename={(newName) => renameAccount(activeAccount.id, newName)}
                     switching={switchingId === activeAccount.id}
-                    switchDisabled={hasRunningProcesses ?? false}
+                    codexRunning={hasRunningProcesses ?? false}
                     warmingUp={
                       isWarmingAll ||
                       warmingUpId === activeAccount.id ||
@@ -1691,52 +1976,58 @@ function App() {
                     })
                   </h2>
                   <div className="flex items-center gap-2">
-                    <label htmlFor="other-accounts-sort" className="text-xs text-gray-500 dark:text-gray-400">
-                      Sort
-                    </label>
-                    <div className="relative">
-                      <select
-                        id="other-accounts-sort"
-                        value={otherAccountsSort}
-                        onChange={(e) =>
-                          setOtherAccountsSort(
-                            e.target.value as
-                              | "deadline_asc"
-                              | "deadline_desc"
-                              | "remaining_desc"
-                              | "remaining_asc"
-                              | "subscription_asc"
-                              | "subscription_desc"
-                          )
-                        }
-                        className="appearance-none font-sans text-xs sm:text-sm font-medium pl-3 pr-9 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-gradient-to-b from-white to-gray-50 dark:from-gray-900 dark:to-gray-800 text-gray-700 dark:text-gray-200 shadow-sm hover:border-gray-400 dark:hover:border-gray-600 hover:shadow focus:outline-none focus:ring-2 focus:ring-gray-300 dark:focus:ring-gray-600 focus:border-gray-400 dark:focus:border-gray-600 transition-all"
+                    <span className="text-xs text-gray-500 dark:text-gray-400">Sort</span>
+                    <div className="relative" ref={sortMenuRef}>
+                      <button
+                        onClick={() => setIsSortMenuOpen((prev) => !prev)}
+                        className="flex items-center gap-2 pl-3 pr-2.5 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-gradient-to-b from-white to-gray-50 dark:from-gray-900 dark:to-gray-800 text-xs sm:text-sm font-medium text-gray-700 dark:text-gray-200 shadow-sm hover:border-gray-400 dark:hover:border-gray-600 transition-all focus:outline-none focus:ring-2 focus:ring-gray-300 dark:focus:ring-gray-600"
                       >
-                        <option value="deadline_asc">Reset: earliest to latest</option>
-                        <option value="deadline_desc">Reset: latest to earliest</option>
-                        <option value="remaining_desc">
-                          % remaining: highest to lowest
-                        </option>
-                        <option value="remaining_asc">
-                          % remaining: lowest to highest
-                        </option>
-                        <option value="subscription_asc">
-                          Expiry: earliest to latest
-                        </option>
-                        <option value="subscription_desc">
-                          Expiry: latest to earliest
-                        </option>
-                      </select>
-                      <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-gray-500 dark:text-gray-400">
-                        <svg
-                          className="h-4 w-4"
-                          viewBox="0 0 20 20"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                        >
+                        <span>
+                          {otherAccountsSort === "deadline_asc" && "Reset: earliest to latest"}
+                          {otherAccountsSort === "deadline_desc" && "Reset: latest to earliest"}
+                          {otherAccountsSort === "remaining_desc" && "% remaining: high → low"}
+                          {otherAccountsSort === "remaining_asc" && "% remaining: low → high"}
+                          {otherAccountsSort === "subscription_asc" && "Expiry: earliest to latest"}
+                          {otherAccountsSort === "subscription_desc" && "Expiry: latest to earliest"}
+                        </span>
+                        <svg className={`h-4 w-4 shrink-0 transition-transform ${isSortMenuOpen ? "rotate-180" : ""}`} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2">
                           <path d="M6 8l4 4 4-4" strokeLinecap="round" strokeLinejoin="round" />
                         </svg>
-                      </span>
+                      </button>
+                      {isSortMenuOpen && (
+                        <div className="absolute right-0 z-30 mt-1 w-56 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-lg py-1 text-sm">
+                          {(
+                            [
+                              { value: "deadline_asc",       label: "Reset: earliest to latest" },
+                              { value: "deadline_desc",      label: "Reset: latest to earliest" },
+                              { value: "remaining_desc",     label: "% remaining: high → low" },
+                              { value: "remaining_asc",      label: "% remaining: low → high" },
+                              { value: "subscription_asc",   label: "Expiry: earliest to latest" },
+                              { value: "subscription_desc",  label: "Expiry: latest to earliest" },
+                            ] as const
+                          ).map((opt) => (
+                            <button
+                              key={opt.value}
+                              onClick={() => {
+                                setOtherAccountsSort(opt.value);
+                                setIsSortMenuOpen(false);
+                              }}
+                              className={`flex w-full items-center justify-between px-3 py-2 text-left text-xs font-medium transition-colors hover:bg-gray-100 dark:hover:bg-gray-800 ${
+                                otherAccountsSort === opt.value
+                                  ? "text-gray-900 dark:text-gray-100"
+                                  : "text-gray-600 dark:text-gray-400"
+                              }`}
+                            >
+                              {opt.label}
+                              {otherAccountsSort === opt.value && (
+                                <svg className="h-3.5 w-3.5 shrink-0 text-gray-900 dark:text-gray-100" viewBox="0 0 20 20" fill="currentColor">
+                                  <path fillRule="evenodd" d="M16.7 5.3a1 1 0 010 1.4l-7.5 7.5a1 1 0 01-1.4 0L3.3 9.7a1 1 0 011.4-1.4l3.3 3.3 6.8-6.8a1 1 0 011.4 0z" clipRule="evenodd" />
+                                </svg>
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -1745,7 +2036,7 @@ function App() {
                     <AccountCard
                       key={account.id}
                       account={account}
-                      onSwitch={() => handleSwitch(account.id)}
+                      onSwitch={(force) => void handleSwitch(account.id, force)}
                       onWarmup={() => handleWarmupAccount(account.id, account.name)}
                       onDelete={() => handleDelete(account.id)}
                       onRefresh={() =>
@@ -1753,7 +2044,7 @@ function App() {
                       }
                       onRename={(newName) => renameAccount(account.id, newName)}
                       switching={switchingId === account.id}
-                      switchDisabled={hasRunningProcesses ?? false}
+                      codexRunning={hasRunningProcesses ?? false}
                       warmingUp={
                         isWarmingAll ||
                         warmingUpId === account.id ||
@@ -1790,7 +2081,7 @@ function App() {
       {/* Warm-up Toast */}
       {warmupToast && (
         <div
-          className={`fixed bottom-20 left-1/2 -translate-x-1/2 px-4 py-3 rounded-lg shadow-lg text-sm ${
+          className={`fixed bottom-20 left-1/2 -translate-x-1/2 px-4 py-3 rounded-lg shadow-lg text-sm max-w-sm whitespace-pre-wrap ${
             warmupToast.isError
               ? "bg-red-600 text-white"
               : "bg-amber-100 text-amber-900 border border-amber-300 dark:bg-amber-900/30 dark:text-amber-200 dark:border-amber-700"

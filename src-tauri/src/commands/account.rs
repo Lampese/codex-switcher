@@ -127,11 +127,11 @@ pub async fn add_account_from_auth_json_text(
 
 /// Switch to a different account
 #[tauri::command]
-pub async fn switch_account(account_id: String) -> Result<(), String> {
-    switch_account_by_id(&account_id)
+pub async fn switch_account(account_id: String, force: Option<bool>) -> Result<(), String> {
+    switch_account_by_id(&account_id, force.unwrap_or(false))
 }
 
-pub fn switch_account_by_id(account_id: &str) -> Result<(), String> {
+pub fn switch_account_by_id(account_id: &str, force: bool) -> Result<(), String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
 
     // Find the account
@@ -141,7 +141,11 @@ pub fn switch_account_by_id(account_id: &str) -> Result<(), String> {
         .find(|a| a.id == account_id)
         .ok_or_else(|| format!("Account not found: {account_id}"))?;
 
-    ensure_codex_not_running()?;
+    // When force=false (default, tray native menu path) we still guard.
+    // When force=true (user confirmed the dialog in the React UI) we skip.
+    if !force {
+        ensure_codex_not_running()?;
+    }
 
     // Write to ~/.codex/auth.json
     switch_to_account(account).map_err(|e| e.to_string())?;
@@ -153,7 +157,6 @@ pub fn switch_account_by_id(account_id: &str) -> Result<(), String> {
     touch_account(account_id).map_err(|e| e.to_string())?;
 
     // Restart Antigravity background process if it is running
-    // This allows it to pick up the new authorization file seamlessly
     if let Ok(pids) = find_antigravity_processes() {
         for pid in pids {
             #[cfg(unix)]
@@ -170,6 +173,14 @@ pub fn switch_account_by_id(account_id: &str) -> Result<(), String> {
                     .output();
             }
         }
+    }
+
+    // If the user enabled "Open Codex after switch", launch it now.
+    if crate::auth::load_app_settings()
+        .unwrap_or_default()
+        .open_codex_after_switch
+    {
+        let _ = crate::commands::process::open_codex_app_blocking();
     }
 
     Ok(())

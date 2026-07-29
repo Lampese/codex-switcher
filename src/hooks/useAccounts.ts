@@ -7,8 +7,9 @@ import type {
   ImportAccountsSummary,
 } from "../types";
 import { invokeBackend, isTauriRuntime, type FileSource } from "../lib/platform";
+import { readUsageRefreshIntervalMs } from "../lib/autoWarmup";
 
-export function useAccounts() {
+export function useAccounts(usageRefreshIntervalMs?: number) {
   const [accounts, setAccounts] = useState<AccountWithUsage[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -232,9 +233,9 @@ export function useAccounts() {
   }, []);
 
   const switchAccount = useCallback(
-    async (accountId: string) => {
+    async (accountId: string, force = false) => {
       try {
-        await invokeBackend("switch_account", { accountId });
+        await invokeBackend("switch_account", { accountId, force });
         await loadAccounts(true); // Preserve usage data
       } catch (err) {
         throw err;
@@ -391,13 +392,14 @@ export function useAccounts() {
   useEffect(() => {
     loadAccounts().then((accountList) => refreshUsage(accountList));
     
-    // Auto-refresh usage every 60 seconds (same as official Codex CLI)
+    // Auto-refresh usage at the user-configured interval (default 1 min).
+    const intervalMs = usageRefreshIntervalMs ?? readUsageRefreshIntervalMs();
     const interval = setInterval(() => {
       refreshUsage().catch(() => {});
-    }, 60000);
+    }, intervalMs);
     
     return () => clearInterval(interval);
-  }, [loadAccounts, refreshUsage]);
+  }, [loadAccounts, refreshUsage, usageRefreshIntervalMs]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;

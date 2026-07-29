@@ -158,7 +158,7 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
         "warmup_all_accounts" => to_json(warmup_all_accounts().await?),
         "switch_account" => {
             let args: AccountIdArgs = parse_args(payload)?;
-            to_json(switch_account(args.account_id).await?)
+            to_json(switch_account(args.account_id, None).await?)
         }
         "delete_account" => {
             let args: AccountIdArgs = parse_args(payload)?;

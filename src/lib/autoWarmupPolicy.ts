@@ -4,7 +4,7 @@ const DEFAULT_SESSION_WINDOW_MINUTES = 5 * 60;
 const DEFAULT_WEEKLY_WINDOW_MINUTES = 7 * 24 * 60;
 const FULL_WINDOW_SLACK_MINUTES = 5;
 const LIMIT_FULL_THRESHOLD = 99.5;
-const MIN_SUCCESS_INTERVAL_MS = 60 * 60 * 1000;
+export const DEFAULT_MIN_SUCCESS_INTERVAL_MS = 60 * 60 * 1000;
 
 export type AutoWarmupWindowKind = "session" | "weekly";
 
@@ -91,7 +91,8 @@ export function isAutoWarmupWindowFresh(
 export function getDueAutoWarmupWindow(
   usage: UsageInfo | undefined,
   history: AutoWarmupHistory | undefined,
-  nowMs = Date.now()
+  nowMs = Date.now(),
+  minSuccessIntervalMs = DEFAULT_MIN_SUCCESS_INTERVAL_MS
 ): AutoWarmupWindow | null {
   const window = getAutoWarmupWindow(usage);
   if (!window) return null;
@@ -111,7 +112,7 @@ export function getDueAutoWarmupWindow(
   const lastSuccessfulWarmupAt = history?.lastSuccessfulWarmupAt;
   if (
     lastSuccessfulWarmupAt &&
-    nowMs - lastSuccessfulWarmupAt < MIN_SUCCESS_INTERVAL_MS &&
+    nowMs - lastSuccessfulWarmupAt < minSuccessIntervalMs &&
     (!history.lastAutoWindowKind || history.lastAutoWindowKind === window.kind)
   ) {
     return null;
