@@ -331,11 +331,11 @@ export function AccountCard({
       />
 
       {/* Actions */}
-      <div className="flex items-center gap-2 mt-3">
+      <div className="flex items-center justify-center gap-2 mt-3">
         {account.is_active ? (
           <button
             disabled
-            className="flex-1 h-9 px-4 text-sm font-medium rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700 cursor-default"
+            className="flex-1 h-9 px-4 flex items-center justify-center text-sm font-medium rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700 cursor-default"
           >
             ✓ Active
           </button>
@@ -350,7 +350,7 @@ export function AccountCard({
                 }
               }}
               disabled={switching}
-              className={`shrink-0 h-9 px-4 text-sm font-medium rounded-lg transition-colors disabled:opacity-50 whitespace-nowrap ${
+              className={`shrink-0 h-9 px-4 flex items-center justify-center text-sm font-medium rounded-lg transition-colors disabled:opacity-50 whitespace-nowrap ${
                 codexRunning
                   ? "bg-amber-600 hover:bg-amber-700 text-white"
                   : "bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900"
@@ -421,7 +421,7 @@ export function AccountCard({
           <button
             onClick={onToggleAutoWarmup}
             disabled={autoWarmupManagedByAll}
-            className={`h-9 px-3 min-w-0 max-w-[8rem] truncate text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
+            className={`h-9 px-3 min-w-0 max-w-[8rem] truncate flex items-center justify-center text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
               autoWarmupEnabled
                 ? "bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-300"
                 : "bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300"
