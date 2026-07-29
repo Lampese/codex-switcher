@@ -331,7 +331,7 @@ export function AccountCard({
       />
 
       {/* Actions */}
-      <div className="flex gap-2 mt-3">
+      <div className="flex items-center gap-2 mt-3">
         {account.is_active ? (
           <button
             disabled
