@@ -262,6 +262,8 @@ function App() {
   const [isActionsMenuOpen, setIsActionsMenuOpen] = useState(false);
   const actionsMenuRef = useRef<HTMLDivElement | null>(null);
   const timedWarmupRef = useRef<HTMLDivElement | null>(null);
+  const sortMenuRef = useRef<HTMLDivElement | null>(null);
+  const [isSortMenuOpen, setIsSortMenuOpen] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>(readStoredTheme);
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
   const [closeBehaviorPromptOpen, setCloseBehaviorPromptOpen] = useState(false);
@@ -497,6 +499,18 @@ function App() {
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [isTimedWarmupOpen]);
+
+  useEffect(() => {
+    if (!isSortMenuOpen) return;
+    const handleClickOutside = (event: MouseEvent) => {
+      if (!sortMenuRef.current) return;
+      if (!sortMenuRef.current.contains(event.target as Node)) {
+        setIsSortMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [isSortMenuOpen]);
 
   useEffect(() => {
     applyTheme(themeMode);
@@ -1962,52 +1976,58 @@ function App() {
                     })
                   </h2>
                   <div className="flex items-center gap-2">
-                    <label htmlFor="other-accounts-sort" className="text-xs text-gray-500 dark:text-gray-400">
-                      Sort
-                    </label>
-                    <div className="relative">
-                      <select
-                        id="other-accounts-sort"
-                        value={otherAccountsSort}
-                        onChange={(e) =>
-                          setOtherAccountsSort(
-                            e.target.value as
-                              | "deadline_asc"
-                              | "deadline_desc"
-                              | "remaining_desc"
-                              | "remaining_asc"
-                              | "subscription_asc"
-                              | "subscription_desc"
-                          )
-                        }
-                        className="appearance-none font-sans text-xs sm:text-sm font-medium pl-3 pr-9 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-gradient-to-b from-white to-gray-50 dark:from-gray-900 dark:to-gray-800 text-gray-700 dark:text-gray-200 shadow-sm hover:border-gray-400 dark:hover:border-gray-600 hover:shadow focus:outline-none focus:ring-2 focus:ring-gray-300 dark:focus:ring-gray-600 focus:border-gray-400 dark:focus:border-gray-600 transition-all"
+                    <span className="text-xs text-gray-500 dark:text-gray-400">Sort</span>
+                    <div className="relative" ref={sortMenuRef}>
+                      <button
+                        onClick={() => setIsSortMenuOpen((prev) => !prev)}
+                        className="flex items-center gap-2 pl-3 pr-2.5 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-gradient-to-b from-white to-gray-50 dark:from-gray-900 dark:to-gray-800 text-xs sm:text-sm font-medium text-gray-700 dark:text-gray-200 shadow-sm hover:border-gray-400 dark:hover:border-gray-600 transition-all focus:outline-none focus:ring-2 focus:ring-gray-300 dark:focus:ring-gray-600"
                       >
-                        <option value="deadline_asc">Reset: earliest to latest</option>
-                        <option value="deadline_desc">Reset: latest to earliest</option>
-                        <option value="remaining_desc">
-                          % remaining: highest to lowest
-                        </option>
-                        <option value="remaining_asc">
-                          % remaining: lowest to highest
-                        </option>
-                        <option value="subscription_asc">
-                          Expiry: earliest to latest
-                        </option>
-                        <option value="subscription_desc">
-                          Expiry: latest to earliest
-                        </option>
-                      </select>
-                      <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-gray-500 dark:text-gray-400">
-                        <svg
-                          className="h-4 w-4"
-                          viewBox="0 0 20 20"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                        >
+                        <span>
+                          {otherAccountsSort === "deadline_asc" && "Reset: earliest to latest"}
+                          {otherAccountsSort === "deadline_desc" && "Reset: latest to earliest"}
+                          {otherAccountsSort === "remaining_desc" && "% remaining: high → low"}
+                          {otherAccountsSort === "remaining_asc" && "% remaining: low → high"}
+                          {otherAccountsSort === "subscription_asc" && "Expiry: earliest to latest"}
+                          {otherAccountsSort === "subscription_desc" && "Expiry: latest to earliest"}
+                        </span>
+                        <svg className={`h-4 w-4 shrink-0 transition-transform ${isSortMenuOpen ? "rotate-180" : ""}`} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2">
                           <path d="M6 8l4 4 4-4" strokeLinecap="round" strokeLinejoin="round" />
                         </svg>
-                      </span>
+                      </button>
+                      {isSortMenuOpen && (
+                        <div className="absolute right-0 z-30 mt-1 w-56 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-lg py-1 text-sm">
+                          {(
+                            [
+                              { value: "deadline_asc",       label: "Reset: earliest to latest" },
+                              { value: "deadline_desc",      label: "Reset: latest to earliest" },
+                              { value: "remaining_desc",     label: "% remaining: high → low" },
+                              { value: "remaining_asc",      label: "% remaining: low → high" },
+                              { value: "subscription_asc",   label: "Expiry: earliest to latest" },
+                              { value: "subscription_desc",  label: "Expiry: latest to earliest" },
+                            ] as const
+                          ).map((opt) => (
+                            <button
+                              key={opt.value}
+                              onClick={() => {
+                                setOtherAccountsSort(opt.value);
+                                setIsSortMenuOpen(false);
+                              }}
+                              className={`flex w-full items-center justify-between px-3 py-2 text-left text-xs font-medium transition-colors hover:bg-gray-100 dark:hover:bg-gray-800 ${
+                                otherAccountsSort === opt.value
+                                  ? "text-gray-900 dark:text-gray-100"
+                                  : "text-gray-600 dark:text-gray-400"
+                              }`}
+                            >
+                              {opt.label}
+                              {otherAccountsSort === opt.value && (
+                                <svg className="h-3.5 w-3.5 shrink-0 text-gray-900 dark:text-gray-100" viewBox="0 0 20 20" fill="currentColor">
+                                  <path fillRule="evenodd" d="M16.7 5.3a1 1 0 010 1.4l-7.5 7.5a1 1 0 01-1.4 0L3.3 9.7a1 1 0 011.4-1.4l3.3 3.3 6.8-6.8a1 1 0 011.4 0z" clipRule="evenodd" />
+                                </svg>
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
