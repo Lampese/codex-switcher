@@ -853,7 +853,7 @@ function App() {
           .map((id) => accounts.find((a) => a.id === id)?.name ?? id)
           .join("\n• ");
         showWarmupToast(
-          `Warmed ${summary.warmed_accounts}/${summary.total_accounts}. Failed:\n• ${failedNames}`,
+          `Warmed ${summary.warmed_accounts}/${summary.total_accounts}\nFailed:\n• ${failedNames}`,
           true
         );
       }
@@ -1669,8 +1669,11 @@ function App() {
                     {/* Usage refresh interval — always shown */}
                     <div className="my-1 border-t border-gray-200 dark:border-neutral-800" />
                     <div className="px-3 py-2">
-                      <div className="mb-1.5 text-xs font-medium text-gray-500 dark:text-gray-400">
-                        Usage refresh interval
+                      <div className="mb-0.5 text-xs font-medium text-gray-700 dark:text-gray-200">
+                        Usage bar refresh interval
+                      </div>
+                      <div className="mb-1.5 text-[11px] text-gray-400 dark:text-gray-500">
+                        How often usage bars re-fetch. Does not affect auto warm-up.
                       </div>
                       <div className="flex flex-wrap gap-1">
                         {USAGE_REFRESH_INTERVAL_PRESETS.map((preset) => (

@@ -13,7 +13,6 @@ export const USAGE_REFRESH_INTERVAL_PRESETS: { label: string; ms: number }[] = [
   { label: "1 min", ms: 60_000 },
   { label: "5 min", ms: 5 * 60_000 },
   { label: "10 min", ms: 10 * 60_000 },
-  { label: "30 min", ms: 30 * 60_000 },
 ];
 
 export function readUsageRefreshIntervalMs(): number {
