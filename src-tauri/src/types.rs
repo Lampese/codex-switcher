@@ -40,6 +40,18 @@ fn default_close_behavior_prompt_enabled() -> bool {
     true
 }
 
+fn default_open_codex_after_switch() -> bool {
+    false
+}
+
+fn default_launch_at_login() -> bool {
+    false
+}
+
+fn default_start_minimized() -> bool {
+    false
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
@@ -47,6 +59,15 @@ pub struct AppSettings {
     pub dock_display_mode: DockDisplayMode,
     #[serde(default = "default_close_behavior_prompt_enabled")]
     pub close_behavior_prompt_enabled: bool,
+    /// When true, Codex is launched automatically after every successful switch.
+    #[serde(default = "default_open_codex_after_switch")]
+    pub open_codex_after_switch: bool,
+    /// When true, the app registers itself to start at login (Tauri autostart).
+    #[serde(default = "default_launch_at_login")]
+    pub launch_at_login: bool,
+    /// When true, the main window is hidden on startup (runs silently in tray).
+    #[serde(default = "default_start_minimized")]
+    pub start_minimized: bool,
 }
 
 impl Default for AppSettings {
@@ -55,6 +76,9 @@ impl Default for AppSettings {
             tray_display_mode: TrayDisplayMode::default(),
             dock_display_mode: DockDisplayMode::default(),
             close_behavior_prompt_enabled: true,
+            open_codex_after_switch: false,
+            launch_at_login: false,
+            start_minimized: false,
         }
     }
 }

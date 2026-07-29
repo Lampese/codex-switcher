@@ -232,9 +232,9 @@ export function useAccounts() {
   }, []);
 
   const switchAccount = useCallback(
-    async (accountId: string) => {
+    async (accountId: string, force = false) => {
       try {
-        await invokeBackend("switch_account", { accountId });
+        await invokeBackend("switch_account", { accountId, force });
         await loadAccounts(true); // Preserve usage data
       } catch (err) {
         throw err;

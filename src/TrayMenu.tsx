@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import type { AccountInfo, AccountUsageStats, DockDisplayMode, UsageInfo } from "./types";
 import { invokeBackend, isTauriRuntime } from "./lib/platform";
 import {
@@ -378,7 +378,10 @@ function TrayMenu() {
             No accounts configured
           </div>
         ) : (
-          accounts.map((account) => {
+          accounts
+            .slice()
+            .sort((a, b) => (a.is_active ? -1 : b.is_active ? 1 : 0))
+            .map((account, idx, sorted) => {
             const plan = formatPlan(account.plan_type);
             const usage = usageById[account.id];
             const stats = statsById[account.id];
@@ -403,16 +406,16 @@ function TrayMenu() {
                 : [];
 
             return (
-              <button
-                key={account.id}
-                onClick={() => void handleSwitch(account)}
-                disabled={switchingId !== null}
-                className={`flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors disabled:opacity-60 ${
-                  account.is_active
-                    ? "bg-gray-100 dark:bg-gray-800"
-                    : "hover:bg-gray-100 dark:hover:bg-gray-800"
-                }`}
-              >
+              <React.Fragment key={account.id}>
+                <button
+                  onClick={() => void handleSwitch(account)}
+                  disabled={switchingId !== null}
+                  className={`flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors disabled:opacity-60 ${
+                    account.is_active
+                      ? "bg-gray-100 dark:bg-gray-800"
+                      : "hover:bg-gray-100 dark:hover:bg-gray-800"
+                  }`}
+                >
                 <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center">
                   {account.is_active && (
                     <svg
@@ -505,6 +508,11 @@ function TrayMenu() {
                   <span className="shrink-0 text-xs text-gray-400">...</span>
                 )}
               </button>
+                {/* Separator after the active account when more accounts follow */}
+                {account.is_active && idx < sorted.length - 1 && (
+                  <div className="my-1 mx-2 border-t border-gray-100 dark:border-gray-800" />
+                )}
+              </React.Fragment>
             );
           })
         )}
@@ -550,6 +558,12 @@ function TrayMenu() {
           className="flex-1 rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-gray-100 dark:hover:bg-gray-800"
         >
           Open Codex Switcher
+        </button>
+        <button
+          onClick={() => void invokeBackend("open_codex_app")}
+          className="rounded-lg px-2 py-1.5 text-sm text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
+        >
+          Open Codex
         </button>
         <button
           onClick={() => void invokeBackend("quit_app")}

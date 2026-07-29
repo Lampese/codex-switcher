@@ -247,6 +247,11 @@ function App() {
   const [closeBehaviorPromptOpen, setCloseBehaviorPromptOpen] = useState(false);
   const [closeBehaviorDontAskAgain, setCloseBehaviorDontAskAgain] = useState(false);
   const [isCompletingCloseBehavior, setIsCompletingCloseBehavior] = useState(false);
+
+  // App settings: open-after-switch, launch-at-login, start-minimized
+  const [openCodexAfterSwitch, setOpenCodexAfterSwitch] = useState(false);
+  const [launchAtLogin, setLaunchAtLogin] = useState(false);
+  const [startMinimized, setStartMinimized] = useState(false);
   const accountsRef = useRef(accounts);
   const autoWarmupAccountIdsRef = useRef(autoWarmupAccountIds);
   const autoWarmupLedgerRef = useRef(autoWarmupLedger);
@@ -433,6 +438,18 @@ function App() {
     });
   }, [loadMaskedAccountIds]);
 
+  // Load app settings on mount — handlers are defined after showWarmupToast/formatWarmupError below
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    invokeBackend<{ openCodexAfterSwitch: boolean; launchAtLogin: boolean; startMinimized: boolean }>(
+      "get_app_settings"
+    ).then((s) => {
+      setOpenCodexAfterSwitch(s.openCodexAfterSwitch);
+      setLaunchAtLogin(s.launchAtLogin);
+      setStartMinimized(s.startMinimized);
+    }).catch(() => {});
+  }, []);
+
   useEffect(() => {
     if (!isActionsMenuOpen) return;
 
@@ -507,18 +524,29 @@ function App() {
     };
   }, []);
 
-  const handleSwitch = async (accountId: string) => {
-    // Check processes before switching
-    const latestProcessInfo = await checkProcesses();
-    if (latestProcessInfo && !latestProcessInfo.can_switch) {
-      return;
+  const handleSwitch = async (accountId: string, force = false) => {
+    // If force=true the user already confirmed the dialog in AccountCard.
+    // We still need to kill Codex processes before switching.
+    if (force) {
+      const killed = await forceCloseCodexProcesses();
+      if (!killed?.can_switch) {
+        showWarmupToast("Could not close Codex processes. Switch aborted.", true);
+        return;
+      }
+    } else {
+      // Check processes before switching (non-force path)
+      const latestProcessInfo = await checkProcesses();
+      if (latestProcessInfo && !latestProcessInfo.can_switch) {
+        return;
+      }
     }
 
     try {
       setSwitchingId(accountId);
-      await switchAccount(accountId);
+      await switchAccount(accountId, force);
     } catch (err) {
       console.error("Failed to switch account:", err);
+      showWarmupToast(`Switch failed: ${formatWarmupError(err)}`, true);
     } finally {
       setSwitchingId(null);
     }
@@ -544,16 +572,27 @@ function App() {
     setRefreshSuccess(false);
     try {
       await refreshUsage(undefined, { refreshMetadata: true });
-      setRefreshSuccess(true);
-      setTimeout(() => setRefreshSuccess(false), 2000);
+      // Check if any accounts have usage errors
+      const failedAccounts = accounts.filter(
+        (a) => a.usage?.error
+      );
+      if (failedAccounts.length > 0) {
+        const names = failedAccounts.map((a) => `${a.name}: ${a.usage!.error}`).join("\n• ");
+        showWarmupToast(`Refresh done. Errors:\n• ${names}`, true);
+      } else {
+        setRefreshSuccess(true);
+        setTimeout(() => setRefreshSuccess(false), 2000);
+      }
     } finally {
       setIsRefreshing(false);
     }
   };
 
   const showWarmupToast = useCallback((message: string, isError = false) => {
+    // Multi-line toasts (contain newlines) stay for 8 s; short ones for 2.5 s.
+    const duration = message.includes("\n") ? 8000 : 2500;
     setWarmupToast({ message, isError });
-    setTimeout(() => setWarmupToast(null), 2500);
+    setTimeout(() => setWarmupToast(null), duration);
   }, []);
 
   const formatWarmupError = useCallback((err: unknown) => {
@@ -566,6 +605,41 @@ function App() {
       return "Unknown error";
     }
   }, []);
+
+  // Settings toggle handlers — must be after showWarmupToast / formatWarmupError
+  const handleToggleOpenCodexAfterSwitch = useCallback(async () => {
+    const next = !openCodexAfterSwitch;
+    setOpenCodexAfterSwitch(next);
+    try {
+      await invokeBackend("set_app_settings", { openCodexAfterSwitch: next });
+    } catch (err) {
+      setOpenCodexAfterSwitch(!next);
+      showWarmupToast(`Failed to save setting: ${formatWarmupError(err)}`, true);
+    }
+  }, [openCodexAfterSwitch, formatWarmupError, showWarmupToast]);
+
+  const handleToggleLaunchAtLogin = useCallback(async () => {
+    const next = !launchAtLogin;
+    setLaunchAtLogin(next);
+    try {
+      const result = await invokeBackend<{ launchAtLogin: boolean }>("set_app_settings", { launchAtLogin: next });
+      setLaunchAtLogin(result.launchAtLogin);
+    } catch (err) {
+      setLaunchAtLogin(!next);
+      showWarmupToast(`Failed to save setting: ${formatWarmupError(err)}`, true);
+    }
+  }, [launchAtLogin, formatWarmupError, showWarmupToast]);
+
+  const handleToggleStartMinimized = useCallback(async () => {
+    const next = !startMinimized;
+    setStartMinimized(next);
+    try {
+      await invokeBackend("set_app_settings", { startMinimized: next });
+    } catch (err) {
+      setStartMinimized(!next);
+      showWarmupToast(`Failed to save setting: ${formatWarmupError(err)}`, true);
+    }
+  }, [startMinimized, formatWarmupError, showWarmupToast]);
 
   const markSuccessfulWarmup = useCallback(
     (accountId: string, timestamp = Date.now(), window?: AutoWarmupWindow) => {
@@ -621,7 +695,7 @@ function App() {
           if (accountId && latestProcessInfo?.can_switch) {
             try {
               setSwitchingId(accountId);
-              await switchAccount(accountId);
+              await switchAccount(accountId, false);
               setPendingTraySwitchAccountId(null);
               showWarmupToast("Switched account from tray.");
             } catch (err) {
@@ -701,7 +775,7 @@ function App() {
 
     try {
       setSwitchingId(accountId);
-      await switchAccount(accountId);
+      await switchAccount(accountId, true);
       setPendingTraySwitchAccountId(null);
       showWarmupToast("Switched account after force closing Codex.");
     } catch (err) {
@@ -763,8 +837,12 @@ function App() {
           }`
         );
       } else {
+        // Build per-account error details
+        const failedNames = summary.failed_account_ids
+          .map((id) => accounts.find((a) => a.id === id)?.name ?? id)
+          .join("\n• ");
         showWarmupToast(
-          `Warmed ${summary.warmed_accounts}/${summary.total_accounts}. Failed: ${summary.failed_account_ids.length}`,
+          `Warmed ${summary.warmed_accounts}/${summary.total_accounts}. Failed:\n• ${failedNames}`,
           true
         );
       }
@@ -1489,10 +1567,10 @@ function App() {
                   onClick={() => setIsActionsMenuOpen((prev) => !prev)}
                   className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-900 text-white transition-colors hover:bg-gray-800 dark:bg-black dark:hover:bg-neutral-900 shrink-0 whitespace-nowrap"
                 >
-                  Account ▾
+                  Settings ▾
                 </button>
                 {isActionsMenuOpen && (
-                  <div className="absolute right-0 z-50 mt-2 w-56 rounded-xl border border-gray-200 bg-white p-2 text-gray-700 shadow-xl dark:border-neutral-800 dark:bg-black dark:text-white">
+                  <div className="absolute right-0 z-50 mt-2 w-64 rounded-xl border border-gray-200 bg-white p-2 text-gray-700 shadow-xl dark:border-neutral-800 dark:bg-black dark:text-white">
                     <button
                       onClick={() => {
                         setIsActionsMenuOpen(false);
@@ -1542,6 +1620,40 @@ function App() {
                     >
                       {isImportingFull ? "Importing..." : "Import Full Encrypted File"}
                     </button>
+
+                    {/* Settings toggles — Tauri only */}
+                    {isTauriRuntime() && (
+                      <>
+                        <div className="my-1 border-t border-gray-200 dark:border-neutral-800" />
+                        <label className="flex items-center justify-between rounded-lg px-3 py-2 text-sm cursor-pointer hover:bg-gray-100 dark:hover:bg-neutral-900">
+                          <span className="dark:text-white">Open Codex after switch</span>
+                          <input
+                            type="checkbox"
+                            checked={openCodexAfterSwitch}
+                            onChange={() => void handleToggleOpenCodexAfterSwitch()}
+                            className="h-4 w-4 accent-gray-900 dark:accent-gray-100"
+                          />
+                        </label>
+                        <label className="flex items-center justify-between rounded-lg px-3 py-2 text-sm cursor-pointer hover:bg-gray-100 dark:hover:bg-neutral-900">
+                          <span className="dark:text-white">Launch at Login</span>
+                          <input
+                            type="checkbox"
+                            checked={launchAtLogin}
+                            onChange={() => void handleToggleLaunchAtLogin()}
+                            className="h-4 w-4 accent-gray-900 dark:accent-gray-100"
+                          />
+                        </label>
+                        <label className="flex items-center justify-between rounded-lg px-3 py-2 text-sm cursor-pointer hover:bg-gray-100 dark:hover:bg-neutral-900">
+                          <span className="dark:text-white">Start Minimized</span>
+                          <input
+                            type="checkbox"
+                            checked={startMinimized}
+                            onChange={() => void handleToggleStartMinimized()}
+                            className="h-4 w-4 accent-gray-900 dark:accent-gray-100"
+                          />
+                        </label>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -1657,7 +1769,7 @@ function App() {
                     }
                     onRename={(newName) => renameAccount(activeAccount.id, newName)}
                     switching={switchingId === activeAccount.id}
-                    switchDisabled={hasRunningProcesses ?? false}
+                    codexRunning={hasRunningProcesses ?? false}
                     warmingUp={
                       isWarmingAll ||
                       warmingUpId === activeAccount.id ||
@@ -1745,7 +1857,7 @@ function App() {
                     <AccountCard
                       key={account.id}
                       account={account}
-                      onSwitch={() => handleSwitch(account.id)}
+                      onSwitch={(force) => void handleSwitch(account.id, force)}
                       onWarmup={() => handleWarmupAccount(account.id, account.name)}
                       onDelete={() => handleDelete(account.id)}
                       onRefresh={() =>
@@ -1753,7 +1865,7 @@ function App() {
                       }
                       onRename={(newName) => renameAccount(account.id, newName)}
                       switching={switchingId === account.id}
-                      switchDisabled={hasRunningProcesses ?? false}
+                      codexRunning={hasRunningProcesses ?? false}
                       warmingUp={
                         isWarmingAll ||
                         warmingUpId === account.id ||
@@ -1790,7 +1902,7 @@ function App() {
       {/* Warm-up Toast */}
       {warmupToast && (
         <div
-          className={`fixed bottom-20 left-1/2 -translate-x-1/2 px-4 py-3 rounded-lg shadow-lg text-sm ${
+          className={`fixed bottom-20 left-1/2 -translate-x-1/2 px-4 py-3 rounded-lg shadow-lg text-sm max-w-sm whitespace-pre-wrap ${
             warmupToast.isError
               ? "bg-red-600 text-white"
               : "bg-amber-100 text-amber-900 border border-amber-300 dark:bg-amber-900/30 dark:text-amber-200 dark:border-amber-700"

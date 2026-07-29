@@ -175,3 +175,62 @@ pub fn should_prompt_for_close_behavior() -> bool {
         false
     }
 }
+
+/// Exposed settings subset that the frontend can read/write.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrontendAppSettings {
+    pub open_codex_after_switch: bool,
+    pub launch_at_login: bool,
+    pub start_minimized: bool,
+}
+
+/// Return settings the frontend needs (open-after-switch, launch-at-login, start-minimized).
+#[tauri::command]
+pub fn get_app_settings() -> FrontendAppSettings {
+    let s = load_app_settings().unwrap_or_default();
+    FrontendAppSettings {
+        open_codex_after_switch: s.open_codex_after_switch,
+        launch_at_login: s.launch_at_login,
+        start_minimized: s.start_minimized,
+    }
+}
+
+/// Persist settings changed from the frontend and apply side-effects (autostart).
+#[tauri::command]
+pub async fn set_app_settings(
+    app: AppHandle,
+    open_codex_after_switch: Option<bool>,
+    launch_at_login: Option<bool>,
+    start_minimized: Option<bool>,
+) -> Result<FrontendAppSettings, String> {
+    let mut settings = load_app_settings().unwrap_or_default();
+
+    if let Some(v) = open_codex_after_switch {
+        settings.open_codex_after_switch = v;
+    }
+    if let Some(v) = start_minimized {
+        settings.start_minimized = v;
+    }
+
+    if let Some(v) = launch_at_login {
+        // Apply autostart via tauri-plugin-autostart.
+        use tauri_plugin_autostart::ManagerExt;
+        let autostart = app.autolaunch();
+        if v {
+            autostart.enable().map_err(|e| e.to_string())?;
+        } else {
+            autostart.disable().map_err(|e| e.to_string())?;
+        }
+        // Read back the real state from the OS in case it diverged.
+        settings.launch_at_login = autostart.is_enabled().unwrap_or(v);
+    }
+
+    save_app_settings(&settings).map_err(|e| e.to_string())?;
+
+    Ok(FrontendAppSettings {
+        open_codex_after_switch: settings.open_codex_after_switch,
+        launch_at_login: settings.launch_at_login,
+        start_minimized: settings.start_minimized,
+    })
+}
