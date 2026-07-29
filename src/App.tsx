@@ -26,9 +26,12 @@ import {
   readAutoWarmupAllEnabled,
   readTimedWarmupEnabled,
   readTimedWarmupTimes,
+  readUsageRefreshIntervalMs,
   writeAutoWarmupAllEnabled,
   writeTimedWarmupEnabled,
   writeTimedWarmupTimes,
+  writeUsageRefreshIntervalMs,
+  USAGE_REFRESH_INTERVAL_PRESETS,
 } from "./lib/autoWarmup";
 import {
   getAutoWarmupWindowKey,
@@ -161,6 +164,14 @@ function matchesAccountSearch(
 }
 
 function App() {
+  // Usage refresh interval — read from storage once on mount; the interval
+  // state re-mounts the useAccounts timer whenever the user changes it.
+  const [usageRefreshIntervalMs, setUsageRefreshIntervalMs] = useState(
+    () => readUsageRefreshIntervalMs()
+  );
+  // Custom interval input (ms), shown when user picks "Custom"
+  const [customIntervalMinutes, setCustomIntervalMinutes] = useState("");
+
   const {
     accounts,
     loading,
@@ -181,7 +192,7 @@ function App() {
     cancelOAuthLogin,
     loadMaskedAccountIds,
     saveMaskedAccountIds,
-  } = useAccounts();
+  } = useAccounts(usageRefreshIntervalMs);
 
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isConfigModalOpen, setIsConfigModalOpen] = useState(false);
@@ -1654,6 +1665,71 @@ function App() {
                         </label>
                       </>
                     )}
+
+                    {/* Usage refresh interval — always shown */}
+                    <div className="my-1 border-t border-gray-200 dark:border-neutral-800" />
+                    <div className="px-3 py-2">
+                      <div className="mb-1.5 text-xs font-medium text-gray-500 dark:text-gray-400">
+                        Usage refresh interval
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {USAGE_REFRESH_INTERVAL_PRESETS.map((preset) => (
+                          <button
+                            key={preset.ms}
+                            onClick={() => {
+                              setUsageRefreshIntervalMs(preset.ms);
+                              writeUsageRefreshIntervalMs(preset.ms);
+                              setCustomIntervalMinutes("");
+                            }}
+                            className={`rounded-md px-2 py-1 text-xs font-medium transition-colors ${
+                              usageRefreshIntervalMs === preset.ms &&
+                              customIntervalMinutes === ""
+                                ? "bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900"
+                                : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
+                            }`}
+                          >
+                            {preset.label}
+                          </button>
+                        ))}
+                      </div>
+                      {/* Custom interval */}
+                      <div className="mt-2 flex items-center gap-2">
+                        <input
+                          type="number"
+                          min={1}
+                          max={60}
+                          placeholder="Custom min"
+                          value={customIntervalMinutes}
+                          onChange={(e) => setCustomIntervalMinutes(e.target.value)}
+                          className="h-7 w-24 rounded-md border border-gray-300 bg-white px-2 text-xs text-gray-800 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+                        />
+                        <button
+                          onClick={() => {
+                            const mins = Number(customIntervalMinutes);
+                            if (!Number.isFinite(mins) || mins < 1 || mins > 60) return;
+                            const ms = Math.round(mins * 60_000);
+                            setUsageRefreshIntervalMs(ms);
+                            writeUsageRefreshIntervalMs(ms);
+                          }}
+                          disabled={
+                            !customIntervalMinutes ||
+                            Number(customIntervalMinutes) < 1 ||
+                            Number(customIntervalMinutes) > 60
+                          }
+                          className="h-7 rounded-md bg-gray-900 px-2 text-xs font-semibold text-white transition-colors hover:bg-gray-800 disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-gray-200"
+                        >
+                          Set
+                        </button>
+                        {customIntervalMinutes === "" &&
+                          !USAGE_REFRESH_INTERVAL_PRESETS.some(
+                            (p) => p.ms === usageRefreshIntervalMs
+                          ) && (
+                            <span className="text-xs text-gray-500 dark:text-gray-400">
+                              {(usageRefreshIntervalMs / 60_000).toFixed(1)} min
+                            </span>
+                          )}
+                      </div>
+                    </div>
                   </div>
                 )}
               </div>
