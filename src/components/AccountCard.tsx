@@ -335,7 +335,7 @@ export function AccountCard({
         {account.is_active ? (
           <button
             disabled
-            className="flex-1 px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700 cursor-default"
+            className="flex-1 h-9 px-4 text-sm font-medium rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700 cursor-default"
           >
             ✓ Active
           </button>
@@ -350,7 +350,7 @@ export function AccountCard({
                 }
               }}
               disabled={switching}
-              className={`flex-1 px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50 whitespace-nowrap ${
+              className={`flex-1 h-9 px-4 text-sm font-medium rounded-lg transition-colors disabled:opacity-50 whitespace-nowrap ${
                 codexRunning
                   ? "bg-amber-600 hover:bg-amber-700 text-white"
                   : "bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900"
@@ -408,7 +408,7 @@ export function AccountCard({
             void onWarmup();
           }}
           disabled={warmingUp}
-          className={`px-3 py-2 text-sm rounded-lg transition-colors ${
+          className={`h-9 w-9 flex items-center justify-center text-sm rounded-lg transition-colors ${
             warmingUp
               ? "bg-amber-100 dark:bg-amber-900/30 text-amber-500 dark:text-amber-300"
               : "bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-100 dark:hover:bg-amber-900/40 text-amber-700 dark:text-amber-300"
@@ -421,7 +421,7 @@ export function AccountCard({
           <button
             onClick={onToggleAutoWarmup}
             disabled={autoWarmupManagedByAll}
-            className={`px-3 py-2 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
+            className={`h-9 px-3 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
               autoWarmupEnabled
                 ? "bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-300"
                 : "bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300"
@@ -440,7 +440,7 @@ export function AccountCard({
         <button
           onClick={handleRefresh}
           disabled={isRefreshing}
-          className={`px-3 py-2 text-sm rounded-lg transition-colors ${
+          className={`h-9 w-9 flex items-center justify-center text-sm rounded-lg transition-colors ${
             isRefreshing
               ? "bg-gray-200 dark:bg-gray-800 text-gray-400 dark:text-gray-500"
               : "bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300"
@@ -451,7 +451,7 @@ export function AccountCard({
         </button>
         <button
           onClick={onDelete}
-          className="px-3 py-2 text-sm rounded-lg bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-300 transition-colors"
+          className="h-9 w-9 flex items-center justify-center text-sm rounded-lg bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-300 transition-colors"
           title="Remove account"
         >
           ✕

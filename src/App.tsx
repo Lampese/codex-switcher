@@ -24,14 +24,17 @@ import {
   TIMED_WARMUP_LEDGER_STORAGE_KEY,
   normalizeTimedWarmupTimes,
   readAutoWarmupAllEnabled,
+  readAutoWarmupIntervalMs,
   readTimedWarmupEnabled,
   readTimedWarmupTimes,
   readUsageRefreshIntervalMs,
   writeAutoWarmupAllEnabled,
+  writeAutoWarmupIntervalMs,
   writeTimedWarmupEnabled,
   writeTimedWarmupTimes,
   writeUsageRefreshIntervalMs,
   USAGE_REFRESH_INTERVAL_PRESETS,
+  AUTO_WARMUP_INTERVAL_PRESETS,
 } from "./lib/autoWarmup";
 import {
   getAutoWarmupWindowKey,
@@ -171,6 +174,12 @@ function App() {
   );
   // Custom interval input (ms), shown when user picks "Custom"
   const [customIntervalMinutes, setCustomIntervalMinutes] = useState("");
+
+  // Auto warm-up minimum interval between successive warm-ups per account.
+  const [autoWarmupIntervalMs, setAutoWarmupIntervalMs] = useState(
+    () => readAutoWarmupIntervalMs()
+  );
+  const [customWarmupIntervalMinutes, setCustomWarmupIntervalMinutes] = useState("");
 
   const {
     accounts,
@@ -879,9 +888,14 @@ function App() {
 
   const getDueAutoWarmupForAccount = useCallback(
     (accountId: string, usage: UsageInfo | undefined) => {
-      return getDueAutoWarmupWindow(usage, autoWarmupLedgerRef.current[accountId]);
+      return getDueAutoWarmupWindow(
+        usage,
+        autoWarmupLedgerRef.current[accountId],
+        Date.now(),
+        autoWarmupIntervalMs
+      );
     },
-    []
+    [autoWarmupIntervalMs]
   );
 
   const getAutoWarmupLabel = useCallback(
@@ -1729,6 +1743,72 @@ function App() {
                           ) && (
                             <span className="text-xs text-gray-500 dark:text-gray-400">
                               {(usageRefreshIntervalMs / 60_000).toFixed(1)} min
+                            </span>
+                          )}
+                      </div>
+                    </div>
+                    {/* ── Auto warm-up interval ── */}
+                    <div className="my-1 border-t border-gray-200 dark:border-neutral-800" />
+                    <div className="px-3 py-2">
+                      <div className="mb-0.5 text-xs font-medium text-gray-700 dark:text-gray-200">
+                        Auto warm-up interval
+                      </div>
+                      <div className="mb-1.5 text-[11px] text-gray-400 dark:text-gray-500">
+                        Minimum gap between successive auto warm-ups per account.
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {AUTO_WARMUP_INTERVAL_PRESETS.map((preset) => (
+                          <button
+                            key={preset.ms}
+                            onClick={() => {
+                              setAutoWarmupIntervalMs(preset.ms);
+                              writeAutoWarmupIntervalMs(preset.ms);
+                              setCustomWarmupIntervalMinutes("");
+                            }}
+                            className={`rounded-md px-2 py-1 text-xs font-medium transition-colors ${
+                              autoWarmupIntervalMs === preset.ms &&
+                              customWarmupIntervalMinutes === ""
+                                ? "bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900"
+                                : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
+                            }`}
+                          >
+                            {preset.label}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="mt-2 flex items-center gap-2">
+                        <input
+                          type="number"
+                          min={5}
+                          max={1440}
+                          placeholder="Custom min"
+                          value={customWarmupIntervalMinutes}
+                          onChange={(e) => setCustomWarmupIntervalMinutes(e.target.value)}
+                          className="h-7 w-24 rounded-md border border-gray-300 bg-white px-2 text-xs text-gray-800 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+                        />
+                        <button
+                          onClick={() => {
+                            const mins = Number(customWarmupIntervalMinutes);
+                            if (!Number.isFinite(mins) || mins < 5 || mins > 1440) return;
+                            const ms = Math.round(mins * 60_000);
+                            setAutoWarmupIntervalMs(ms);
+                            writeAutoWarmupIntervalMs(ms);
+                          }}
+                          disabled={
+                            !customWarmupIntervalMinutes ||
+                            Number(customWarmupIntervalMinutes) < 5 ||
+                            Number(customWarmupIntervalMinutes) > 1440
+                          }
+                          className="h-7 rounded-md bg-gray-900 px-2 text-xs font-semibold text-white transition-colors hover:bg-gray-800 disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-gray-200"
+                        >
+                          Set
+                        </button>
+                        {customWarmupIntervalMinutes === "" &&
+                          !AUTO_WARMUP_INTERVAL_PRESETS.some(
+                            (p) => p.ms === autoWarmupIntervalMs
+                          ) && (
+                            <span className="text-xs text-gray-500 dark:text-gray-400">
+                              {(autoWarmupIntervalMs / 60_000).toFixed(0)} min
                             </span>
                           )}
                       </div>

@@ -36,6 +36,40 @@ export function writeUsageRefreshIntervalMs(ms: number): void {
   window.localStorage.setItem(USAGE_REFRESH_INTERVAL_STORAGE_KEY, String(ms));
 }
 
+// ─── Auto warm-up minimum interval ──────────────────────────────────────────
+// Minimum time between successive auto warm-ups for the same account/window.
+
+export const AUTO_WARMUP_INTERVAL_STORAGE_KEY = "codex-switcher-auto-warmup-interval-ms";
+export const AUTO_WARMUP_INTERVAL_DEFAULT_MS = 60 * 60_000; // 1 hour
+
+export const AUTO_WARMUP_INTERVAL_PRESETS: { label: string; ms: number }[] = [
+  { label: "15 min", ms: 15 * 60_000 },
+  { label: "30 min", ms: 30 * 60_000 },
+  { label: "1 h",    ms: 60 * 60_000 },
+  { label: "2 h",    ms: 2 * 60 * 60_000 },
+];
+
+export function readAutoWarmupIntervalMs(): number {
+  if (typeof window === "undefined") return AUTO_WARMUP_INTERVAL_DEFAULT_MS;
+  try {
+    const raw = window.localStorage.getItem(AUTO_WARMUP_INTERVAL_STORAGE_KEY);
+    if (!raw) return AUTO_WARMUP_INTERVAL_DEFAULT_MS;
+    const parsed = Number(raw);
+    // Clamp: 5 min – 24 h
+    if (!Number.isFinite(parsed) || parsed < 5 * 60_000 || parsed > 24 * 60 * 60_000) {
+      return AUTO_WARMUP_INTERVAL_DEFAULT_MS;
+    }
+    return parsed;
+  } catch {
+    return AUTO_WARMUP_INTERVAL_DEFAULT_MS;
+  }
+}
+
+export function writeAutoWarmupIntervalMs(ms: number): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(AUTO_WARMUP_INTERVAL_STORAGE_KEY, String(ms));
+}
+
 export const TIMED_WARMUP_ENABLED_STORAGE_KEY = "codex-switcher-timed-warmup-enabled";
 export const TIMED_WARMUP_TIMES_STORAGE_KEY = "codex-switcher-timed-warmup-times";
 export const TIMED_WARMUP_LEDGER_STORAGE_KEY = "codex-switcher-timed-warmup-last-fire";
