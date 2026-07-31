@@ -535,6 +535,8 @@ dependencies = [
  "dirs",
  "flate2",
  "futures",
+ "objc2",
+ "objc2-app-kit",
  "pbkdf2",
  "plist",
  "rand 0.9.2",

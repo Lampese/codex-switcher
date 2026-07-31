@@ -81,14 +81,19 @@ pub fn refresh<R: Runtime>(app: &AppHandle<R>) {
     refresh_menu(app);
 }
 
-/// Store usage reported by the main app and refresh the native menu labels.
+/// Store usage reported by the main app and refresh the compact tray display.
 pub fn ingest_usage<R: Runtime>(app: &AppHandle<R>, usages: Vec<UsageInfo>) {
     if let Ok(mut cache) = TRAY_USAGE.lock() {
         for usage in usages {
             cache.insert(usage.account_id.clone(), usage);
         }
     }
-    refresh_menu(app);
+    // Usage arrives from both the webview and the background poller. Replacing
+    // the whole native menu on every report makes macOS repeatedly rebuild its
+    // NSStatusItem scene, which can leave the status item present but visually
+    // absent. Usage changes only affect the compact title, so keep the existing
+    // menu and status item alive here.
+    refresh_title(app);
 }
 
 // ============================================================================
@@ -108,9 +113,13 @@ fn create_tray_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
+        .visible_on_all_workspaces(true)
         .skip_taskbar(true)
         .visible(false)
         .build()?;
+
+    #[cfg(target_os = "macos")]
+    configure_macos_tray_window(&window)?;
 
     // Hide the popup as soon as it loses focus so it behaves like a native menu.
     let app_handle = app.clone();
@@ -122,6 +131,21 @@ fn create_tray_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         }
     });
 
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn configure_macos_tray_window<R: Runtime>(window: &tauri::WebviewWindow<R>) -> tauri::Result<()> {
+    use objc2_app_kit::{NSPopUpMenuWindowLevel, NSWindow, NSWindowCollectionBehavior};
+
+    let ns_window = unsafe { &*window.ns_window()?.cast::<NSWindow>() };
+    let behavior = ns_window.collectionBehavior()
+        | NSWindowCollectionBehavior::CanJoinAllSpaces
+        | NSWindowCollectionBehavior::FullScreenAuxiliary
+        | NSWindowCollectionBehavior::Transient
+        | NSWindowCollectionBehavior::IgnoresCycle;
+    ns_window.setCollectionBehavior(behavior);
+    ns_window.setLevel(NSPopUpMenuWindowLevel);
     Ok(())
 }
 
@@ -155,6 +179,57 @@ fn toggle_tray_window<R: Runtime>(app: &AppHandle<R>, cursor: PhysicalPosition<f
     let _ = app.emit_to(TRAY_WINDOW, TRAY_REFRESH_EVENT, ());
 }
 
+#[cfg(target_os = "macos")]
+fn position_near_cursor<R: Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    _cursor: PhysicalPosition<f64>,
+) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSEvent, NSScreen, NSWindow};
+
+    let Ok(ns_window) = window.ns_window() else {
+        return;
+    };
+    let ns_window_address = ns_window as usize;
+
+    // NSScreen and NSWindow are MainActor APIs. Queue this before `show()`;
+    // Tauri preserves event-loop message order, so the native frame is placed
+    // before the hidden popup becomes visible.
+    let _ = window.run_on_main_thread(move || {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let mouse = NSEvent::mouseLocation();
+        let screens = NSScreen::screens(mtm);
+        let Some(screen) = screens.iter().find(|screen| {
+            let frame = screen.frame();
+            mouse.x >= frame.origin.x
+                && mouse.x < frame.origin.x + frame.size.width
+                && mouse.y >= frame.origin.y
+                && mouse.y < frame.origin.y + frame.size.height
+        }) else {
+            return;
+        };
+
+        // Apple documents visibleFrame as the portion safe for app content;
+        // on camera-housing Macs it excludes the bezel and both adjacent areas.
+        let visible = screen.visibleFrame();
+        let ns_window = unsafe { &*(ns_window_address as *mut NSWindow) };
+        let width = ns_window.frame().size.width;
+        let x = clamp_popup_axis(
+            mouse.x - width / 2.0,
+            visible.origin.x,
+            visible.origin.x + visible.size.width,
+            width,
+        );
+        let mut top_left = visible.origin;
+        top_left.x = x;
+        top_left.y += visible.size.height - 4.0;
+        ns_window.setFrameTopLeftPoint(top_left);
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 fn position_near_cursor<R: Runtime>(
     window: &tauri::WebviewWindow<R>,
@@ -163,17 +238,22 @@ fn position_near_cursor<R: Runtime>(
     let size = window.outer_size().ok();
     let width = size.map(|s| s.width as f64).unwrap_or(TRAY_WIDTH);
     let height = size.map(|s| s.height as f64).unwrap_or(TRAY_HEIGHT);
+    let monitor = window.monitor_from_point(cursor.x, cursor.y).ok().flatten();
 
-    let x = (cursor.x - width / 2.0).max(0.0);
-    // macOS menu bar sits at the top, so drop the popup below the icon.
-    // Other platforms keep the tray at the bottom, so float it above the cursor.
-    let y = if cfg!(target_os = "macos") {
-        cursor.y + 4.0
-    } else {
-        (cursor.y - height - 4.0).max(0.0)
-    };
-
+    let x = monitor
+        .as_ref()
+        .map(|monitor| {
+            let left = monitor.position().x as f64;
+            let right = left + monitor.size().width as f64;
+            clamp_popup_axis(cursor.x - width / 2.0, left, right, width)
+        })
+        .unwrap_or_else(|| (cursor.x - width / 2.0).max(0.0));
+    let y = (cursor.y - height - 4.0).max(0.0);
     let _ = window.set_position(PhysicalPosition::new(x, y));
+}
+
+fn clamp_popup_axis(preferred: f64, start: f64, end: f64, extent: f64) -> f64 {
+    preferred.clamp(start, (end - extent).max(start))
 }
 
 // ============================================================================
@@ -290,6 +370,84 @@ fn refresh_menu<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+pub(crate) fn refresh_display<R: Runtime>(app: &AppHandle<R>) {
+    let app_handle = app.clone();
+    if let Err(error) = app.run_on_main_thread(move || {
+        refresh_display_on_main_thread(&app_handle);
+    }) {
+        eprintln!("Failed to schedule tray display refresh: {error}");
+    }
+}
+
+fn refresh_title<R: Runtime>(app: &AppHandle<R>) {
+    let app_handle = app.clone();
+    if let Err(error) = app.run_on_main_thread(move || {
+        refresh_title_on_main_thread(&app_handle);
+    }) {
+        eprintln!("Failed to schedule tray title refresh: {error}");
+    }
+}
+
+fn refresh_title_on_main_thread<R: Runtime>(app: &AppHandle<R>) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+
+    let store = match load_accounts() {
+        Ok(store) => store,
+        Err(error) => {
+            eprintln!("Failed to load accounts for tray title: {error}");
+            return;
+        }
+    };
+    let settings = match load_app_settings() {
+        Ok(settings) => settings,
+        Err(error) => {
+            eprintln!("Failed to load settings for tray title: {error}");
+            return;
+        }
+    };
+    if settings.tray_display_mode == TrayDisplayMode::Hidden {
+        return;
+    }
+
+    let title = active_tray_title(
+        store.active_account_id.as_deref(),
+        settings.tray_display_mode,
+    );
+    if let Err(error) = tray.set_title(title.as_deref()) {
+        eprintln!("Failed to refresh tray title: {error}");
+    }
+}
+
+fn refresh_display_on_main_thread<R: Runtime>(app: &AppHandle<R>) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+
+    let store = match load_accounts() {
+        Ok(store) => store,
+        Err(error) => {
+            eprintln!("Failed to load accounts for tray display: {error}");
+            return;
+        }
+    };
+    let settings = match load_app_settings() {
+        Ok(settings) => settings,
+        Err(error) => {
+            // A transient settings read must never switch the tray to the
+            // default text-only mode and clear the macOS icon.
+            eprintln!("Failed to load settings for tray display: {error}");
+            return;
+        }
+    };
+    let title = active_tray_title(
+        store.active_account_id.as_deref(),
+        settings.tray_display_mode,
+    );
+    refresh_tray_display(&tray, settings.tray_display_mode, title.as_deref());
+}
+
 fn refresh_menu_on_main_thread<R: Runtime>(app: &AppHandle<R>) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;
@@ -298,7 +456,7 @@ fn refresh_menu_on_main_thread<R: Runtime>(app: &AppHandle<R>) {
     match load_accounts()
         .map_err(|error| error.to_string())
         .and_then(|store| {
-            let settings = load_app_settings().unwrap_or_default();
+            let settings = load_app_settings().map_err(|error| error.to_string())?;
             let title = active_tray_title(
                 store.active_account_id.as_deref(),
                 settings.tray_display_mode,
@@ -573,6 +731,13 @@ mod tests {
             menu_label("Research & Development"),
             "Research && Development"
         );
+    }
+
+    #[test]
+    fn popup_position_is_clamped_to_its_target_display() {
+        assert_eq!(clamp_popup_axis(-220.0, -100.0, 900.0, 300.0), -100.0);
+        assert_eq!(clamp_popup_axis(850.0, -100.0, 900.0, 300.0), 600.0);
+        assert_eq!(clamp_popup_axis(125.0, -100.0, 900.0, 300.0), 125.0);
     }
 
     #[test]
