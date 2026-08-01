@@ -3,7 +3,7 @@
 use crate::auth::{
     add_account, create_chatgpt_account_from_refresh_token, get_active_account,
     import_from_auth_json, import_from_auth_json_contents, load_accounts, remove_account,
-    save_accounts, set_active_account, switch_to_account, touch_account,
+    set_active_account, update_accounts,
 };
 use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
 
@@ -103,7 +103,7 @@ pub async fn add_account_from_file(path: String, name: String) -> Result<Account
     let account = import_from_auth_json(&path, name).map_err(|e| e.to_string())?;
 
     // Add to storage
-    let stored = add_account(account).map_err(|e| e.to_string())?;
+    let stored = add_account(account).await.map_err(|e| e.to_string())?;
 
     let store = load_accounts().map_err(|e| e.to_string())?;
     let active_id = store.active_account_id.as_deref();
@@ -117,7 +117,7 @@ pub async fn add_account_from_auth_json_text(
     contents: String,
 ) -> Result<AccountInfo, String> {
     let account = import_from_auth_json_contents(&contents, name).map_err(|e| e.to_string())?;
-    let stored = add_account(account).map_err(|e| e.to_string())?;
+    let stored = add_account(account).await.map_err(|e| e.to_string())?;
 
     let store = load_accounts().map_err(|e| e.to_string())?;
     let active_id = store.active_account_id.as_deref();
@@ -128,29 +128,16 @@ pub async fn add_account_from_auth_json_text(
 /// Switch to a different account
 #[tauri::command]
 pub async fn switch_account(account_id: String) -> Result<(), String> {
-    switch_account_by_id(&account_id)
+    switch_account_by_id(&account_id).await
 }
 
-pub fn switch_account_by_id(account_id: &str) -> Result<(), String> {
-    let store = load_accounts().map_err(|e| e.to_string())?;
-
-    // Find the account
-    let account = store
-        .accounts
-        .iter()
-        .find(|a| a.id == account_id)
-        .ok_or_else(|| format!("Account not found: {account_id}"))?;
-
+pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
     ensure_codex_not_running()?;
 
-    // Write to ~/.codex/auth.json
-    switch_to_account(account).map_err(|e| e.to_string())?;
-
-    // Update the active account in our store
-    set_active_account(account_id).map_err(|e| e.to_string())?;
-
-    // Update last_used_at
-    touch_account(account_id).map_err(|e| e.to_string())?;
+    // Update the active account and auth.json through the ordered store worker.
+    set_active_account(account_id)
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Restart Antigravity background process if it is running
     // This allows it to pick up the new authorization file seamlessly
@@ -178,7 +165,9 @@ pub fn switch_account_by_id(account_id: &str) -> Result<(), String> {
 /// Remove an account
 #[tauri::command]
 pub async fn delete_account(account_id: String) -> Result<(), String> {
-    remove_account(&account_id).map_err(|e| e.to_string())?;
+    remove_account(&account_id)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -186,6 +175,7 @@ pub async fn delete_account(account_id: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn rename_account(account_id: String, new_name: String) -> Result<(), String> {
     crate::auth::storage::update_account_metadata(&account_id, Some(new_name), None, None, None)
+        .await
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -216,8 +206,13 @@ pub async fn import_accounts_slim_text(payload: String) -> Result<ImportAccounts
         })?;
     validate_imported_store(&imported).map_err(|e| format!("{e:#}"))?;
 
-    let (merged, summary) = merge_accounts_store(current, imported);
-    save_accounts(&merged).map_err(|e| e.to_string())?;
+    let summary = update_accounts(move |current| {
+        let (merged, summary) = merge_accounts_store(current.clone(), imported);
+        *current = merged;
+        Ok(summary)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(ImportAccountsSummary {
         total_in_payload,
         imported_count: summary.imported_count,
@@ -251,10 +246,13 @@ pub async fn import_accounts_full_encrypted_file(
         .map_err(|e| e.to_string())?;
     validate_imported_store(&imported).map_err(|e| e.to_string())?;
 
-    let current = load_accounts().map_err(|e| e.to_string())?;
-    let (merged, summary) = merge_accounts_store(current, imported);
-    save_accounts(&merged).map_err(|e| e.to_string())?;
-    Ok(summary)
+    update_accounts(move |current| {
+        let (merged, summary) = merge_accounts_store(current.clone(), imported);
+        *current = merged;
+        Ok(summary)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Import full account config from encrypted bytes uploaded through the browser UI.
@@ -265,10 +263,13 @@ pub async fn import_accounts_full_encrypted_bytes(
         decode_full_encrypted_store(&bytes, FULL_PRESET_PASSPHRASE).map_err(|e| e.to_string())?;
     validate_imported_store(&imported).map_err(|e| e.to_string())?;
 
-    let current = load_accounts().map_err(|e| e.to_string())?;
-    let (merged, summary) = merge_accounts_store(current, imported);
-    save_accounts(&merged).map_err(|e| e.to_string())?;
-    Ok(summary)
+    update_accounts(move |current| {
+        let (merged, summary) = merge_accounts_store(current.clone(), imported);
+        *current = merged;
+        Ok(summary)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Find all running Antigravity codex assistant processes
@@ -742,5 +743,7 @@ pub async fn get_masked_account_ids() -> Result<Vec<String>, String> {
 /// Set the list of masked account IDs
 #[tauri::command]
 pub async fn set_masked_account_ids(ids: Vec<String>) -> Result<(), String> {
-    crate::auth::storage::set_masked_account_ids(ids).map_err(|e| e.to_string())
+    crate::auth::storage::set_masked_account_ids(ids)
+        .await
+        .map_err(|e| e.to_string())
 }

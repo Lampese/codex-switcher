@@ -5,7 +5,7 @@ use base64::Engine;
 use chrono::Utc;
 use tokio::time::{sleep, Duration};
 
-use super::{load_accounts, switch_to_account, update_account_chatgpt_tokens};
+use super::update_account_chatgpt_tokens;
 use crate::types::{parse_chatgpt_id_token_claims, AuthData, StoredAccount};
 
 const DEFAULT_ISSUER: &str = "https://auth.openai.com";
@@ -65,8 +65,6 @@ pub async fn refresh_chatgpt_tokens(account: &StoredAccount) -> Result<StoredAcc
     let claims = parse_chatgpt_id_token_claims(&next_id_token);
     let next_account_id = claims.account_id.or(current_account_id);
 
-    let is_active = load_accounts()?.active_account_id.as_deref() == Some(account.id.as_str());
-
     let updated = update_account_chatgpt_tokens(
         &account.id,
         next_id_token,
@@ -76,14 +74,8 @@ pub async fn refresh_chatgpt_tokens(account: &StoredAccount) -> Result<StoredAcc
         claims.email,
         claims.plan_type,
         claims.subscription_expires_at,
-    )?;
-
-    // Keep ~/.codex/auth.json in sync when this is the active account.
-    if is_active {
-        if let Err(err) = switch_to_account(&updated) {
-            println!("[Auth] Failed to sync active auth.json after token refresh: {err}");
-        }
-    }
+    )
+    .await?;
 
     Ok(updated)
 }
