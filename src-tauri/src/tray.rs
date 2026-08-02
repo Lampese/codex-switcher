@@ -3,7 +3,9 @@ use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use tauri::{
-    menu::{CheckMenuItemBuilder, Menu, MenuItemBuilder, PredefinedMenuItem, Submenu},
+    menu::{
+        CheckMenuItemBuilder, Menu, MenuItemBuilder, MenuItemKind, PredefinedMenuItem, Submenu,
+    },
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, PhysicalPosition, Runtime, WebviewUrl, WebviewWindowBuilder,
     WindowEvent,
@@ -40,11 +42,22 @@ struct SwitchAccountBlockedPayload {
     error: String,
 }
 
+/// Owns the one native menu attached to the status item. Account changes mutate
+/// the leading account section; they never replace the menu/status-item scene.
+struct NativeMenuState<R: Runtime> {
+    inner: Mutex<NativeMenu<R>>,
+}
+
+struct NativeMenu<R: Runtime> {
+    menu: Menu<R>,
+    account_section_len: usize,
+}
+
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     #[cfg(not(target_os = "linux"))]
     create_tray_window(app)?;
 
-    let menu = build_menu(app, &load_accounts().unwrap_or_default())?;
+    let (menu, account_section_len) = build_menu(app, &load_accounts().unwrap_or_default())?;
 
     #[cfg(target_os = "linux")]
     let icon = app
@@ -70,6 +83,12 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false);
 
     builder.build(app)?;
+    app.manage(NativeMenuState {
+        inner: Mutex::new(NativeMenu {
+            menu,
+            account_section_len,
+        }),
+    });
     refresh_menu(app);
 
     watch_accounts_file(app.clone());
@@ -260,24 +279,15 @@ fn clamp_popup_axis(preferred: f64, start: f64, end: f64, extent: f64) -> f64 {
 // Native menu (the only tray interaction on Linux; right-click on macOS/Windows)
 // ============================================================================
 
-fn build_menu<R: Runtime>(app: &AppHandle<R>, store: &AccountsStore) -> tauri::Result<Menu<R>> {
+fn build_menu<R: Runtime>(
+    app: &AppHandle<R>,
+    store: &AccountsStore,
+) -> tauri::Result<(Menu<R>, usize)> {
     let menu = Menu::new(app)?;
 
-    if store.accounts.is_empty() {
-        menu.append(
-            &MenuItemBuilder::with_id("empty", "No accounts configured")
-                .enabled(false)
-                .build(app)?,
-        )?;
-    } else {
-        for account in &store.accounts {
-            let label = format!("{}{}", account.name, usage_suffix(&account.id));
-            let item =
-                CheckMenuItemBuilder::with_id(account_menu_id(&account.id), menu_label(&label))
-                    .checked(store.active_account_id.as_deref() == Some(&account.id))
-                    .build(app)?;
-            menu.append(&item)?;
-        }
+    let account_items = build_account_menu_items(app, store)?;
+    for item in &account_items {
+        menu.append(item)?;
     }
 
     menu.append(&PredefinedMenuItem::separator(app)?)?;
@@ -287,7 +297,61 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, store: &AccountsStore) -> tauri::R
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&MenuItemBuilder::with_id(OPEN_ITEM_ID, "Open Codex Switcher").build(app)?)?;
     menu.append(&MenuItemBuilder::with_id(QUIT_ITEM_ID, "Quit").build(app)?)?;
-    Ok(menu)
+    Ok((menu, account_items.len()))
+}
+
+fn build_account_menu_items<R: Runtime>(
+    app: &AppHandle<R>,
+    store: &AccountsStore,
+) -> tauri::Result<Vec<MenuItemKind<R>>> {
+    if store.accounts.is_empty() {
+        return Ok(vec![MenuItemKind::MenuItem(
+            MenuItemBuilder::with_id("empty", "No accounts configured")
+                .enabled(false)
+                .build(app)?,
+        )]);
+    }
+
+    store
+        .accounts
+        .iter()
+        .map(|account| {
+            let label = format!("{}{}", account.name, usage_suffix(&account.id));
+            CheckMenuItemBuilder::with_id(account_menu_id(&account.id), menu_label(&label))
+                .checked(store.active_account_id.as_deref() == Some(&account.id))
+                .build(app)
+                .map(MenuItemKind::Check)
+        })
+        .collect()
+}
+
+fn refresh_account_menu_items<R: Runtime>(
+    app: &AppHandle<R>,
+    store: &AccountsStore,
+) -> Result<(), String> {
+    let items = build_account_menu_items(app, store).map_err(|error| error.to_string())?;
+    let state = app
+        .try_state::<NativeMenuState<R>>()
+        .ok_or_else(|| "Native tray menu state is unavailable".to_string())?;
+    let mut native = state
+        .inner
+        .lock()
+        .map_err(|error| format!("Native tray menu state is poisoned: {error}"))?;
+
+    for _ in 0..native.account_section_len {
+        native
+            .menu
+            .remove_at(0)
+            .map_err(|error| error.to_string())?;
+    }
+    for (position, item) in items.iter().enumerate() {
+        native
+            .menu
+            .insert(item, position)
+            .map_err(|error| error.to_string())?;
+    }
+    native.account_section_len = items.len();
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -461,15 +525,10 @@ fn refresh_menu_on_main_thread<R: Runtime>(app: &AppHandle<R>) {
                 store.active_account_id.as_deref(),
                 settings.tray_display_mode,
             );
-            let menu = build_menu(app, &store).map_err(|error| error.to_string())?;
-            Ok((menu, title, settings.tray_display_mode))
+            refresh_account_menu_items(app, &store)?;
+            Ok((title, settings.tray_display_mode))
         }) {
-        Ok((menu, title, mode)) => {
-            if let Err(error) = tray.set_menu(Some(menu)) {
-                eprintln!("Failed to refresh tray menu: {error}");
-            }
-            refresh_tray_display(&tray, mode, title.as_deref());
-        }
+        Ok((title, mode)) => refresh_tray_display(&tray, mode, title.as_deref()),
         Err(error) => eprintln!("Failed to build tray menu: {error}"),
     }
 }
