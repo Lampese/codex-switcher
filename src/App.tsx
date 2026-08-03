@@ -1569,7 +1569,7 @@ function App() {
                       }}
                       className="w-full rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 dark:text-white dark:hover:bg-neutral-900"
                     >
-                      + {t("addAccount")}
+                      {t("addAccount")}
                     </button>
                     <button
                       onClick={() => {
