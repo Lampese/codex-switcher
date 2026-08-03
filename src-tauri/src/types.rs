@@ -88,6 +88,9 @@ pub struct StoredAccount {
     pub auth_mode: AuthMode,
     /// Authentication credentials
     pub auth_data: AuthData,
+    /// Whether the stored credentials can still be refreshed.
+    #[serde(default)]
+    pub auth_state: AuthState,
     /// When the account was added
     pub created_at: DateTime<Utc>,
     /// Last time this account was used
@@ -131,6 +134,7 @@ impl StoredAccount {
             subscription_expires_at: None,
             auth_mode: AuthMode::ApiKey,
             auth_data: AuthData::ApiKey { key: api_key },
+            auth_state: AuthState::Ready,
             created_at: Utc::now(),
             last_used_at: None,
         }
@@ -161,6 +165,7 @@ impl StoredAccount {
                 refresh_token,
                 account_id,
             },
+            auth_state: AuthState::Ready,
             created_at: Utc::now(),
             last_used_at: None,
         }
@@ -240,6 +245,15 @@ pub enum AuthMode {
     ApiKey,
     /// Using ChatGPT OAuth tokens
     ChatGPT,
+}
+
+/// Persisted authentication health for an account.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthState {
+    #[default]
+    Ready,
+    ReauthRequired,
 }
 
 /// Authentication data (credentials)
@@ -353,6 +367,7 @@ pub struct AccountInfo {
     pub plan_type: Option<String>,
     pub subscription_expires_at: Option<DateTime<Utc>>,
     pub auth_mode: AuthMode,
+    pub auth_state: AuthState,
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub last_used_at: Option<DateTime<Utc>>,
@@ -377,6 +392,7 @@ impl AccountInfo {
                 .clone()
                 .or(fallback_subscription_expires_at),
             auth_mode: account.auth_mode,
+            auth_state: account.auth_state,
             is_active: active_id == Some(&account.id),
             created_at: account.created_at,
             last_used_at: account.last_used_at,
@@ -500,7 +516,10 @@ pub struct CreditStatusDetails {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_chatgpt_id_token_claims, AppSettings, DockDisplayMode, TrayDisplayMode};
+    use super::{
+        parse_chatgpt_id_token_claims, AppSettings, AuthState, DockDisplayMode, StoredAccount,
+        TrayDisplayMode,
+    };
     use base64::Engine;
 
     #[test]
@@ -530,5 +549,25 @@ mod tests {
         assert_eq!(settings.tray_display_mode, TrayDisplayMode::ActiveUsageText);
         assert_eq!(settings.dock_display_mode, DockDisplayMode::ShowInDock);
         assert!(settings.close_behavior_prompt_enabled);
+    }
+
+    #[test]
+    fn stored_account_without_auth_state_defaults_to_ready() {
+        let account = StoredAccount::new_chatgpt(
+            "Legacy account".into(),
+            Some("legacy@example.com".into()),
+            Some("plus".into()),
+            None,
+            "id-token".into(),
+            "access-token".into(),
+            "refresh-token".into(),
+            Some("account-1".into()),
+        );
+        let mut value = serde_json::to_value(account).unwrap();
+        value.as_object_mut().unwrap().remove("auth_state");
+
+        let restored: StoredAccount = serde_json::from_value(value).unwrap();
+
+        assert_eq!(restored.auth_state, AuthState::Ready);
     }
 }

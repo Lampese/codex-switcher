@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAccounts } from "./hooks/useAccounts";
 import { useForceCloseCodexProcesses } from "./hooks/useForceCloseCodexProcesses";
 import { AccountCard, AddAccountModal, UpdateChecker } from "./components";
+import { LanguageToggle, useI18n } from "./lib/i18n";
 import type { AccountWithUsage, CodexProcessInfo, DockDisplayMode, UsageInfo } from "./types";
 import {
   exportFullBackupFile,
@@ -44,6 +45,7 @@ const AUTO_WARMUP_RETRY_BACKOFF_MS = 60 * 1000;
 const LIMIT_FULL_THRESHOLD = 99.5;
 const ACCOUNT_SEARCH_THRESHOLD = 8;
 const SWITCH_ACCOUNT_BLOCKED_EVENT = "switch-account-blocked";
+const CODEX_RUNNING_ERROR = "CODEX_RUNNING";
 const CLOSE_BEHAVIOR_REQUESTED_EVENT = "close-behavior-requested";
 interface SwitchAccountBlockedPayload {
   accountId?: string;
@@ -52,6 +54,10 @@ interface SwitchAccountBlockedPayload {
 interface CloseBehaviorRequestedPayload {
   requestId?: number;
 }
+type PendingForceCloseAction =
+  | { kind: "close_only" }
+  | { kind: "switch"; accountId: string }
+  | { kind: "reauth"; accountId: string };
 type AutoWarmupLedger = Record<
   string,
   {
@@ -141,6 +147,7 @@ function getPreferredResetsAt(usage: UsageInfo | undefined): number | null | und
 function getTimedWarmupTargets(accounts: AccountWithUsage[]): AccountWithUsage[] {
   return accounts.filter(
     (account) =>
+      account.auth_state === "ready" &&
       account.usage &&
       !account.usageLoading &&
       !account.usage.error &&
@@ -161,6 +168,7 @@ function matchesAccountSearch(
 }
 
 function App() {
+  const { t } = useI18n();
   const {
     accounts,
     loading,
@@ -194,7 +202,9 @@ function App() {
   const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [processInfo, setProcessInfo] = useState<CodexProcessInfo | null>(null);
-  const [pendingTraySwitchAccountId, setPendingTraySwitchAccountId] = useState<string | null>(null);
+  const [pendingForceCloseAction, setPendingForceCloseAction] =
+    useState<PendingForceCloseAction | null>(null);
+  const [reauthAccountId, setReauthAccountId] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isOpeningCodex, setIsOpeningCodex] = useState(false);
   const [isExportingSlim, setIsExportingSlim] = useState(false);
@@ -508,9 +518,10 @@ function App() {
   }, []);
 
   const handleSwitch = async (accountId: string) => {
-    // Check processes before switching
     const latestProcessInfo = await checkProcesses();
     if (latestProcessInfo && !latestProcessInfo.can_switch) {
+      setPendingForceCloseAction({ kind: "switch", accountId });
+      setForceCloseConfirmOpen(true);
       return;
     }
 
@@ -518,10 +529,37 @@ function App() {
       setSwitchingId(accountId);
       await switchAccount(accountId);
     } catch (err) {
+      if (formatWarmupError(err).includes(CODEX_RUNNING_ERROR)) {
+        setPendingForceCloseAction({ kind: "switch", accountId });
+        setForceCloseConfirmOpen(true);
+        return;
+      }
       console.error("Failed to switch account:", err);
+      showWarmupToast(t("switchFailed", { message: formatWarmupError(err) }), true);
     } finally {
       setSwitchingId(null);
     }
+  };
+
+  const openReauthModal = useCallback((accountId: string) => {
+    setReauthAccountId(accountId);
+    setIsAddModalOpen(true);
+  }, []);
+
+  const handleReauth = async (accountId: string) => {
+    const account = accountsRef.current.find((item) => item.id === accountId);
+    if (!account) return;
+
+    if (account.is_active) {
+      const latestProcessInfo = await checkProcesses();
+      if (latestProcessInfo && !latestProcessInfo.can_switch) {
+        setPendingForceCloseAction({ kind: "reauth", accountId });
+        setForceCloseConfirmOpen(true);
+        return;
+      }
+    }
+
+    openReauthModal(accountId);
   };
 
   const handleDelete = async (accountId: string) => {
@@ -557,15 +595,15 @@ function App() {
   }, []);
 
   const formatWarmupError = useCallback((err: unknown) => {
-    if (!err) return "Unknown error";
+    if (!err) return t("unknown");
     if (err instanceof Error && err.message) return err.message;
     if (typeof err === "string") return err;
     try {
       return JSON.stringify(err);
     } catch {
-      return "Unknown error";
+      return t("unknown");
     }
-  }, []);
+  }, [t]);
 
   const markSuccessfulWarmup = useCallback(
     (accountId: string, timestamp = Date.now(), window?: AutoWarmupWindow) => {
@@ -613,7 +651,7 @@ function App() {
           const accountId = event.payload?.accountId;
 
           if (accountId && latestProcessInfo && !latestProcessInfo.can_switch) {
-            setPendingTraySwitchAccountId(accountId);
+            setPendingForceCloseAction({ kind: "switch", accountId });
             setForceCloseConfirmOpen(true);
             return;
           }
@@ -622,11 +660,11 @@ function App() {
             try {
               setSwitchingId(accountId);
               await switchAccount(accountId);
-              setPendingTraySwitchAccountId(null);
-              showWarmupToast("Switched account from tray.");
+              setPendingForceCloseAction(null);
+              showWarmupToast(t("switchedFromTray"));
             } catch (err) {
               console.error("Failed to retry tray account switch:", err);
-              showWarmupToast(`Switch failed: ${formatWarmupError(err)}`, true);
+              showWarmupToast(t("switchFailed", { message: formatWarmupError(err) }), true);
             } finally {
               setSwitchingId(null);
             }
@@ -634,7 +672,7 @@ function App() {
           }
 
           showWarmupToast(
-            event.payload?.error || "Account switch was blocked.",
+            event.payload?.error || t("accountSwitchBlocked"),
             true
           );
         }
@@ -665,7 +703,7 @@ function App() {
       unlistenAutoWarmup?.();
       unlistenCloseBehavior?.();
     };
-  }, [checkProcesses, formatWarmupError, setForceCloseConfirmOpen, showWarmupToast, switchAccount]);
+  }, [checkProcesses, formatWarmupError, setForceCloseConfirmOpen, showWarmupToast, switchAccount, t]);
 
   const handleCloseBehaviorChoice = useCallback(
     async (mode: DockDisplayMode) => {
@@ -678,37 +716,38 @@ function App() {
         setCloseBehaviorPromptOpen(false);
       } catch (err) {
         console.error("Failed to complete close behavior:", err);
-        showWarmupToast(`Close failed: ${formatWarmupError(err)}`, true);
+        showWarmupToast(t("closeFailed", { message: formatWarmupError(err) }), true);
       } finally {
         setIsCompletingCloseBehavior(false);
       }
     },
-    [closeBehaviorDontAskAgain, formatWarmupError, showWarmupToast]
+    [closeBehaviorDontAskAgain, formatWarmupError, showWarmupToast, t]
   );
 
   const handleForceCloseConfirm = useCallback(async () => {
-    const accountId = pendingTraySwitchAccountId;
+    const action = pendingForceCloseAction;
     const latestProcessInfo = await forceCloseCodexProcesses();
 
-    if (!accountId) {
+    if (!latestProcessInfo?.can_switch) {
+      setPendingForceCloseAction(null);
       return;
     }
 
-    if (!latestProcessInfo?.can_switch) {
-      setPendingTraySwitchAccountId(null);
+    setPendingForceCloseAction(null);
+    if (!action || action.kind === "close_only") return;
+    if (action.kind === "reauth") {
+      openReauthModal(action.accountId);
       return;
     }
 
     try {
-      setSwitchingId(accountId);
-      await switchAccount(accountId);
-      setPendingTraySwitchAccountId(null);
-      showWarmupToast("Switched account after force closing Codex.");
+      setSwitchingId(action.accountId);
+      await switchAccount(action.accountId);
+      showWarmupToast(t("switchedAfterForce"));
     } catch (err) {
       console.error("Failed to switch account after force close:", err);
-      setPendingTraySwitchAccountId(null);
       showWarmupToast(
-        `Switch failed after force close: ${formatWarmupError(err)}`,
+        t("switchFailedAfterForce", { message: formatWarmupError(err) }),
         true
       );
     } finally {
@@ -717,9 +756,11 @@ function App() {
   }, [
     forceCloseCodexProcesses,
     formatWarmupError,
-    pendingTraySwitchAccountId,
+    openReauthModal,
+    pendingForceCloseAction,
     showWarmupToast,
     switchAccount,
+    t,
   ]);
 
   const handleWarmupAccount = async (accountId: string, accountName: string) => {
@@ -727,11 +768,11 @@ function App() {
       setWarmingUpId(accountId);
       await warmupAccount(accountId);
       markSuccessfulWarmup(accountId);
-      showWarmupToast(`Warm-up sent for ${accountName}`);
+      showWarmupToast(t("warmupSent", { name: accountName }));
     } catch (err) {
       console.error("Failed to warm up account:", err);
       showWarmupToast(
-        `Warm-up failed for ${accountName}: ${formatWarmupError(err)}`,
+        t("warmupFailed", { name: accountName, message: formatWarmupError(err) }),
         true
       );
     } finally {
@@ -744,33 +785,38 @@ function App() {
       setIsWarmingAll(true);
       const summary = await warmupAllAccounts();
       if (summary.total_accounts === 0) {
-        showWarmupToast("No accounts available for warm-up", true);
+        showWarmupToast(t("noWarmupAccounts"), true);
         return;
       }
 
       const warmedAt = Date.now();
       const failedAccountIds = new Set(summary.failed_account_ids);
       accounts.forEach((account) => {
-        if (!failedAccountIds.has(account.id)) {
+        if (account.auth_state === "ready" && !failedAccountIds.has(account.id)) {
           markSuccessfulWarmup(account.id, warmedAt);
         }
       });
 
       if (summary.failed_account_ids.length === 0) {
         showWarmupToast(
-          `Warm-up sent for all ${summary.warmed_accounts} account${
-            summary.warmed_accounts === 1 ? "" : "s"
-          }`
+          t("warmupAllSent", {
+            count: summary.warmed_accounts,
+            suffix: summary.warmed_accounts === 1 ? "" : "s",
+          })
         );
       } else {
         showWarmupToast(
-          `Warmed ${summary.warmed_accounts}/${summary.total_accounts}. Failed: ${summary.failed_account_ids.length}`,
+          t("warmupSummary", {
+            warmed: summary.warmed_accounts,
+            total: summary.total_accounts,
+            failed: summary.failed_account_ids.length,
+          }),
           true
         );
       }
     } catch (err) {
       console.error("Failed to warm up all accounts:", err);
-      showWarmupToast(`Warm-up all failed: ${formatWarmupError(err)}`, true);
+      showWarmupToast(t("warmupAllFailed", { message: formatWarmupError(err) }), true);
     } finally {
       setIsWarmingAll(false);
     }
@@ -801,33 +847,37 @@ function App() {
       isEnabled: boolean,
       isRunning: boolean
     ) => {
-      if (isRunning) return "Warming...";
-      if (!isEnabled) return "Auto: off";
-      if (!usage || usage.error) return "Auto: on";
+      if (isRunning) return t("timedWarming");
+      if (!isEnabled) return t("autoOff");
+      if (!usage || usage.error) return t("autoOn");
 
       const windowKind = getAutoWarmupWindowKind(usage);
       if (windowKind === "session" && isLimitFull(usage.secondary_used_percent)) {
-        return "Waiting weekly reset";
+        return t("waitingWeeklyReset");
       }
-      if (windowKind === "session") return "Auto: 5h";
-      if (windowKind === "weekly") return "Auto: weekly";
+      if (windowKind === "session") return t("autoFiveHour");
+      if (windowKind === "weekly") return t("autoWeekly");
 
-      return "Auto: on";
+      return t("autoOn");
     },
-    []
+    [t]
   );
 
   const headerAutoWarmupLabel = useMemo(() => {
-    if (autoWarmupRunningIds.size > 0) return "Auto warming...";
+    if (autoWarmupRunningIds.size > 0) return t("timedWarming");
     return autoWarmupAllEnabled || autoWarmupAccountIds.size > 0
-      ? "Auto: on"
-      : "Auto: off";
-  }, [autoWarmupAccountIds.size, autoWarmupAllEnabled, autoWarmupRunningIds]);
+      ? t("autoOn")
+      : t("autoOff");
+  }, [autoWarmupAccountIds.size, autoWarmupAllEnabled, autoWarmupRunningIds, t]);
 
   const timedWarmupTargetsReady = useMemo(
-    () =>
-      accounts.length > 0 &&
-      accounts.every((account) => account.usage && !account.usageLoading),
+    () => {
+      const readyAccounts = accounts.filter((account) => account.auth_state === "ready");
+      return (
+        readyAccounts.length > 0 &&
+        readyAccounts.every((account) => account.usage && !account.usageLoading)
+      );
+    },
     [accounts]
   );
 
@@ -861,12 +911,12 @@ function App() {
         await warmupAccount(accountId);
         markSuccessfulWarmup(accountId, Date.now(), window);
         const modeLabel = window.kind === "session" ? "5h" : "weekly";
-        showWarmupToast(`Auto ${modeLabel} warm-up sent for ${accountName}`);
+        showWarmupToast(t("autoWarmupSent", { mode: modeLabel, name: accountName }));
       } catch (err) {
         console.error("Auto warm-up failed:", err);
         backOffAutoWarmupRetry(accountId);
         showWarmupToast(
-          `Auto warm-up failed for ${accountName}: ${formatWarmupError(err)}`,
+          t("autoWarmupFailed", { name: accountName, message: formatWarmupError(err) }),
           true
         );
       } finally {
@@ -884,6 +934,7 @@ function App() {
       markSuccessfulWarmup,
       refreshSingleUsage,
       showWarmupToast,
+      t,
       warmupAccount,
     ]
   );
@@ -893,6 +944,7 @@ function App() {
 
     const checkAutoWarmup = () => {
       for (const account of accountsRef.current) {
+        if (account.auth_state !== "ready") continue;
         const autoEnabled =
           autoWarmupAllEnabled || autoWarmupAccountIdsRef.current.has(account.id);
         if (!autoEnabled || autoWarmupRunningIdsRef.current.has(account.id)) continue;
@@ -942,15 +994,15 @@ function App() {
 
       if (failed === 0) {
         showWarmupToast(
-          `Timed warm-up sent for ${warmed} account${warmed === 1 ? "" : "s"}`
+          t("timedWarmupSent", { count: warmed, suffix: warmed === 1 ? "" : "s" })
         );
       } else {
-        showWarmupToast(`Timed warm-up: ${warmed} ok, ${failed} failed`, true);
+        showWarmupToast(t("timedWarmupSummary", { warmed, failed }), true);
       }
     } finally {
       setTimedWarmupRunning(false);
     }
-  }, [markSuccessfulWarmup, showWarmupToast, warmupAccount]);
+  }, [markSuccessfulWarmup, showWarmupToast, t, warmupAccount]);
 
   useEffect(() => {
     if (!timedWarmupEnabled || timedWarmupTimes.length === 0) return;
@@ -1012,8 +1064,8 @@ function App() {
   }, []);
 
   const timedWarmupLabel = useMemo(() => {
-    if (timedWarmupRunning) return "Timed warming...";
-    if (!timedWarmupEnabled || timedWarmupTimes.length === 0) return "Timed: off";
+    if (timedWarmupRunning) return t("timedWarming");
+    if (!timedWarmupEnabled || timedWarmupTimes.length === 0) return t("timedOff");
 
     const now = new Date();
     const nowMinutes = now.getHours() * 60 + now.getMinutes();
@@ -1021,8 +1073,8 @@ function App() {
       const [hours, minutes] = time.split(":").map(Number);
       return hours * 60 + minutes > nowMinutes;
     });
-    return `Timed: ${upcoming ?? timedWarmupTimes[0]}`;
-  }, [timedWarmupEnabled, timedWarmupRunning, timedWarmupTimes]);
+    return t("timedNext", { time: upcoming ?? timedWarmupTimes[0] });
+  }, [t, timedWarmupEnabled, timedWarmupRunning, timedWarmupTimes]);
 
   const handleExportSlimText = async () => {
     setConfigModalMode("slim_export");
@@ -1035,12 +1087,12 @@ function App() {
       setIsExportingSlim(true);
       const payload = await exportAccountsSlimText();
       setConfigPayload(payload);
-      showWarmupToast(`Slim text exported (${accounts.length} accounts).`);
+      showWarmupToast(t("slimExported", { count: accounts.length }));
     } catch (err) {
       console.error("Failed to export slim text:", err);
       const message = err instanceof Error ? err.message : String(err);
       setConfigModalError(message);
-      showWarmupToast("Slim export failed", true);
+      showWarmupToast(t("slimExportFailed"), true);
     } finally {
       setIsExportingSlim(false);
     }
@@ -1056,7 +1108,7 @@ function App() {
 
   const handleImportSlimText = async () => {
     if (!configPayload.trim()) {
-      setConfigModalError("Please paste the slim text string first.");
+      setConfigModalError(t("pasteSlimFirst"));
       return;
     }
 
@@ -1067,13 +1119,17 @@ function App() {
       setMaskedAccounts(new Set());
       setIsConfigModalOpen(false);
       showWarmupToast(
-        `Imported ${summary.imported_count}, skipped ${summary.skipped_count} (total ${summary.total_in_payload})`
+        t("importedSummary", {
+          imported: summary.imported_count,
+          skipped: summary.skipped_count,
+          total: summary.total_in_payload,
+        })
       );
     } catch (err) {
       console.error("Failed to import slim text:", err);
       const message = err instanceof Error ? err.message : String(err);
       setConfigModalError(message);
-      showWarmupToast("Slim import failed", true);
+      showWarmupToast(t("slimImportFailed"), true);
     } finally {
       setIsImportingSlim(false);
     }
@@ -1084,10 +1140,10 @@ function App() {
       setIsExportingFull(true);
       const exported = await exportFullBackupFile();
       if (!exported) return;
-      showWarmupToast("Full encrypted file exported.");
+      showWarmupToast(t("fullExported"));
     } catch (err) {
       console.error("Failed to export full encrypted file:", err);
-      showWarmupToast("Full export failed", true);
+      showWarmupToast(t("fullExportFailed"), true);
     } finally {
       setIsExportingFull(false);
     }
@@ -1103,11 +1159,15 @@ function App() {
       const maskedIds = await loadMaskedAccountIds();
       setMaskedAccounts(new Set(maskedIds));
       showWarmupToast(
-        `Imported ${summary.imported_count}, skipped ${summary.skipped_count} (total ${summary.total_in_payload})`
+        t("importedSummary", {
+          imported: summary.imported_count,
+          skipped: summary.skipped_count,
+          total: summary.total_in_payload,
+        })
       );
     } catch (err) {
       console.error("Failed to import full encrypted file:", err);
-      showWarmupToast("Full import failed", true);
+      showWarmupToast(t("fullImportFailed"), true);
     } finally {
       setIsImportingFull(false);
     }
@@ -1117,13 +1177,13 @@ function App() {
     try {
       setIsOpeningCodex(true);
       await invokeBackend("open_codex_app");
-      showWarmupToast("Codex app opened.");
+      showWarmupToast(t("codexOpened"));
       setTimeout(() => {
         void checkProcesses();
       }, 1500);
     } catch (err) {
       console.error("Failed to open Codex app:", err);
-      showWarmupToast(`Open Codex failed: ${formatWarmupError(err)}`, true);
+      showWarmupToast(t("openCodexFailed", { message: formatWarmupError(err) }), true);
     } finally {
       setIsOpeningCodex(false);
     }
@@ -1132,13 +1192,20 @@ function App() {
   const activeAccount = accounts.find((a) => a.is_active);
   const otherAccounts = accounts.filter((a) => !a.is_active);
   const hasRunningProcesses = processInfo && processInfo.count > 0;
-  const pendingTraySwitchAccount = useMemo(
-    () => accounts.find((account) => account.id === pendingTraySwitchAccountId),
-    [accounts, pendingTraySwitchAccountId]
+  const pendingForceCloseAccount = useMemo(
+    () =>
+      pendingForceCloseAction && pendingForceCloseAction.kind !== "close_only"
+        ? accounts.find((account) => account.id === pendingForceCloseAction.accountId)
+        : undefined,
+    [accounts, pendingForceCloseAction]
   );
-  const forceCloseConfirmLabel = pendingTraySwitchAccount
-    ? "Force close and switch account"
-    : "Force close running Codex processes";
+  const reauthAccount = accounts.find((account) => account.id === reauthAccountId) ?? null;
+  const forceCloseConfirmLabel =
+    pendingForceCloseAction?.kind === "switch"
+      ? t("forceCloseAndSwitch")
+      : pendingForceCloseAction?.kind === "reauth"
+        ? t("forceCloseAndReauth")
+        : t("forceCloseRunning");
 
   const sortedOtherAccounts = useMemo(() => {
     const getResetDeadline = (resetAt: number | null | undefined) =>
@@ -1319,21 +1386,21 @@ function App() {
                         ></span>
                         <span>
                           {hasRunningProcesses
-                            ? `${processInfo.count} Codex running`
-                            : "0 Codex running"}
+                            ? t("process.running", { count: processInfo.count })
+                            : t("process.none")}
                         </span>
                       </span>
                       {hasRunningProcesses && (
                         <button
                           onClick={() => {
-                            setPendingTraySwitchAccountId(null);
+                            setPendingForceCloseAction({ kind: "close_only" });
                             setForceCloseConfirmOpen(true);
                           }}
                           disabled={isForceClosingCodex}
                           className="inline-flex items-center rounded-md border border-red-200 bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700 transition-colors hover:bg-red-100 disabled:opacity-50 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300 dark:hover:bg-red-900/30"
-                          title="Force close running Codex processes"
+                          title={t("forceCloseRunning")}
                         >
-                          Force close
+                          {t("forceClose")}
                         </button>
                       )}
                     </div>
@@ -1343,9 +1410,9 @@ function App() {
                       onClick={handleOpenCodexApp}
                       disabled={isOpeningCodex}
                       className="inline-flex items-center rounded-md border border-green-200 bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700 transition-colors hover:bg-green-100 disabled:opacity-50 dark:border-green-800 dark:bg-green-900/20 dark:text-green-300 dark:hover:bg-green-900/30"
-                      title="Open Codex app"
+                      title={t("openCodex")}
                     >
-                      {isOpeningCodex ? "Opening..." : "Open Codex"}
+                      {isOpeningCodex ? t("openingCodex") : t("openCodex")}
                     </button>
                   )}
                 </div>
@@ -1356,7 +1423,7 @@ function App() {
               <button
                 onClick={toggleMaskAll}
                 className="flex h-10 w-10 items-center justify-center rounded-lg bg-gray-100 text-gray-700 transition-colors hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700 shrink-0"
-                title={allMasked ? "Show all account names and emails" : "Hide all account names and emails"}
+                title={allMasked ? t("showAll") : t("hideAll")}
               >
                 {allMasked ? (
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1378,7 +1445,7 @@ function App() {
                 onClick={handleRefresh}
                 disabled={isRefreshing}
                 className="flex h-10 w-10 items-center justify-center rounded-lg bg-gray-100 text-gray-700 transition-colors hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700 shrink-0"
-                title={isRefreshing ? "Refreshing all usage" : "Refresh all usage"}
+                title={isRefreshing ? t("refreshingAll") : t("refreshAll")}
               >
                 <span className={isRefreshing ? "animate-spin inline-block" : ""}>↻</span>
               </button>
@@ -1386,7 +1453,7 @@ function App() {
                 onClick={handleWarmupAll}
                 disabled={isWarmingAll || accounts.length === 0}
                 className="flex h-10 w-10 items-center justify-center rounded-lg bg-gray-100 text-gray-700 transition-colors hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700 shrink-0"
-                title="Send minimal traffic using all accounts"
+                title={t("sendAllTraffic")}
               >
                 <span className={isWarmingAll ? "animate-pulse" : ""}>⚡</span>
               </button>
@@ -1400,8 +1467,8 @@ function App() {
                 }`}
                 title={
                   autoWarmupAllEnabled
-                    ? "Disable auto warm-up for all accounts"
-                    : "Enable auto warm-up for all accounts"
+                    ? t("disableAutoAll")
+                    : t("enableAutoAll")
                 }
               >
                 {headerAutoWarmupLabel}
@@ -1414,14 +1481,14 @@ function App() {
                       ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-900/20 dark:text-emerald-300 dark:hover:bg-emerald-900/30"
                       : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
                   }`}
-                  title="Schedule warm-up at specific times of day for all accounts"
+                  title={t("scheduleWarmup")}
                 >
                   {timedWarmupLabel} ▾
                 </button>
                 {isTimedWarmupOpen && (
                   <div className="absolute right-0 z-20 mt-2 w-64 rounded-lg border border-gray-200 bg-white p-3 shadow-lg dark:border-gray-700 dark:bg-gray-900">
                     <label className="flex items-center justify-between text-sm font-medium text-gray-800 dark:text-gray-100">
-                      <span>Timed warm-up</span>
+                      <span>{t("timedWarmup")}</span>
                       <input
                         type="checkbox"
                         checked={timedWarmupEnabled}
@@ -1432,7 +1499,7 @@ function App() {
                     <div className="mt-3 space-y-1">
                       {timedWarmupTimes.length === 0 ? (
                         <p className="text-xs italic text-gray-400 dark:text-gray-500">
-                          No times added yet.
+                          {t("noTimes")}
                         </p>
                       ) : (
                         timedWarmupTimes.map((time) => (
@@ -1446,7 +1513,7 @@ function App() {
                             <button
                               onClick={() => handleRemoveTimedWarmupTime(time)}
                               className="text-gray-400 transition-colors hover:text-red-500"
-                              title={`Remove ${time}`}
+                              title={t("remove", { value: time })}
                             >
                               ✕
                             </button>
@@ -1470,7 +1537,7 @@ function App() {
                         disabled={!timedWarmupDraft}
                         className="h-8 rounded-md bg-gray-900 px-3 text-xs font-semibold text-white transition-colors hover:bg-gray-800 disabled:opacity-50 dark:bg-black dark:hover:bg-neutral-900"
                       >
-                        Add
+                        {t("add")}
                       </button>
                     </div>
                   </div>
@@ -1479,28 +1546,30 @@ function App() {
               <button
                 onClick={() => setThemeMode((prev) => (prev === "dark" ? "light" : "dark"))}
                 className="flex h-10 w-10 items-center justify-center rounded-lg bg-gray-100 text-lg text-gray-700 transition-colors hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700 shrink-0"
-                title={themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+                title={themeMode === "dark" ? t("switchToLight") : t("switchToDark")}
               >
                 {themeMode === "dark" ? "☀" : "☾"}
               </button>
 
+              <LanguageToggle />
               <div className="relative" ref={actionsMenuRef}>
                 <button
                   onClick={() => setIsActionsMenuOpen((prev) => !prev)}
                   className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-900 text-white transition-colors hover:bg-gray-800 dark:bg-black dark:hover:bg-neutral-900 shrink-0 whitespace-nowrap"
                 >
-                  Account ▾
+                  {t("accountMenu")} ▾
                 </button>
                 {isActionsMenuOpen && (
                   <div className="absolute right-0 z-50 mt-2 w-56 rounded-xl border border-gray-200 bg-white p-2 text-gray-700 shadow-xl dark:border-neutral-800 dark:bg-black dark:text-white">
                     <button
                       onClick={() => {
                         setIsActionsMenuOpen(false);
+                        setReauthAccountId(null);
                         setIsAddModalOpen(true);
                       }}
                       className="w-full rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 dark:text-white dark:hover:bg-neutral-900"
                     >
-                      + Add Account
+                      + {t("addAccount")}
                     </button>
                     <button
                       onClick={() => {
@@ -1510,7 +1579,7 @@ function App() {
                       disabled={isExportingSlim}
                       className="w-full rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 disabled:opacity-50 dark:text-white dark:hover:bg-neutral-900"
                     >
-                      {isExportingSlim ? "Exporting..." : "Export Slim Text"}
+                      {isExportingSlim ? t("exporting") : t("exportSlim")}
                     </button>
                     <button
                       onClick={() => {
@@ -1520,7 +1589,7 @@ function App() {
                       disabled={isImportingSlim}
                       className="w-full rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 disabled:opacity-50 dark:text-white dark:hover:bg-neutral-900"
                     >
-                      {isImportingSlim ? "Importing..." : "Import Slim Text"}
+                      {isImportingSlim ? t("importing") : t("importSlim")}
                     </button>
                     <button
                       onClick={() => {
@@ -1530,7 +1599,7 @@ function App() {
                       disabled={isExportingFull}
                       className="w-full rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 disabled:opacity-50 dark:text-white dark:hover:bg-neutral-900"
                     >
-                      {isExportingFull ? "Exporting..." : "Export Full Encrypted File"}
+                      {isExportingFull ? t("exporting") : t("exportFull")}
                     </button>
                     <button
                       onClick={() => {
@@ -1540,7 +1609,7 @@ function App() {
                       disabled={isImportingFull}
                       className="w-full rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 disabled:opacity-50 dark:text-white dark:hover:bg-neutral-900"
                     >
-                      {isImportingFull ? "Importing..." : "Import Full Encrypted File"}
+                        {isImportingFull ? t("importing") : t("importFull")}
                     </button>
                   </div>
                 )}
@@ -1555,11 +1624,11 @@ function App() {
         {loading && accounts.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20">
             <div className="animate-spin h-10 w-10 border-2 border-gray-900 dark:border-gray-100 border-t-transparent rounded-full mb-4"></div>
-            <p className="text-gray-500 dark:text-gray-400">Loading accounts...</p>
+            <p className="text-gray-500 dark:text-gray-400">{t("loadingAccounts")}</p>
           </div>
         ) : error ? (
           <div className="text-center py-20">
-            <div className="text-red-600 dark:text-red-300 mb-2">Failed to load accounts</div>
+            <div className="text-red-600 dark:text-red-300 mb-2">{t("failedLoadAccounts")}</div>
             <p className="text-sm text-gray-500 dark:text-gray-400">{error}</p>
           </div>
         ) : accounts.length === 0 ? (
@@ -1568,16 +1637,19 @@ function App() {
               <span className="text-3xl">👤</span>
             </div>
             <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100 mb-2">
-              No accounts yet
+              {t("noAccountsYet")}
             </h2>
             <p className="text-gray-500 dark:text-gray-400 mb-6">
-              Add your first Codex account to get started
+              {t("addFirstAccount")}
             </p>
             <button
-              onClick={() => setIsAddModalOpen(true)}
+              onClick={() => {
+                setReauthAccountId(null);
+                setIsAddModalOpen(true);
+              }}
               className="px-6 py-3 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors"
             >
-              Add Account
+              {t("addAccountButton")}
             </button>
           </div>
         ) : (
@@ -1601,15 +1673,15 @@ function App() {
                   type="search"
                   value={accountSearchQuery}
                   onChange={(event) => setAccountSearchQuery(event.target.value)}
-                  placeholder="Search accounts by name or email"
-                  aria-label="Search accounts"
+                  placeholder={t("searchAccounts")}
+                  aria-label={t("searchAccounts")}
                   className="w-full rounded-xl border border-gray-300 bg-white py-2.5 pl-10 pr-10 text-sm text-gray-900 shadow-sm transition-colors placeholder:text-gray-400 focus:border-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-200 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100 dark:placeholder:text-gray-500 dark:focus:border-gray-600 dark:focus:ring-gray-800"
                 />
                 {accountSearchQuery.length > 0 && (
                   <button
                     type="button"
                     onClick={() => setAccountSearchQuery("")}
-                    aria-label="Clear account search"
+                    aria-label={t("clearSearch")}
                     className="absolute inset-y-0 right-2 flex items-center px-2 text-gray-400 transition-colors hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-200"
                   >
                     <svg
@@ -1630,10 +1702,10 @@ function App() {
             {hasNoMatchingAccounts && (
               <div className="rounded-2xl border border-dashed border-gray-300 px-6 py-12 text-center dark:border-gray-700">
                 <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">
-                  No matching accounts
+                  {t("noMatching")}
                 </h2>
                 <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                  Try a different account name or email address.
+                  {t("tryDifferent")}
                 </p>
               </div>
             )}
@@ -1643,7 +1715,7 @@ function App() {
               matchesAccountSearch(activeAccount, normalizedAccountSearchQuery) && (
                 <section>
                   <h2 className="text-sm font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-4">
-                    Active Account
+                    {t("activeAccount")}
                   </h2>
                   <AccountCard
                     account={activeAccount}
@@ -1656,8 +1728,10 @@ function App() {
                       refreshSingleUsage(activeAccount.id, { refreshMetadata: true })
                     }
                     onRename={(newName) => renameAccount(activeAccount.id, newName)}
+                    onReauth={() => {
+                      void handleReauth(activeAccount.id);
+                    }}
                     switching={switchingId === activeAccount.id}
-                    switchDisabled={hasRunningProcesses ?? false}
                     warmingUp={
                       isWarmingAll ||
                       warmingUpId === activeAccount.id ||
@@ -1684,7 +1758,7 @@ function App() {
               <section>
                 <div className="flex items-center justify-between gap-3 mb-4">
                   <h2 className="text-sm font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    Other Accounts ({
+                    {t("otherAccounts")} ({
                       normalizedAccountSearchQuery
                         ? `${visibleOtherAccounts.length} of ${otherAccounts.length}`
                         : otherAccounts.length
@@ -1692,7 +1766,7 @@ function App() {
                   </h2>
                   <div className="flex items-center gap-2">
                     <label htmlFor="other-accounts-sort" className="text-xs text-gray-500 dark:text-gray-400">
-                      Sort
+                      {t("sort")}
                     </label>
                     <div className="relative">
                       <select
@@ -1711,19 +1785,19 @@ function App() {
                         }
                         className="appearance-none font-sans text-xs sm:text-sm font-medium pl-3 pr-9 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-gradient-to-b from-white to-gray-50 dark:from-gray-900 dark:to-gray-800 text-gray-700 dark:text-gray-200 shadow-sm hover:border-gray-400 dark:hover:border-gray-600 hover:shadow focus:outline-none focus:ring-2 focus:ring-gray-300 dark:focus:ring-gray-600 focus:border-gray-400 dark:focus:border-gray-600 transition-all"
                       >
-                        <option value="deadline_asc">Reset: earliest to latest</option>
-                        <option value="deadline_desc">Reset: latest to earliest</option>
+                        <option value="deadline_asc">{t("resetEarliest")}</option>
+                        <option value="deadline_desc">{t("resetLatest")}</option>
                         <option value="remaining_desc">
-                          % remaining: highest to lowest
+                          {t("remainingHighest")}
                         </option>
                         <option value="remaining_asc">
-                          % remaining: lowest to highest
+                          {t("remainingLowest")}
                         </option>
                         <option value="subscription_asc">
-                          Expiry: earliest to latest
+                          {t("expiryEarliest")}
                         </option>
                         <option value="subscription_desc">
-                          Expiry: latest to earliest
+                          {t("expiryLatest")}
                         </option>
                       </select>
                       <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-gray-500 dark:text-gray-400">
@@ -1752,8 +1826,10 @@ function App() {
                         refreshSingleUsage(account.id, { refreshMetadata: true })
                       }
                       onRename={(newName) => renameAccount(account.id, newName)}
+                      onReauth={() => {
+                        void handleReauth(account.id);
+                      }}
                       switching={switchingId === account.id}
-                      switchDisabled={hasRunningProcesses ?? false}
                       warmingUp={
                         isWarmingAll ||
                         warmingUpId === account.id ||
@@ -1803,7 +1879,7 @@ function App() {
       {/* Delete Confirmation Toast */}
       {deleteConfirmId && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-3 bg-red-600 text-white rounded-lg shadow-lg text-sm">
-          Click delete again to confirm removal
+           {t("deleteConfirm")}
         </div>
       )}
 
@@ -1812,38 +1888,41 @@ function App() {
           <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-md mx-4 shadow-xl">
             <div className="p-5 border-b border-gray-100 dark:border-gray-800">
               <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-                Force close running Codex processes?
+                {t("forceCloseTitle")}
               </h2>
             </div>
             <div className="p-5 space-y-3">
               <p className="text-sm text-gray-600 dark:text-gray-300">
-                This will force close {processInfo?.count ?? 0} Codex process
-                {(processInfo?.count ?? 0) === 1 ? "" : "es"} that currently
-                block account switching.
+                {t("forceCloseDescription", {
+                  count: processInfo?.count ?? 0,
+                  suffix: (processInfo?.count ?? 0) === 1 ? "" : "es",
+                })}
               </p>
-              {pendingTraySwitchAccount && (
+              {pendingForceCloseAccount && (
                 <p className="text-sm text-gray-600 dark:text-gray-300">
-                  After closing Codex, Codex Switcher will switch to{" "}
+                  {pendingForceCloseAction?.kind === "reauth"
+                    ? t("afterClosingReauth")
+                    : t("afterClosing")} {" "}
                   <span className="font-medium text-gray-900 dark:text-gray-100">
-                    {pendingTraySwitchAccount.name}
+                    {pendingForceCloseAccount.name}
                   </span>
-                  .
+                  {"."}
                 </p>
               )}
               <p className="text-sm text-red-600 dark:text-red-300">
-                Unsaved Codex work may be lost.
+                {t("unsaved")}
               </p>
             </div>
             <div className="flex justify-end gap-3 p-5 border-t border-gray-100 dark:border-gray-800">
               <button
                 onClick={() => {
-                  setPendingTraySwitchAccountId(null);
+                  setPendingForceCloseAction(null);
                   setForceCloseConfirmOpen(false);
                 }}
                 disabled={isForceClosingCodex}
                 className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-50"
               >
-                Cancel
+                {t("cancel")}
               </button>
               <button
                 onClick={() => {
@@ -1853,7 +1932,7 @@ function App() {
                 className="px-4 py-2.5 text-sm font-medium rounded-lg bg-red-600 hover:bg-red-700 text-white transition-colors disabled:opacity-50"
               >
                 {isForceClosingCodex
-                  ? "Force closing..."
+                  ? t("forceClosing")
                   : forceCloseConfirmLabel}
               </button>
             </div>
@@ -1866,15 +1945,15 @@ function App() {
           <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-md mx-4 shadow-xl">
             <div className="p-5 border-b border-gray-100 dark:border-gray-800">
               <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-                Keep Codex Switcher in the Dock?
+                {t("dockTitle")}
               </h2>
             </div>
             <div className="p-5 space-y-4">
               <p className="text-sm text-gray-600 dark:text-gray-300">
-                When the window is closed, Codex Switcher can stay in the Dock or live only in the menu bar.
+                {t("dockDescription")}
               </p>
               <p className="text-sm text-gray-600 dark:text-gray-300">
-                You can always change this later from the tray popup.
+                {t("dockLater")}
               </p>
               <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
                 <input
@@ -1883,7 +1962,7 @@ function App() {
                   onChange={(event) => setCloseBehaviorDontAskAgain(event.target.checked)}
                   className="h-4 w-4 accent-gray-900 dark:accent-gray-100"
                 />
-                <span>Don't ask again</span>
+                <span>{t("dontAsk")}</span>
               </label>
             </div>
             <div className="flex flex-col gap-2 p-5 border-t border-gray-100 dark:border-gray-800 sm:flex-row sm:justify-end">
@@ -1892,21 +1971,21 @@ function App() {
                 disabled={isCompletingCloseBehavior}
                 className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-50"
               >
-                Cancel
+                {t("cancel")}
               </button>
               <button
                 onClick={() => void handleCloseBehaviorChoice("show_in_dock")}
                 disabled={isCompletingCloseBehavior}
                 className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-50"
               >
-                Keep in Dock
+                {t("keepDock")}
               </button>
               <button
                 onClick={() => void handleCloseBehaviorChoice("menu_bar_only")}
                 disabled={isCompletingCloseBehavior}
                 className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors disabled:opacity-50"
               >
-                Menu Bar Only
+                {t("menuBarOnly")}
               </button>
             </div>
           </div>
@@ -1916,11 +1995,15 @@ function App() {
       {/* Add Account Modal */}
       <AddAccountModal
         isOpen={isAddModalOpen}
-        onClose={() => setIsAddModalOpen(false)}
+        onClose={() => {
+          setIsAddModalOpen(false);
+          setReauthAccountId(null);
+        }}
         onImportFile={importFromFile}
         onStartOAuth={startOAuthLogin}
         onCompleteOAuth={completeOAuthLogin}
         onCancelOAuth={cancelOAuthLogin}
+        reauthAccount={reauthAccount}
       />
 
       {/* Import/Export Config Modal */}
@@ -1929,7 +2012,7 @@ function App() {
           <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-2xl mx-4 shadow-xl">
             <div className="flex items-center justify-between p-5 border-b border-gray-100 dark:border-gray-800">
               <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-                {configModalMode === "slim_export" ? "Export Slim Text" : "Import Slim Text"}
+                {configModalMode === "slim_export" ? t("exportSlim") : t("importSlim")}
               </h2>
               <button
                 onClick={() => setIsConfigModalOpen(false)}
@@ -1941,11 +2024,11 @@ function App() {
             <div className="p-5 space-y-4">
               {configModalMode === "slim_import" ? (
                 <p className="text-sm text-amber-700 dark:text-amber-200 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-700 rounded-lg px-3 py-2">
-                  Existing accounts are kept. Only missing accounts are imported.
+                  {t("importExistingKept")}
                 </p>
               ) : (
                 <p className="text-sm text-gray-500 dark:text-gray-400">
-                  This slim string contains account secrets. Keep it private.
+                  {t("slimSecret")}
                 </p>
               )}
               <textarea
@@ -1955,9 +2038,9 @@ function App() {
                 placeholder={
                   configModalMode === "slim_export"
                     ? isExportingSlim
-                      ? "Generating..."
-                      : "Export string will appear here"
-                    : "Paste config string here"
+                      ? t("generating")
+                      : t("exportAppears")
+                    : t("pasteConfig")
                 }
                 className="w-full h-48 px-4 py-3 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-sm text-gray-800 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-gray-400 dark:focus:border-gray-500 focus:ring-1 focus:ring-gray-400 dark:focus:ring-gray-500 font-mono"
               />
@@ -1972,7 +2055,7 @@ function App() {
                 onClick={() => setIsConfigModalOpen(false)}
                 className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors"
               >
-                Close
+                {t("close")}
               </button>
               {configModalMode === "slim_export" ? (
                 <button
@@ -1983,13 +2066,13 @@ function App() {
                       setConfigCopied(true);
                       setTimeout(() => setConfigCopied(false), 1500);
                     } catch {
-                      setConfigModalError("Clipboard unavailable. Please copy manually.");
+                      setConfigModalError(t("clipboardUnavailable"));
                     }
                   }}
                   disabled={!configPayload || isExportingSlim}
                   className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors disabled:opacity-50"
                 >
-                  {configCopied ? "Copied" : "Copy String"}
+                  {configCopied ? t("copied") : t("copyString")}
                 </button>
               ) : (
                 <button
@@ -1997,7 +2080,7 @@ function App() {
                   disabled={isImportingSlim}
                   className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors disabled:opacity-50"
                 >
-                  {isImportingSlim ? "Importing..." : "Import Missing Accounts"}
+                  {isImportingSlim ? t("importing") : t("importMissing")}
                 </button>
               )}
             </div>

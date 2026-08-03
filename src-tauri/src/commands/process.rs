@@ -62,7 +62,7 @@ struct UnixProcessSnapshot {
     uid_by_pid: HashMap<u32, u32>,
 }
 
-const CODEX_RUNNING_SWITCH_BLOCKED_PREFIX: &str = "Cannot switch accounts while ";
+pub const CODEX_RUNNING_ERROR: &str = "CODEX_RUNNING";
 
 /// Check for running Codex processes
 #[tauri::command]
@@ -86,14 +86,19 @@ pub(crate) fn ensure_codex_not_running() -> Result<(), String> {
     }
 
     Err(format!(
-        "{CODEX_RUNNING_SWITCH_BLOCKED_PREFIX}{} Codex process{} running",
+        "{CODEX_RUNNING_ERROR}: Cannot switch accounts while {} Codex process{} running",
         pids.len(),
         if pids.len() == 1 { " is" } else { "es are" }
     ))
 }
 
+pub(crate) fn has_running_codex_processes() -> Result<bool, String> {
+    let (pids, _) = find_codex_processes().map_err(|e| e.to_string())?;
+    Ok(!pids.is_empty())
+}
+
 pub(crate) fn is_codex_running_switch_block(error: &str) -> bool {
-    error.starts_with(CODEX_RUNNING_SWITCH_BLOCKED_PREFIX)
+    error.starts_with(CODEX_RUNNING_ERROR)
 }
 
 /// Force-close active Codex processes that currently block account switching.

@@ -1,6 +1,7 @@
 // Types matching the Rust backend
 
 export type AuthMode = "api_key" | "chat_g_p_t";
+export type AuthState = "ready" | "reauth_required";
 export type DockDisplayMode = "show_in_dock" | "menu_bar_only";
 
 export interface AccountInfo {
@@ -10,6 +11,7 @@ export interface AccountInfo {
   plan_type: string | null;
   subscription_expires_at: string | null;
   auth_mode: AuthMode;
+  auth_state: AuthState;
   is_active: boolean;
   created_at: string;
   last_used_at: string | null;

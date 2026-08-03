@@ -5,6 +5,8 @@ import type {
   AccountUsageStats as AccountUsageStatsInfo,
 } from "../types";
 import { invokeBackend } from "../lib/platform";
+import { useI18n } from "../lib/i18n";
+import { formatLocalizedDate, type AppLocale } from "../lib/dateFormat";
 
 const PROFILE_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
@@ -72,21 +74,23 @@ function formatDuration(seconds: number | null | undefined): string {
   return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
 }
 
-function formatDateLabel(date: string): string {
+function formatDateLabel(date: string, locale: AppLocale): string {
   const parsed = new Date(`${date}T12:00:00`);
   if (Number.isNaN(parsed.getTime())) return date;
-  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(parsed);
+  return formatLocalizedDate(parsed, locale, { month: "short", day: "numeric" });
 }
 
-function formatGeneratedAt(value: string | null): string {
+type Translate = (key: string, values?: Record<string, string | number>) => string;
+
+function formatGeneratedAt(value: string | null, t: Translate, locale: AppLocale): string {
   if (!value) return "";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
   const diff = Date.now() - date.getTime();
-  if (diff < 60_000) return "just now";
-  if (diff < 60 * 60_000) return `${Math.floor(diff / 60_000)}m ago`;
-  if (diff < 24 * 60 * 60_000) return `${Math.floor(diff / (60 * 60_000))}h ago`;
-  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(date);
+  if (diff < 60_000) return t("justNow");
+  if (diff < 60 * 60_000) return t("minutesAgo", { value: Math.floor(diff / 60_000) });
+  if (diff < 24 * 60 * 60_000) return t("hoursAgo", { value: Math.floor(diff / (60 * 60_000)) });
+  return formatLocalizedDate(date, locale, { month: "short", day: "numeric" });
 }
 
 function dayKey(offset: number): string {
@@ -115,19 +119,6 @@ const ACTIVITY_RANGE_OPTIONS: { value: ActivityRange; label: string }[] = [
 function activityRangeDays(range: ActivityRange, daily: AccountDailyUsage[]): number {
   if (range !== "all") return range;
   return Math.max(30, daily.length);
-}
-
-function activityRangeLabel(range: ActivityRange): string {
-  switch (range) {
-    case 30:
-      return "Last 30 days";
-    case 90:
-      return "Last 3 months";
-    case 180:
-      return "Last 6 months";
-    case "all":
-      return "All reported";
-  }
 }
 
 function recentDailyBars(daily: AccountDailyUsage[], range: ActivityRange): AccountDailyUsage[] {
@@ -161,6 +152,7 @@ function StatTile({ label, value, sub }: { label: string; value: string; sub?: s
 }
 
 function TokenActivity({ daily }: { daily: AccountDailyUsage[] }) {
+  const { t, locale } = useI18n();
   const [range, setRange] = useState<ActivityRange>(30);
   const [hoveredDate, setHoveredDate] = useState<string | null>(null);
   const bars = useMemo(() => recentDailyBars(daily, range), [daily, range]);
@@ -170,7 +162,7 @@ function TokenActivity({ daily }: { daily: AccountDailyUsage[] }) {
   if (bars.length === 0 || !bars.some((day) => day.tokens > 0)) {
     return (
       <div className="flex h-14 items-center justify-center rounded-lg border border-dashed border-gray-200 text-[11px] text-gray-400 dark:border-gray-800 dark:text-gray-500">
-        Daily activity unavailable
+        {t("dailyUnavailable")}
       </div>
     );
   }
@@ -178,9 +170,19 @@ function TokenActivity({ daily }: { daily: AccountDailyUsage[] }) {
   return (
     <div className="rounded-lg border border-gray-200 bg-white px-3 pb-3 pt-2 dark:border-gray-800 dark:bg-gray-950/40">
       <div className="mb-2 flex items-center justify-between text-[11px]">
-        <span className="font-medium text-gray-600 dark:text-gray-300">Token activity</span>
+        <span className="font-medium text-gray-600 dark:text-gray-300">{t("tokenActivity")}</span>
         <div className="flex items-center gap-2">
-          <span className="text-gray-400 dark:text-gray-500">{activityRangeLabel(range)}</span>
+          <span className="text-gray-400 dark:text-gray-500">
+            {t(
+              range === 30
+                ? "last30"
+                : range === 90
+                  ? "last3Months"
+                  : range === 180
+                    ? "last6Months"
+                    : "allReported"
+            )}
+          </span>
           <select
             value={range}
             onChange={(event) => {
@@ -188,11 +190,19 @@ function TokenActivity({ daily }: { daily: AccountDailyUsage[] }) {
               setRange(value === "all" ? "all" : (Number(value) as ActivityRange));
             }}
             className="h-6 rounded-md border border-gray-200 bg-gray-50 px-1.5 text-[11px] text-gray-600 outline-none dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300"
-            aria-label="Token activity range"
+            aria-label={t("tokenActivity")}
           >
             {ACTIVITY_RANGE_OPTIONS.map((option) => (
               <option key={option.label} value={option.value}>
-                {option.label}
+                {t(
+                  option.value === 30
+                    ? "last30"
+                    : option.value === 90
+                      ? "last3Months"
+                      : option.value === 180
+                        ? "last6Months"
+                        : "allReported"
+                )}
               </option>
             ))}
           </select>
@@ -215,7 +225,7 @@ function TokenActivity({ daily }: { daily: AccountDailyUsage[] }) {
             >
               {isHovered && (
                 <div className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-2 min-w-max -translate-x-1/2 rounded-md bg-gray-950 px-2 py-1 text-[11px] text-white shadow-lg dark:bg-gray-100 dark:text-gray-950">
-                  {formatDateLabel(day.date)} · {formatTokens(day.tokens)}
+                  {formatDateLabel(day.date, locale)} · {formatTokens(day.tokens)}
                 </div>
               )}
               <div
@@ -245,6 +255,7 @@ function DetailPanel({
   summary: AccountUsageStatsInfo["summary"];
   topInvocations: AccountTopInvocation[];
 }) {
+  const { t } = useI18n();
   const hasActivity =
     activity.fast_mode_percent !== null ||
     activity.reasoning_effort !== null ||
@@ -259,7 +270,7 @@ function DetailPanel({
       className="rounded-lg border border-gray-200 bg-gray-50 transition-colors dark:border-gray-800 dark:bg-gray-950/50"
     >
       <summary className="flex cursor-pointer list-none items-center justify-between rounded-lg px-3 py-2 text-[12px] font-semibold text-gray-700 transition-colors hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-900">
-        More usage details
+        {t("moreDetails")}
         <span className="flex h-6 w-6 items-center justify-center rounded-md bg-white text-gray-500 transition-colors dark:bg-gray-900 dark:text-gray-400">
           <svg
             className={`h-3.5 w-3.5 transition-transform ${open ? "rotate-180" : ""}`}
@@ -277,33 +288,33 @@ function DetailPanel({
       </summary>
       <div className="grid gap-3 border-t border-gray-200 p-3 dark:border-gray-800 sm:grid-cols-2">
         <div className="grid grid-cols-3 gap-2 sm:col-span-2">
-          <StatTile label="Last 30 days" value={formatTokens(thirtyDayTokens)} sub="reported" />
-          <StatTile label="Longest task" value={formatDuration(summary.longest_task_seconds)} />
-          <StatTile label="Longest streak" value={`${formatNumber(summary.longest_streak_days)} days`} />
+          <StatTile label={t("last30")} value={formatTokens(thirtyDayTokens)} sub={t("reported")} />
+          <StatTile label={t("longestTask")} value={formatDuration(summary.longest_task_seconds)} />
+          <StatTile label={t("longestStreak")} value={`${formatNumber(summary.longest_streak_days)} ${t("days")}`} />
         </div>
 
         {hasActivity && (
           <div className="space-y-1.5">
             <div className="mb-1 text-[11px] font-semibold text-gray-600 dark:text-gray-300">
-              Activity insights
+              {t("activityInsights")}
             </div>
             <div className="flex justify-between gap-2 text-[11px]">
-              <span className="text-gray-500 dark:text-gray-400">Fast mode</span>
+              <span className="text-gray-500 dark:text-gray-400">{t("fastMode")}</span>
               <span className="text-gray-800 dark:text-gray-100">{formatPercent(activity.fast_mode_percent)}</span>
             </div>
             <div className="flex justify-between gap-2 text-[11px]">
-              <span className="text-gray-500 dark:text-gray-400">Reasoning</span>
+              <span className="text-gray-500 dark:text-gray-400">{t("reasoning")}</span>
               <span className="text-gray-800 dark:text-gray-100">
                 {activity.reasoning_effort ?? "--"}
                 {activity.reasoning_effort_percent !== null && ` · ${formatPercent(activity.reasoning_effort_percent)}`}
               </span>
             </div>
             <div className="flex justify-between gap-2 text-[11px]">
-              <span className="text-gray-500 dark:text-gray-400">Skills explored</span>
+              <span className="text-gray-500 dark:text-gray-400">{t("skillsExplored")}</span>
               <span className="text-gray-800 dark:text-gray-100">{formatNumber(activity.skills_explored)}</span>
             </div>
             <div className="flex justify-between gap-2 text-[11px]">
-              <span className="text-gray-500 dark:text-gray-400">Total threads</span>
+              <span className="text-gray-500 dark:text-gray-400">{t("totalThreads")}</span>
               <span className="text-gray-800 dark:text-gray-100">{formatNumber(activity.total_threads)}</span>
             </div>
           </div>
@@ -312,7 +323,7 @@ function DetailPanel({
         {topInvocations.length > 0 && (
           <div className="space-y-1.5">
             <div className="mb-1 text-[11px] font-semibold text-gray-600 dark:text-gray-300">
-              Most used plugins
+              {t("mostUsedPlugins")}
             </div>
             {topInvocations.slice(0, 5).map((invocation) => (
               <InvocationRow
@@ -328,6 +339,7 @@ function DetailPanel({
 }
 
 function InvocationRow({ invocation }: { invocation: AccountTopInvocation }) {
+  const { t } = useI18n();
   const prefix = invocation.kind === "plugin" ? "@" : "$";
   return (
     <div className="flex items-center justify-between gap-2 text-[11px]">
@@ -335,7 +347,7 @@ function InvocationRow({ invocation }: { invocation: AccountTopInvocation }) {
         {prefix}{invocation.display_name}
       </span>
       <span className="shrink-0 text-gray-500 dark:text-gray-400">
-        {formatNumber(invocation.usage_count)} runs
+        {formatNumber(invocation.usage_count)} {t("runs")}
       </span>
     </div>
   );
@@ -347,6 +359,7 @@ export function AccountUsageStats({
   defaultOpen = false,
   onStatsLoaded,
 }: AccountUsageStatsProps) {
+  const { t, locale } = useI18n();
   const [panelOpen, setPanelOpen] = useState(defaultOpen);
   const [stats, setStats] = useState<AccountUsageStatsInfo | null>(null);
   const [loading, setLoading] = useState(false);
@@ -356,7 +369,7 @@ export function AccountUsageStats({
     const requestId = ++requestSeq.current;
 
     if (!enabled) {
-      const next = emptyStats(accountId, "Usage stats are available for ChatGPT accounts only.");
+      const next = emptyStats(accountId, t("chatgptOnly"));
       setStats(next);
       onStatsLoaded?.(next);
       setLoading(false);
@@ -381,7 +394,7 @@ export function AccountUsageStats({
         setLoading(false);
       }
     }
-  }, [accountId, enabled, onStatsLoaded]);
+  }, [accountId, enabled, onStatsLoaded, t]);
 
   useEffect(() => {
     requestSeq.current += 1;
@@ -405,7 +418,10 @@ export function AccountUsageStats({
   }, [enabled, loadStats, panelOpen]);
 
   const currentStats = stats?.account_id === accountId ? stats : null;
-  const generatedAt = currentStats ? formatGeneratedAt(currentStats.generated_at) : "";
+  const generatedAt = currentStats ? formatGeneratedAt(currentStats.generated_at, t, locale) : "";
+  const statsAsOf = currentStats?.stats_as_of
+    ? formatDateLabel(currentStats.stats_as_of, locale)
+    : "";
   const todayTokens = currentStats ? sumDays(currentStats.daily, 1) : null;
   const sevenDayTokens = currentStats ? sumDays(currentStats.daily, 7) : null;
   const thirtyDayTokens = currentStats ? sumDays(currentStats.daily, 30) : null;
@@ -423,10 +439,10 @@ export function AccountUsageStats({
               <path d="M4 19h16" strokeLinecap="round" />
               <path d="M8 15l3-4 3 2 4-6" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
-          <span className="truncate">Usage Stats</span>
+          <span className="truncate">{t("usageStats")}</span>
           {generatedAt && (
             <span className="truncate text-[11px] font-normal text-gray-500 dark:text-gray-400">
-              updated {generatedAt}
+              {t("updated", { value: generatedAt })}
             </span>
           )}
         </span>
@@ -436,14 +452,16 @@ export function AccountUsageStats({
       <div className="pt-3">
         <div className="mb-3 flex items-center justify-between gap-3">
           <p className="truncate text-[11px] text-gray-500 dark:text-gray-400">
-            {currentStats?.stats_as_of ? `Stats as of ${currentStats.stats_as_of}` : currentStats?.source ?? "ChatGPT backend"}
-            {generatedAt && ` · updated ${generatedAt}`}
+            {statsAsOf
+              ? t("statsAsOf", { value: statsAsOf })
+              : currentStats?.source ?? t("usageStatsSource")}
+            {generatedAt && ` · ${t("updated", { value: generatedAt })}`}
           </p>
           <button
             onClick={() => void loadStats()}
             disabled={loading || !enabled}
             className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gray-100 text-gray-600 transition-colors hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
-            title="Refresh usage stats"
+            title={t("refreshStats")}
           >
             <span className={loading ? "inline-block animate-spin" : ""}>↻</span>
           </button>
@@ -458,11 +476,11 @@ export function AccountUsageStats({
         ) : currentStats?.available ? (
           <div className="space-y-3">
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-              <StatTile label="Lifetime" value={formatTokens(currentStats.summary.lifetime_tokens)} sub="tokens" />
-              <StatTile label="Today" value={formatTokens(todayTokens)} sub="reported" />
-              <StatTile label="Last 7 days" value={formatTokens(sevenDayTokens)} sub="reported" />
-              <StatTile label="Current streak" value={`${formatNumber(currentStats.summary.current_streak_days)} days`} />
-              <StatTile label="Peak day" value={formatTokens(currentStats.summary.peak_daily_tokens)} sub="tokens" />
+              <StatTile label={t("lifetime")} value={formatTokens(currentStats.summary.lifetime_tokens)} sub={t("tokens")} />
+              <StatTile label={t("today")} value={formatTokens(todayTokens)} sub={t("reported")} />
+              <StatTile label={t("last7")} value={formatTokens(sevenDayTokens)} sub={t("reported")} />
+              <StatTile label={t("currentStreak")} value={`${formatNumber(currentStats.summary.current_streak_days)} ${t("days")}`} />
+              <StatTile label={t("peakDay")} value={formatTokens(currentStats.summary.peak_daily_tokens)} sub={t("tokens")} />
             </div>
 
             <TokenActivity daily={currentStats.daily} />
@@ -476,7 +494,7 @@ export function AccountUsageStats({
           </div>
         ) : (
           <div className="rounded-lg border border-dashed border-gray-200 px-3 py-3 text-xs text-gray-500 dark:border-gray-800 dark:text-gray-400">
-            {currentStats?.error ?? "Usage stats unavailable."}
+            {currentStats?.error ?? t("usageUnavailable")}
           </div>
         )}
       </div>

@@ -4,8 +4,10 @@ use crate::api::usage::{
     fetch_chatgpt_account_metadata, get_account_usage, refresh_all_usage,
     warmup_account as send_warmup,
 };
-use crate::auth::{get_account, load_accounts, refresh_chatgpt_tokens, update_account_metadata};
-use crate::types::{AccountInfo, AuthData, UsageInfo, WarmupSummary};
+use crate::auth::{
+    ensure_chatgpt_tokens_fresh, get_account, load_accounts, update_account_metadata,
+};
+use crate::types::{AccountInfo, AuthData, AuthState, UsageInfo, WarmupSummary};
 use futures::{stream, StreamExt};
 
 /// Fetch usage info for a specific account (shared by the Tauri command and web mode).
@@ -43,7 +45,7 @@ pub async fn refresh_account_metadata(account_id: String) -> Result<AccountInfo,
     let updated = match &account.auth_data {
         AuthData::ApiKey { .. } => account,
         AuthData::ChatGPT { .. } => {
-            let refreshed = refresh_chatgpt_tokens(&account)
+            let refreshed = ensure_chatgpt_tokens_fresh(&account)
                 .await
                 .map_err(|e| e.to_string())?;
             let live_metadata = fetch_chatgpt_account_metadata(&refreshed)
@@ -70,7 +72,12 @@ pub async fn refresh_account_metadata(account_id: String) -> Result<AccountInfo,
 #[tauri::command]
 pub async fn refresh_all_accounts_usage() -> Result<Vec<UsageInfo>, String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
-    Ok(refresh_all_usage(&store.accounts).await)
+    let accounts = store
+        .accounts
+        .into_iter()
+        .filter(|account| account.auth_state == AuthState::Ready)
+        .collect::<Vec<_>>();
+    Ok(refresh_all_usage(&accounts).await)
 }
 
 /// Send a minimal warm-up request for one account
@@ -87,10 +94,15 @@ pub async fn warmup_account(account_id: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn warmup_all_accounts() -> Result<WarmupSummary, String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
-    let total_accounts = store.accounts.len();
+    let accounts = store
+        .accounts
+        .into_iter()
+        .filter(|account| account.auth_state == AuthState::Ready)
+        .collect::<Vec<_>>();
+    let total_accounts = accounts.len();
     let concurrency = total_accounts.min(10).max(1);
 
-    let results: Vec<(String, bool)> = stream::iter(store.accounts.into_iter())
+    let results: Vec<(String, bool)> = stream::iter(accounts)
         .map(|account| async move {
             let account_id = account.id.clone();
             let failed = send_warmup(&account).await.is_err();

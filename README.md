@@ -22,6 +22,7 @@
 - **Rate-Limit Monitoring** – View real-time 5-hour session and weekly usage, reset timing, credits, and subscription expiry
 - **Blocked Switch Recovery** – Detect running Codex sessions and offer a force-close flow before retrying the account switch
 - **Dual Login Mode** – Authenticate with ChatGPT OAuth or import existing `auth.json` files
+- **Bilingual Interface** – Switch the main window and tray popup between English and Chinese; the choice is saved locally
 
 ## Installation
 
@@ -52,7 +53,9 @@ Choose the file for your platform:
 
 Codex Switcher checks the latest GitHub release on startup. When a newer signed
 update package is available, the app shows an update prompt and can install it
-from inside the app.
+from inside the app. Use the **Check for updates** action in the lower-right
+corner to check manually; the update status and install controls are available
+in both languages.
 
 ### Build from Source
 
