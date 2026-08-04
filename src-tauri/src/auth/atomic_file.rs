@@ -148,7 +148,7 @@ fn write_and_replace(
     temp_path: &Path,
     target: &Path,
     bytes: &[u8],
-    options: &AtomicWriteOptions,
+    #[cfg_attr(not(test), allow(unused_variables))] options: &AtomicWriteOptions,
     guard: TempFileGuard,
 ) -> Result<(), AtomicWriteError> {
     #[cfg(test)]
