@@ -555,6 +555,8 @@ dependencies = [
  "urlencoding",
  "uuid",
  "webbrowser",
+ "windows",
+ "zeroize",
 ]
 
 [[package]]

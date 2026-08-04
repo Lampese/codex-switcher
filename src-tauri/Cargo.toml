@@ -13,6 +13,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61.3", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem"
+] }
+
 [dependencies]
 tauri = { version = "2.10", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-opener = "2"
@@ -39,6 +46,6 @@ url = "2"
 flate2 = "1"
 chacha20poly1305 = "0.10"
 pbkdf2 = "0.12"
-
+zeroize = "1.8"
 [target.'cfg(target_os = "macos")'.dependencies]
 plist = "1"
