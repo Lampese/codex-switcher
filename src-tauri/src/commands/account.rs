@@ -1,11 +1,11 @@
 //! Account management Tauri commands
 
-use crate::auth::account_repository::AccountRepository;
+use crate::auth::account_repository::{AccountMetadataPatch, AccountRepository};
 use crate::auth::paths::AppPaths;
 use crate::auth::{
     add_account, create_chatgpt_account_from_refresh_token, import_from_auth_json,
-    import_from_auth_json_contents, load_accounts, remove_account, save_accounts,
-    set_active_account, switch_to_account, touch_account,
+    import_from_auth_json_contents, load_accounts, save_accounts, set_active_account,
+    switch_to_account, touch_account,
 };
 use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
 
@@ -106,6 +106,73 @@ pub(crate) mod read_only_tauri_commands {
             .get_masked_account_ids()
             .await
             .map_err(|e| e.to_string())
+    }
+}
+
+async fn delete_account_with_repository(
+    repository: &AccountRepository,
+    account_id: String,
+) -> Result<(), String> {
+    repository
+        .remove_account(&account_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn rename_account_with_repository(
+    repository: &AccountRepository,
+    account_id: String,
+    new_name: String,
+) -> Result<(), String> {
+    repository
+        .update_account_metadata(
+            &account_id,
+            AccountMetadataPatch {
+                display_name: Some(new_name),
+                ..Default::default()
+            },
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+async fn set_masked_account_ids_with_repository(
+    repository: &AccountRepository,
+    ids: Vec<String>,
+) -> Result<(), String> {
+    repository
+        .set_masked_account_ids(ids)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) mod secure_mutation_tauri_commands {
+    use super::*;
+
+    #[tauri::command]
+    pub(crate) async fn delete_account(
+        repository: tauri::State<'_, AccountRepository>,
+        account_id: String,
+    ) -> Result<(), String> {
+        delete_account_with_repository(&repository, account_id).await
+    }
+
+    #[tauri::command]
+    pub(crate) async fn rename_account(
+        repository: tauri::State<'_, AccountRepository>,
+        account_id: String,
+        new_name: String,
+    ) -> Result<(), String> {
+        rename_account_with_repository(&repository, account_id, new_name).await
+    }
+
+    #[tauri::command]
+    pub(crate) async fn set_masked_account_ids(
+        repository: tauri::State<'_, AccountRepository>,
+        ids: Vec<String>,
+    ) -> Result<(), String> {
+        set_masked_account_ids_with_repository(&repository, ids).await
     }
 }
 
@@ -210,19 +277,16 @@ pub fn switch_account_by_id(account_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Remove an account
-#[tauri::command]
+/// Standalone adapter used by the web dispatcher, which does not have Tauri State.
 pub async fn delete_account(account_id: String) -> Result<(), String> {
-    remove_account(&account_id).map_err(|e| e.to_string())?;
-    Ok(())
+    let repository = production_repository()?;
+    delete_account_with_repository(&repository, account_id).await
 }
 
-/// Rename an account
-#[tauri::command]
+/// Standalone adapter used by the web dispatcher, which does not have Tauri State.
 pub async fn rename_account(account_id: String, new_name: String) -> Result<(), String> {
-    crate::auth::storage::update_account_metadata(&account_id, Some(new_name), None, None, None)
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    let repository = production_repository()?;
+    rename_account_with_repository(&repository, account_id, new_name).await
 }
 
 /// Export minimal account config as a compact text string.
@@ -768,8 +832,810 @@ fn merge_accounts_store(
     )
 }
 
-/// Set the list of masked account IDs
-#[tauri::command]
+/// Standalone adapter used by the web dispatcher, which does not have Tauri State.
 pub async fn set_masked_account_ids(ids: Vec<String>) -> Result<(), String> {
-    crate::auth::storage::set_masked_account_ids(ids).map_err(|e| e.to_string())
+    let repository = production_repository()?;
+    set_masked_account_ids_with_repository(&repository, ids).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::account_repository::SecureAccountInsert;
+    use crate::auth::metadata_store::{
+        AccountMetadataV2, MetadataAuthKind, MetadataFileStore, MetadataStoreV2,
+    };
+    use crate::auth::paths::AppPaths;
+    use crate::auth::secure_commit::SecureCommitTestOptions;
+    use crate::auth::vault::{SecretRecord, VaultPayloadV1, VaultStore};
+    use crate::types::{AccountsStore, AuthData, AuthMode, StoredAccount};
+    use chrono::{DateTime, TimeZone, Utc};
+    use std::path::{Path, PathBuf};
+
+    const ID_TOKEN_A: &str = "synthetic-id-token-A";
+    const ACCESS_TOKEN_A: &str = "synthetic-access-token-A";
+    const REFRESH_TOKEN_A: &str = "synthetic-refresh-token-A";
+    const API_KEY_A: &str = "synthetic-api-key-A";
+    const CHATGPT_ACCOUNT_A: &str = "synthetic-chatgpt-account-A";
+    const ACCOUNT_ID_A: &str = "command-account-A";
+    const ACCOUNT_ID_B: &str = "command-account-B";
+    const DISPLAY_NAME_A: &str = "Command ChatGPT";
+    const DISPLAY_NAME_B: &str = "Command API";
+    const EMAIL_A: &str = "command-account-A@example.test";
+    const EMAIL_B: &str = "command-account-B@example.test";
+
+    fn test_paths(label: &str) -> (PathBuf, AppPaths) {
+        let root = std::env::temp_dir().join(format!(
+            "codex_command_routing_test_{}_{}",
+            label,
+            rand::random::<u32>()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let paths = AppPaths::for_test(&root);
+        (root, paths)
+    }
+
+    fn cleanup(root: PathBuf) {
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn ensure_switcher_dir(paths: &AppPaths) {
+        std::fs::create_dir_all(&paths.switcher_dir).unwrap();
+    }
+
+    fn timestamp(hour: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 8, 5, hour, 0, 0)
+            .single()
+            .unwrap()
+    }
+
+    fn metadata_account(
+        id: &str,
+        display_name: &str,
+        auth_kind: MetadataAuthKind,
+        hour: u32,
+    ) -> AccountMetadataV2 {
+        AccountMetadataV2 {
+            id: id.to_string(),
+            display_name: display_name.to_string(),
+            email: Some(format!("{id}@example.test")),
+            plan_type: Some("pro".to_string()),
+            subscription_expires_at: Some(timestamp(20)),
+            created_at: timestamp(hour),
+            last_used_at: Some(timestamp(hour + 1)),
+            auth_kind,
+            vault_ref: id.to_string(),
+        }
+    }
+
+    fn chatgpt_insert(id: &str, display_name: &str, hour: u32) -> SecureAccountInsert {
+        SecureAccountInsert {
+            metadata: metadata_account(id, display_name, MetadataAuthKind::ChatGpt, hour),
+            secret: SecretRecord::ChatGpt {
+                id_token: ID_TOKEN_A.to_string(),
+                access_token: ACCESS_TOKEN_A.to_string(),
+                refresh_token: REFRESH_TOKEN_A.to_string(),
+                account_id: Some(CHATGPT_ACCOUNT_A.to_string()),
+            },
+        }
+    }
+
+    fn api_key_insert(id: &str, display_name: &str, hour: u32) -> SecureAccountInsert {
+        SecureAccountInsert {
+            metadata: metadata_account(id, display_name, MetadataAuthKind::ApiKey, hour),
+            secret: SecretRecord::ApiKey {
+                key: API_KEY_A.to_string(),
+            },
+        }
+    }
+
+    async fn seeded_repository(paths: &AppPaths) -> AccountRepository {
+        let repository = AccountRepository::for_test(paths.clone());
+        repository
+            .add_account(chatgpt_insert(ACCOUNT_ID_A, DISPLAY_NAME_A, 1))
+            .await
+            .unwrap();
+        repository
+            .add_account(api_key_insert(ACCOUNT_ID_B, DISPLAY_NAME_B, 3))
+            .await
+            .unwrap();
+        repository
+    }
+
+    fn read_pair(paths: &AppPaths) -> (Vec<u8>, Vec<u8>) {
+        (
+            std::fs::read(&paths.metadata_file).unwrap(),
+            std::fs::read(&paths.vault_file).unwrap(),
+        )
+    }
+
+    fn load_metadata(paths: &AppPaths) -> MetadataStoreV2 {
+        MetadataFileStore::from_paths(paths).load().unwrap()
+    }
+
+    fn load_vault(paths: &AppPaths) -> VaultPayloadV1 {
+        VaultStore::from_paths(paths).load().unwrap()
+    }
+
+    fn assert_chatgpt_secret(vault: &VaultPayloadV1, account_id: &str) {
+        match vault.get(account_id) {
+            Some(SecretRecord::ChatGpt {
+                id_token,
+                access_token,
+                refresh_token,
+                account_id: stored_account_id,
+            }) => {
+                assert_eq!(id_token, ID_TOKEN_A);
+                assert_eq!(access_token, ACCESS_TOKEN_A);
+                assert_eq!(refresh_token, REFRESH_TOKEN_A);
+                assert_eq!(stored_account_id.as_deref(), Some(CHATGPT_ACCOUNT_A));
+            }
+            _ => panic!("expected ChatGPT secret record"),
+        }
+    }
+
+    fn assert_api_key_secret(vault: &VaultPayloadV1, account_id: &str) {
+        match vault.get(account_id) {
+            Some(SecretRecord::ApiKey { key }) => assert_eq!(key, API_KEY_A),
+            _ => panic!("expected API key secret record"),
+        }
+    }
+
+    fn legacy_store() -> AccountsStore {
+        AccountsStore {
+            version: 1,
+            accounts: vec![StoredAccount {
+                id: ACCOUNT_ID_A.to_string(),
+                name: DISPLAY_NAME_A.to_string(),
+                email: Some(EMAIL_A.to_string()),
+                plan_type: Some("pro".to_string()),
+                subscription_expires_at: Some(timestamp(20)),
+                auth_mode: AuthMode::ChatGPT,
+                auth_data: AuthData::ChatGPT {
+                    id_token: ID_TOKEN_A.to_string(),
+                    access_token: ACCESS_TOKEN_A.to_string(),
+                    refresh_token: REFRESH_TOKEN_A.to_string(),
+                    account_id: Some(CHATGPT_ACCOUNT_A.to_string()),
+                },
+                created_at: timestamp(1),
+                last_used_at: Some(timestamp(2)),
+            }],
+            active_account_id: Some(ACCOUNT_ID_A.to_string()),
+            masked_account_ids: vec![ACCOUNT_ID_A.to_string()],
+        }
+    }
+
+    fn write_legacy(paths: &AppPaths) -> Vec<u8> {
+        ensure_switcher_dir(paths);
+        let bytes = serde_json::to_vec(&legacy_store()).unwrap();
+        std::fs::write(&paths.metadata_file, &bytes).unwrap();
+        bytes
+    }
+
+    fn write_orphan_vault(paths: &AppPaths) -> Vec<u8> {
+        let bytes = b"opaque legacy orphan vault bytes".to_vec();
+        std::fs::write(&paths.vault_file, &bytes).unwrap();
+        bytes
+    }
+
+    fn assert_sanitized(message: &str, root: &Path) {
+        for value in [
+            ID_TOKEN_A,
+            ACCESS_TOKEN_A,
+            REFRESH_TOKEN_A,
+            API_KEY_A,
+            CHATGPT_ACCOUNT_A,
+            ACCOUNT_ID_A,
+            ACCOUNT_ID_B,
+            DISPLAY_NAME_A,
+            DISPLAY_NAME_B,
+            EMAIL_A,
+            EMAIL_B,
+        ] {
+            assert!(
+                !message.contains(value),
+                "error leaked sensitive value: {message}"
+            );
+        }
+        let root_text = root.to_string_lossy();
+        assert!(
+            !message.contains(root_text.as_ref()),
+            "error leaked filesystem path: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_adapter_removes_secure_account() {
+        let (root, paths) = test_paths("delete_secure");
+        let repository = seeded_repository(&paths).await;
+
+        delete_account_with_repository(&repository, ACCOUNT_ID_B.to_string())
+            .await
+            .unwrap();
+
+        let metadata = load_metadata(&paths);
+        let vault = load_vault(&paths);
+        assert!(metadata.get(ACCOUNT_ID_B).is_none());
+        assert!(!vault.contains(ACCOUNT_ID_B));
+        assert_chatgpt_secret(&vault, ACCOUNT_ID_A);
+
+        drop(repository);
+        drop(metadata);
+        drop(vault);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_deleting_active_secure_account_uses_repository_active_fallback() {
+        let (root, paths) = test_paths("delete_active");
+        let repository = seeded_repository(&paths).await;
+
+        delete_account_with_repository(&repository, ACCOUNT_ID_A.to_string())
+            .await
+            .unwrap();
+
+        let metadata = load_metadata(&paths);
+        let vault = load_vault(&paths);
+        assert_eq!(metadata.active_account_id.as_deref(), Some(ACCOUNT_ID_B));
+        assert!(metadata.get(ACCOUNT_ID_A).is_none());
+        assert_api_key_secret(&vault, ACCOUNT_ID_B);
+
+        drop(repository);
+        drop(metadata);
+        drop(vault);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_deleting_unknown_secure_account_returns_sanitized_account_not_found() {
+        let (root, paths) = test_paths("delete_unknown");
+        let repository = seeded_repository(&paths).await;
+        let before = read_pair(&paths);
+
+        let error = delete_account_with_repository(&repository, "unknown-command-id".to_string())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, "Account was not found");
+        assert_eq!(read_pair(&paths), before);
+        assert!(!error.contains("unknown-command-id"));
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_delete_adapter_does_not_invoke_legacy_storage() {
+        let (root, paths) = test_paths("delete_no_legacy");
+        let metadata_before = write_legacy(&paths);
+        let vault_before = write_orphan_vault(&paths);
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let error = delete_account_with_repository(&repository, ACCOUNT_ID_A.to_string())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, "Legacy account storage requires secure migration");
+        assert_eq!(
+            std::fs::read(&paths.metadata_file).unwrap(),
+            metadata_before
+        );
+        assert_eq!(std::fs::read(&paths.vault_file).unwrap(), vault_before);
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_delete_adapter_leaves_state_unchanged_on_failure() {
+        let (root, paths) = test_paths("delete_commit_failure");
+        let repository = seeded_repository(&paths).await;
+        drop(repository);
+        let before = read_pair(&paths);
+        let repository = AccountRepository::for_test_with_commit_options(
+            paths.clone(),
+            SecureCommitTestOptions {
+                fail_metadata_install: true,
+                ..Default::default()
+            },
+        );
+
+        let error = delete_account_with_repository(&repository, ACCOUNT_ID_A.to_string())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, "Secure account mutation commit failed");
+        assert_eq!(read_pair(&paths), before);
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_rename_adapter_changes_only_display_name() {
+        let (root, paths) = test_paths("rename_display_name");
+        let repository = seeded_repository(&paths).await;
+        let before = load_metadata(&paths);
+        let before_account = before.get(ACCOUNT_ID_A).unwrap().clone();
+        let before_active = before.active_account_id.clone();
+        let before_masked = before.masked_account_ids.clone();
+        drop(before);
+
+        rename_account_with_repository(
+            &repository,
+            ACCOUNT_ID_A.to_string(),
+            "Renamed Command Account".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let after = load_metadata(&paths);
+        let after_account = after.get(ACCOUNT_ID_A).unwrap();
+        assert_eq!(after_account.display_name, "Renamed Command Account");
+        assert_eq!(after_account.id, before_account.id);
+        assert_eq!(after_account.vault_ref, before_account.vault_ref);
+        assert_eq!(after_account.email, before_account.email);
+        assert_eq!(after_account.plan_type, before_account.plan_type);
+        assert_eq!(
+            after_account.subscription_expires_at,
+            before_account.subscription_expires_at
+        );
+        assert_eq!(after_account.auth_kind, before_account.auth_kind);
+        assert_eq!(after_account.created_at, before_account.created_at);
+        assert_eq!(after_account.last_used_at, before_account.last_used_at);
+        assert_eq!(after.active_account_id, before_active);
+        assert_eq!(after.masked_account_ids, before_masked);
+
+        drop(repository);
+        drop(before_account);
+        drop(after);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_rename_preserves_metadata_and_secret() {
+        let (root, paths) = test_paths("rename_preserves_state");
+        let repository = seeded_repository(&paths).await;
+        let before = load_metadata(&paths);
+        let before_account = before.get(ACCOUNT_ID_A).unwrap().clone();
+        let before_vault = load_vault(&paths);
+        drop(before);
+
+        rename_account_with_repository(
+            &repository,
+            ACCOUNT_ID_A.to_string(),
+            "Renamed With Secret".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let after = load_metadata(&paths);
+        let after_vault = load_vault(&paths);
+        let after_account = after.get(ACCOUNT_ID_A).unwrap();
+        assert_eq!(after_account.email, before_account.email);
+        assert_eq!(after_account.plan_type, before_account.plan_type);
+        assert_eq!(
+            after_account.subscription_expires_at,
+            before_account.subscription_expires_at
+        );
+        assert_eq!(after_account.created_at, before_account.created_at);
+        assert_eq!(after_account.last_used_at, before_account.last_used_at);
+        assert_eq!(after_account.auth_kind, before_account.auth_kind);
+        assert_chatgpt_secret(&before_vault, ACCOUNT_ID_A);
+        assert_api_key_secret(&before_vault, ACCOUNT_ID_B);
+        assert_chatgpt_secret(&after_vault, ACCOUNT_ID_A);
+        assert_api_key_secret(&after_vault, ACCOUNT_ID_B);
+
+        drop(repository);
+        drop(before_account);
+        drop(before_vault);
+        drop(after);
+        drop(after_vault);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_rename_returns_sanitized_duplicate_display_name() {
+        let (root, paths) = test_paths("rename_duplicate");
+        let repository = seeded_repository(&paths).await;
+        let before = read_pair(&paths);
+
+        let error = rename_account_with_repository(
+            &repository,
+            ACCOUNT_ID_A.to_string(),
+            DISPLAY_NAME_B.to_string(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "Duplicate display name");
+        assert_eq!(read_pair(&paths), before);
+        assert!(!error.contains(DISPLAY_NAME_B));
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_blank_rename_returns_sanitized_invalid_account_data() {
+        let (root, paths) = test_paths("rename_blank");
+        let repository = seeded_repository(&paths).await;
+        let before = read_pair(&paths);
+
+        let error = rename_account_with_repository(
+            &repository,
+            ACCOUNT_ID_A.to_string(),
+            "   ".to_string(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "Invalid account data");
+        assert_eq!(read_pair(&paths), before);
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_identical_rename_is_a_byte_for_byte_no_op() {
+        let (root, paths) = test_paths("rename_noop");
+        let repository = seeded_repository(&paths).await;
+        let before = read_pair(&paths);
+
+        rename_account_with_repository(
+            &repository,
+            ACCOUNT_ID_A.to_string(),
+            DISPLAY_NAME_A.to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(read_pair(&paths), before);
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_masked_adapter_preserves_ordering_stale_ids_and_duplicates() {
+        let (root, paths) = test_paths("masked_ordering");
+        let repository = seeded_repository(&paths).await;
+        let ids = vec![
+            "stale-command-id".to_string(),
+            ACCOUNT_ID_A.to_string(),
+            "stale-command-id".to_string(),
+            ACCOUNT_ID_B.to_string(),
+        ];
+
+        set_masked_account_ids_with_repository(&repository, ids.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(repository.get_masked_account_ids().await.unwrap(), ids);
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_identical_masked_vector_is_a_byte_for_byte_no_op() {
+        let (root, paths) = test_paths("masked_noop");
+        let repository = seeded_repository(&paths).await;
+        let ids = vec!["stale-command-id".to_string(), ACCOUNT_ID_A.to_string()];
+        set_masked_account_ids_with_repository(&repository, ids.clone())
+            .await
+            .unwrap();
+        let before = read_pair(&paths);
+
+        set_masked_account_ids_with_repository(&repository, ids)
+            .await
+            .unwrap();
+
+        assert_eq!(read_pair(&paths), before);
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_empty_masked_vector_is_preserved() {
+        let (root, paths) = test_paths("masked_empty_existing");
+        let repository = seeded_repository(&paths).await;
+
+        set_masked_account_ids_with_repository(&repository, vec![ACCOUNT_ID_A.to_string()])
+            .await
+            .unwrap();
+        set_masked_account_ids_with_repository(&repository, Vec::new())
+            .await
+            .unwrap();
+
+        assert!(repository
+            .get_masked_account_ids()
+            .await
+            .unwrap()
+            .is_empty());
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_setting_masked_ids_on_empty_creates_repository_defined_secure_pair() {
+        let (root, paths) = test_paths("masked_empty_store");
+        let repository = AccountRepository::for_test(paths.clone());
+
+        set_masked_account_ids_with_repository(
+            &repository,
+            vec!["stale-empty-command-id".to_string()],
+        )
+        .await
+        .unwrap();
+
+        assert!(paths.metadata_file.exists());
+        assert!(paths.vault_file.exists());
+        assert_eq!(
+            repository.validate_startup_state().await.unwrap(),
+            crate::auth::account_repository::RepositoryFormat::Secure
+        );
+        let metadata = load_metadata(&paths);
+        let vault = load_vault(&paths);
+        assert!(metadata.is_empty());
+        assert_eq!(metadata.masked_account_ids, ["stale-empty-command-id"]);
+        assert!(vault.is_empty());
+
+        drop(repository);
+        drop(metadata);
+        drop(vault);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_delete_on_legacy_returns_legacy_migration_required() {
+        let (root, paths) = test_paths("legacy_delete");
+        write_legacy(&paths);
+        let repository = AccountRepository::for_test(paths);
+
+        let error = delete_account_with_repository(&repository, ACCOUNT_ID_A.to_string())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, "Legacy account storage requires secure migration");
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_rename_on_legacy_returns_legacy_migration_required() {
+        let (root, paths) = test_paths("legacy_rename");
+        write_legacy(&paths);
+        let repository = AccountRepository::for_test(paths);
+
+        let error = rename_account_with_repository(
+            &repository,
+            ACCOUNT_ID_A.to_string(),
+            "Legacy Rename Attempt".to_string(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "Legacy account storage requires secure migration");
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_masked_update_on_legacy_returns_legacy_migration_required() {
+        let (root, paths) = test_paths("legacy_masked");
+        write_legacy(&paths);
+        let repository = AccountRepository::for_test(paths);
+
+        let error =
+            set_masked_account_ids_with_repository(&repository, vec!["legacy-attempt".to_string()])
+                .await
+                .unwrap_err();
+
+        assert_eq!(error, "Legacy account storage requires secure migration");
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_all_legacy_mutations_preserve_accounts_bytes() {
+        let (root, paths) = test_paths("legacy_metadata_unchanged");
+        let metadata_before = write_legacy(&paths);
+        let repository = AccountRepository::for_test(paths.clone());
+
+        assert!(
+            delete_account_with_repository(&repository, ACCOUNT_ID_A.to_string())
+                .await
+                .is_err()
+        );
+        assert!(rename_account_with_repository(
+            &repository,
+            ACCOUNT_ID_A.to_string(),
+            "Legacy Rename Attempt".to_string(),
+        )
+        .await
+        .is_err());
+        assert!(set_masked_account_ids_with_repository(
+            &repository,
+            vec!["legacy-attempt".to_string()],
+        )
+        .await
+        .is_err());
+
+        assert_eq!(
+            std::fs::read(&paths.metadata_file).unwrap(),
+            metadata_before
+        );
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_all_legacy_mutations_preserve_orphan_vault_bytes() {
+        let (root, paths) = test_paths("legacy_orphan_unchanged");
+        write_legacy(&paths);
+        let vault_before = write_orphan_vault(&paths);
+        let repository = AccountRepository::for_test(paths.clone());
+
+        assert!(
+            delete_account_with_repository(&repository, ACCOUNT_ID_A.to_string())
+                .await
+                .is_err()
+        );
+        assert!(rename_account_with_repository(
+            &repository,
+            ACCOUNT_ID_A.to_string(),
+            "Legacy Rename Attempt".to_string(),
+        )
+        .await
+        .is_err());
+        assert!(set_masked_account_ids_with_repository(
+            &repository,
+            vec!["legacy-attempt".to_string()],
+        )
+        .await
+        .is_err());
+
+        assert_eq!(std::fs::read(&paths.vault_file).unwrap(), vault_before);
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_command_errors_do_not_contain_synthetic_values_or_paths() {
+        let (root, paths) = test_paths("error_secrecy");
+        let repository = seeded_repository(&paths).await;
+        let delete_error =
+            delete_account_with_repository(&repository, "secret-command-unknown-id".to_string())
+                .await
+                .unwrap_err();
+        let rename_error = rename_account_with_repository(
+            &repository,
+            ACCOUNT_ID_A.to_string(),
+            DISPLAY_NAME_B.to_string(),
+        )
+        .await
+        .unwrap_err();
+        let blank_error = rename_account_with_repository(
+            &repository,
+            ACCOUNT_ID_A.to_string(),
+            "   ".to_string(),
+        )
+        .await
+        .unwrap_err();
+
+        for error in [delete_error, rename_error, blank_error] {
+            assert_sanitized(&error, &root);
+        }
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_shared_helpers_route_directly_to_repository_mutations() {
+        let (root, paths) = test_paths("shared_helpers");
+        let repository = seeded_repository(&paths).await;
+
+        rename_account_with_repository(
+            &repository,
+            ACCOUNT_ID_A.to_string(),
+            "Shared Helper Rename".to_string(),
+        )
+        .await
+        .unwrap();
+        set_masked_account_ids_with_repository(&repository, vec![ACCOUNT_ID_A.to_string()])
+            .await
+            .unwrap();
+        delete_account_with_repository(&repository, ACCOUNT_ID_B.to_string())
+            .await
+            .unwrap();
+
+        let metadata = load_metadata(&paths);
+        assert_eq!(metadata.accounts.len(), 1);
+        assert_eq!(metadata.accounts[0].display_name, "Shared Helper Rename");
+        assert_eq!(metadata.masked_account_ids, [ACCOUNT_ID_A]);
+
+        drop(repository);
+        drop(metadata);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_shared_helpers_preserve_web_result_shapes() {
+        let (root, paths) = test_paths("web_result_shapes");
+        let repository = seeded_repository(&paths).await;
+
+        let rename_result: Result<(), String> = rename_account_with_repository(
+            &repository,
+            ACCOUNT_ID_A.to_string(),
+            "Result Shape Rename".to_string(),
+        )
+        .await;
+        let masked_result: Result<(), String> =
+            set_masked_account_ids_with_repository(&repository, Vec::new()).await;
+        let delete_result: Result<(), String> =
+            delete_account_with_repository(&repository, ACCOUNT_ID_B.to_string()).await;
+
+        assert!(rename_result.is_ok());
+        assert!(masked_result.is_ok());
+        assert!(delete_result.is_ok());
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_secure_helpers_never_fall_back_to_legacy_storage() {
+        let (root, paths) = test_paths("no_legacy_fallback");
+        let metadata_before = write_legacy(&paths);
+        let vault_before = write_orphan_vault(&paths);
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let delete_error = delete_account_with_repository(&repository, ACCOUNT_ID_A.to_string())
+            .await
+            .unwrap_err();
+        let rename_error = rename_account_with_repository(
+            &repository,
+            ACCOUNT_ID_A.to_string(),
+            "Fallback Attempt".to_string(),
+        )
+        .await
+        .unwrap_err();
+        let masked_error = set_masked_account_ids_with_repository(
+            &repository,
+            vec!["fallback-attempt".to_string()],
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            delete_error,
+            "Legacy account storage requires secure migration"
+        );
+        assert_eq!(
+            rename_error,
+            "Legacy account storage requires secure migration"
+        );
+        assert_eq!(
+            masked_error,
+            "Legacy account storage requires secure migration"
+        );
+        assert_eq!(
+            std::fs::read(&paths.metadata_file).unwrap(),
+            metadata_before
+        );
+        assert_eq!(std::fs::read(&paths.vault_file).unwrap(), vault_before);
+
+        drop(repository);
+        cleanup(root);
+    }
 }
