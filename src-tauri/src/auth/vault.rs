@@ -106,9 +106,6 @@ fn map_dpapi_unprotect(e: dpapi::DpapiError) -> VaultError {
 /// A secret credential record. All string fields are zeroized on Drop.
 ///
 /// Debug is manually implemented to redact values.
-/// A secret credential record. All string fields are zeroized on Drop.
-///
-/// Debug is manually implemented to redact values.
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "auth_kind", rename_all = "snake_case")]
 pub(crate) enum SecretRecord {
@@ -116,7 +113,7 @@ pub(crate) enum SecretRecord {
         id_token: String,
         access_token: String,
         refresh_token: String,
-        account_id: String,
+        account_id: Option<String>,
     },
     ApiKey {
         key: String,
@@ -153,7 +150,9 @@ impl Drop for SecretRecord {
                 id_token.zeroize();
                 access_token.zeroize();
                 refresh_token.zeroize();
-                account_id.zeroize();
+                if let Some(ref mut act_id) = account_id {
+                    act_id.zeroize();
+                }
             }
             SecretRecord::ApiKey { key } => {
                 key.zeroize();
@@ -172,12 +171,13 @@ impl SecretRecord {
                 refresh_token,
                 account_id,
             } => {
-                if id_token.is_empty()
-                    || access_token.is_empty()
-                    || refresh_token.is_empty()
-                    || account_id.is_empty()
-                {
+                if id_token.is_empty() || access_token.is_empty() || refresh_token.is_empty() {
                     return Err(VaultError::InvalidSecretRecord);
+                }
+                if let Some(ref act_id) = account_id {
+                    if act_id.is_empty() || act_id.trim() != act_id {
+                        return Err(VaultError::InvalidSecretRecord);
+                    }
                 }
             }
             SecretRecord::ApiKey { key } => {
@@ -380,38 +380,35 @@ impl VaultStore {
         Ok(payload)
     }
 
-    /// Save the vault atomically.
-    ///
-    /// Full procedure:
-    /// 1. Validate payload
-    /// 2. Serialize directly to Zeroizing<Vec<u8>>
-    /// 3. DPAPI-protect
-    /// 4. Build envelope
-    /// 5. Validate envelope in memory (parse + unprotect + deserialize + compare)
-    /// 6. Write atomically — only after validation passes
-    pub(crate) fn save(&self, payload: &VaultPayloadV1) -> Result<(), VaultError> {
-        // Step 1 — Validate.
+    /// Encode payload into in-memory CSVT envelope bytes with validation round-trip. Does not write to disk.
+    pub(crate) fn encode(&self, payload: &VaultPayloadV1) -> Result<Vec<u8>, VaultError> {
         payload.validate()?;
-
-        // Step 2 — Serialize directly into a Zeroizing buffer.
         let mut plaintext = Zeroizing::new(Vec::new());
         serde_json::to_writer(&mut *plaintext, payload)
             .map_err(|_| VaultError::PayloadSerializeFailed)?;
-
-        // Step 3 — DPAPI protect.
         let ciphertext = dpapi::protect(&plaintext).map_err(map_dpapi_protect)?;
-
-        // Step 4 — Build envelope.
         let envelope = build_envelope(&ciphertext)?;
-
-        // Step 5 — In-memory round-trip validation.
         self.validate_envelope_round_trip(&envelope, payload)?;
+        Ok(envelope)
+    }
 
-        // Step 6 — Atomic write.
-        atomic_write(&self.path, &envelope, FileSensitivity::Secret)
+    /// Install pre-encoded CSVT envelope bytes into vault.dat after strict validation.
+    pub(crate) fn install_encoded(&self, bytes: &[u8]) -> Result<(), VaultError> {
+        let ciphertext = parse_envelope(bytes)?;
+        let plaintext = dpapi::unprotect(ciphertext).map_err(map_dpapi_unprotect)?;
+        let recovered: VaultPayloadV1 =
+            serde_json::from_slice(&plaintext).map_err(|_| VaultError::PayloadDeserializeFailed)?;
+        recovered.validate()?;
+
+        atomic_write(&self.path, bytes, FileSensitivity::Secret)
             .map_err(|e| VaultError::AtomicWriteFailed(e.to_string()))?;
-
         Ok(())
+    }
+
+    /// Save the vault payload atomically via encode and install_encoded.
+    pub(crate) fn save(&self, payload: &VaultPayloadV1) -> Result<(), VaultError> {
+        let bytes = self.encode(payload)?;
+        self.install_encoded(&bytes)
     }
 
     /// Parse the in-memory envelope, decrypt, deserialize, and compare with the
@@ -467,7 +464,7 @@ mod tests {
             id_token: ID_TOKEN_A.to_string(),
             access_token: ACCESS_TOKEN_A.to_string(),
             refresh_token: REFRESH_TOKEN_A.to_string(),
-            account_id: ACCOUNT_ID_A.to_string(),
+            account_id: Some(ACCOUNT_ID_A.to_string()),
         }
     }
 
@@ -485,6 +482,97 @@ mod tests {
         ));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    // ---- Option<String> account_id tests ----
+
+    #[test]
+    fn test_vault_chatgpt_record_none_account_id_validates() {
+        let rec = SecretRecord::ChatGpt {
+            id_token: ID_TOKEN_A.to_string(),
+            access_token: ACCESS_TOKEN_A.to_string(),
+            refresh_token: REFRESH_TOKEN_A.to_string(),
+            account_id: None,
+        };
+        assert!(rec.validate().is_ok());
+    }
+
+    #[test]
+    fn test_vault_chatgpt_record_some_valid_account_id_validates() {
+        let rec = SecretRecord::ChatGpt {
+            id_token: ID_TOKEN_A.to_string(),
+            access_token: ACCESS_TOKEN_A.to_string(),
+            refresh_token: REFRESH_TOKEN_A.to_string(),
+            account_id: Some("user-123".to_string()),
+        };
+        assert!(rec.validate().is_ok());
+    }
+
+    #[test]
+    fn test_vault_chatgpt_record_empty_some_account_id_rejected() {
+        let rec = SecretRecord::ChatGpt {
+            id_token: ID_TOKEN_A.to_string(),
+            access_token: ACCESS_TOKEN_A.to_string(),
+            refresh_token: REFRESH_TOKEN_A.to_string(),
+            account_id: Some("".to_string()),
+        };
+        assert!(matches!(
+            rec.validate(),
+            Err(VaultError::InvalidSecretRecord)
+        ));
+    }
+
+    #[test]
+    fn test_vault_chatgpt_record_whitespace_some_account_id_rejected() {
+        let rec = SecretRecord::ChatGpt {
+            id_token: ID_TOKEN_A.to_string(),
+            access_token: ACCESS_TOKEN_A.to_string(),
+            refresh_token: REFRESH_TOKEN_A.to_string(),
+            account_id: Some("   ".to_string()),
+        };
+        assert!(matches!(
+            rec.validate(),
+            Err(VaultError::InvalidSecretRecord)
+        ));
+
+        let rec_padded = SecretRecord::ChatGpt {
+            id_token: ID_TOKEN_A.to_string(),
+            access_token: ACCESS_TOKEN_A.to_string(),
+            refresh_token: REFRESH_TOKEN_A.to_string(),
+            account_id: Some(" user-123 ".to_string()),
+        };
+        assert!(matches!(
+            rec_padded.validate(),
+            Err(VaultError::InvalidSecretRecord)
+        ));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_vault_save_load_preserves_none_account_id_exact() {
+        let d = test_dir("preserve_none");
+        let store = VaultStore::for_path(d.join("vault.dat"));
+
+        let rec = SecretRecord::ChatGpt {
+            id_token: ID_TOKEN_A.to_string(),
+            access_token: ACCESS_TOKEN_A.to_string(),
+            refresh_token: REFRESH_TOKEN_A.to_string(),
+            account_id: None,
+        };
+
+        let mut payload = VaultPayloadV1::new_empty();
+        payload.insert(ACCOUNT_ID_A, rec).unwrap();
+
+        store.save(&payload).unwrap();
+        let loaded = store.load().unwrap();
+
+        let loaded_rec = loaded.get(ACCOUNT_ID_A).unwrap();
+        if let SecretRecord::ChatGpt { ref account_id, .. } = loaded_rec {
+            assert_eq!(account_id, &None);
+        } else {
+            panic!("Expected SecretRecord::ChatGpt");
+        }
+        let _ = std::fs::remove_dir_all(d);
     }
 
     // ---- Payload mutation helpers ----
@@ -554,7 +642,7 @@ mod tests {
             id_token: "".to_string(),
             access_token: ACCESS_TOKEN_A.to_string(),
             refresh_token: REFRESH_TOKEN_A.to_string(),
-            account_id: ACCOUNT_ID_A.to_string(),
+            account_id: Some(ACCOUNT_ID_A.to_string()),
         };
         let r = p.insert(ACCOUNT_ID_A, bad);
         assert!(matches!(r, Err(VaultError::InvalidSecretRecord)));

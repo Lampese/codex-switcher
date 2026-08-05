@@ -129,6 +129,8 @@ pub(crate) struct MetadataStoreV2 {
     pub(crate) schema_version: u32,
     pub(crate) active_account_id: Option<String>,
     pub(crate) accounts: Vec<AccountMetadataV2>,
+    #[serde(default)]
+    pub(crate) masked_account_ids: Vec<String>,
 }
 
 // ----- Field validators ---------------------------------------------------------
@@ -148,7 +150,7 @@ fn validate_vault_ref_syntax(vault_ref: &str) -> Result<(), MetadataStoreError> 
 }
 
 fn validate_display_name(name: &str) -> Result<(), MetadataStoreError> {
-    if name.trim().is_empty() || name.trim() != name {
+    if name.is_empty() || name.trim().is_empty() {
         return Err(MetadataStoreError::InvalidDisplayName);
     }
     Ok(())
@@ -166,7 +168,9 @@ fn validate_optional_str(value: &str, err: MetadataStoreError) -> Result<(), Met
 /// Recursively visit every JSON object key in `value` and reject any that
 /// are in `PROHIBITED_SECRET_KEYS`. Uses structural serde_json traversal —
 /// not substring scanning.
-fn check_no_prohibited_keys(value: &serde_json::Value) -> Result<(), MetadataStoreError> {
+pub(crate) fn check_no_prohibited_keys(
+    value: &serde_json::Value,
+) -> Result<(), MetadataStoreError> {
     match value {
         serde_json::Value::Object(map) => {
             for (key, child) in map {
@@ -194,7 +198,16 @@ impl MetadataStoreV2 {
             schema_version: METADATA_SCHEMA_VERSION,
             active_account_id: None,
             accounts: Vec::new(),
+            masked_account_ids: Vec::new(),
         }
+    }
+
+    pub(crate) fn masked_account_ids(&self) -> &[String] {
+        &self.masked_account_ids
+    }
+
+    pub(crate) fn set_masked_account_ids(&mut self, masked_ids: Vec<String>) {
+        self.masked_account_ids = masked_ids;
     }
 
     pub(crate) fn get(&self, id: &str) -> Option<&AccountMetadataV2> {
@@ -372,30 +385,35 @@ impl MetadataFileStore {
         }
     }
 
-    /// Save metadata atomically.
-    ///
-    /// 1. Validate store.
-    /// 2. Serialize as pretty JSON.
-    /// 3. Structurally verify no prohibited secret keys.
-    /// 4. Atomic write with FileSensitivity::Metadata.
-    pub(crate) fn save(&self, store: &MetadataStoreV2) -> Result<(), MetadataStoreError> {
-        // Step 1 — Validate.
+    /// Encode store into in-memory JSON bytes after validation and secrecy verification.
+    pub(crate) fn encode(&self, store: &MetadataStoreV2) -> Result<Vec<u8>, MetadataStoreError> {
         store.validate()?;
-
-        // Step 2 — Serialize.
         let bytes =
             serde_json::to_vec_pretty(store).map_err(|_| MetadataStoreError::SerializeFailed)?;
-
-        // Step 3 — Structural prohibited-key check.
         let json_value: serde_json::Value =
             serde_json::from_slice(&bytes).map_err(|_| MetadataStoreError::SerializeFailed)?;
         check_no_prohibited_keys(&json_value)?;
+        Ok(bytes)
+    }
 
-        // Step 4 — Atomic write.
-        atomic_write(&self.path, &bytes, FileSensitivity::Metadata)
+    /// Install pre-encoded metadata JSON bytes into accounts.json after strict validation and secrecy check.
+    pub(crate) fn install_encoded(&self, bytes: &[u8]) -> Result<(), MetadataStoreError> {
+        let store: MetadataStoreV2 =
+            serde_json::from_slice(bytes).map_err(|_| MetadataStoreError::DeserializeFailed)?;
+        store.validate()?;
+        let json_value: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|_| MetadataStoreError::DeserializeFailed)?;
+        check_no_prohibited_keys(&json_value)?;
+
+        atomic_write(&self.path, bytes, FileSensitivity::Metadata)
             .map_err(|e| MetadataStoreError::AtomicWriteFailed(e.to_string()))?;
-
         Ok(())
+    }
+
+    /// Save metadata payload atomically via encode and install_encoded.
+    pub(crate) fn save(&self, store: &MetadataStoreV2) -> Result<(), MetadataStoreError> {
+        let bytes = self.encode(store)?;
+        self.install_encoded(&bytes)
     }
 }
 
@@ -511,6 +529,7 @@ mod tests {
             schema_version: METADATA_SCHEMA_VERSION,
             active_account_id: None,
             accounts: vec![a1, a2],
+            masked_account_ids: Vec::new(),
         };
 
         let r = store.validate();
@@ -538,6 +557,7 @@ mod tests {
             schema_version: METADATA_SCHEMA_VERSION,
             active_account_id: None,
             accounts: vec![a],
+            masked_account_ids: Vec::new(),
         };
         let r = store.validate();
         assert!(matches!(r, Err(MetadataStoreError::InvalidVaultReference)));
@@ -546,11 +566,40 @@ mod tests {
     #[test]
     fn test_metadata_whitespace_display_name_rejected() {
         let mut a = account("acc-1", MetadataAuthKind::ChatGpt);
-        a.display_name = "  Leading space".to_string();
+        a.display_name = "   ".to_string();
         assert!(matches!(
             a.validate(),
             Err(MetadataStoreError::InvalidDisplayName)
         ));
+    }
+
+    #[test]
+    fn test_metadata_padded_non_empty_display_name_accepted() {
+        let mut a = account("acc-1", MetadataAuthKind::ChatGpt);
+        a.display_name = "  Padded Name  ".to_string();
+        assert!(a.validate().is_ok());
+    }
+
+    // ---- masked_account_ids tests ----
+
+    #[test]
+    fn test_metadata_masked_account_ids_default_empty() {
+        let s = MetadataStoreV2::new_empty();
+        assert!(s.masked_account_ids().is_empty());
+    }
+
+    #[test]
+    fn test_metadata_masked_account_ids_preserves_ordering_stale_and_duplicates() {
+        let mut s = MetadataStoreV2::new_empty();
+        s.insert(account("acc-1", MetadataAuthKind::ChatGpt))
+            .unwrap();
+        s.set_masked_account_ids(vec![
+            "stale-acc".to_string(),
+            "acc-1".to_string(),
+            "stale-acc".to_string(),
+        ]);
+        assert_eq!(s.masked_account_ids(), &["stale-acc", "acc-1", "stale-acc"]);
+        assert!(s.validate().is_ok());
     }
 
     #[test]
@@ -761,6 +810,7 @@ mod tests {
             schema_version: 99,
             active_account_id: None,
             accounts: Vec::new(),
+            masked_account_ids: Vec::new(),
         };
         let r = store.save(&bad);
         assert!(r.is_err());
