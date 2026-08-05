@@ -1,5 +1,6 @@
 //! Authentication module
 
+pub(crate) mod account_repository;
 pub(crate) mod atomic_file;
 pub(crate) mod dpapi;
 pub(crate) mod metadata_store;

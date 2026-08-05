@@ -1,9 +1,11 @@
 //! Account management Tauri commands
 
+use crate::auth::account_repository::AccountRepository;
+use crate::auth::paths::AppPaths;
 use crate::auth::{
-    add_account, create_chatgpt_account_from_refresh_token, get_active_account,
-    import_from_auth_json, import_from_auth_json_contents, load_accounts, remove_account,
-    save_accounts, set_active_account, switch_to_account, touch_account,
+    add_account, create_chatgpt_account_from_refresh_token, import_from_auth_json,
+    import_from_auth_json_contents, load_accounts, remove_account, save_accounts,
+    set_active_account, switch_to_account, touch_account,
 };
 use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
 
@@ -46,6 +48,67 @@ const MAX_IMPORT_JSON_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_IMPORT_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const SLIM_IMPORT_CONCURRENCY: usize = 6;
 
+fn production_repository() -> Result<AccountRepository, String> {
+    let paths = AppPaths::production()
+        .map_err(|_| "Failed to resolve account storage paths".to_string())?;
+    Ok(AccountRepository::from_paths(paths))
+}
+
+/// Read-only adapter used by the standalone web dispatcher, which does not have Tauri State.
+pub async fn list_accounts() -> Result<Vec<AccountInfo>, String> {
+    production_repository()?
+        .list_accounts()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Read-only adapter used by the standalone web dispatcher, which does not have Tauri State.
+pub async fn get_active_account_info() -> Result<Option<AccountInfo>, String> {
+    production_repository()?
+        .get_active_account()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Read-only adapter used by the standalone web dispatcher, which does not have Tauri State.
+pub async fn get_masked_account_ids() -> Result<Vec<String>, String> {
+    production_repository()?
+        .get_masked_account_ids()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) mod read_only_tauri_commands {
+    use super::*;
+
+    #[tauri::command]
+    pub(crate) async fn list_accounts(
+        repository: tauri::State<'_, AccountRepository>,
+    ) -> Result<Vec<AccountInfo>, String> {
+        repository.list_accounts().await.map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    pub(crate) async fn get_active_account_info(
+        repository: tauri::State<'_, AccountRepository>,
+    ) -> Result<Option<AccountInfo>, String> {
+        repository
+            .get_active_account()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    pub(crate) async fn get_masked_account_ids(
+        repository: tauri::State<'_, AccountRepository>,
+    ) -> Result<Vec<String>, String> {
+        repository
+            .get_masked_account_ids()
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct SlimPayload {
     #[serde(rename = "v")]
@@ -66,34 +129,6 @@ struct SlimAccountPayload {
     api_key: Option<String>,
     #[serde(rename = "r", skip_serializing_if = "Option::is_none")]
     refresh_token: Option<String>,
-}
-
-/// List all accounts with their info
-#[tauri::command]
-pub async fn list_accounts() -> Result<Vec<AccountInfo>, String> {
-    let store = load_accounts().map_err(|e| e.to_string())?;
-    let active_id = store.active_account_id.as_deref();
-
-    let accounts: Vec<AccountInfo> = store
-        .accounts
-        .iter()
-        .map(|a| AccountInfo::from_stored(a, active_id))
-        .collect();
-
-    Ok(accounts)
-}
-
-/// Get the currently active account
-#[tauri::command]
-pub async fn get_active_account_info() -> Result<Option<AccountInfo>, String> {
-    let store = load_accounts().map_err(|e| e.to_string())?;
-    let active_id = store.active_account_id.as_deref();
-
-    if let Some(active) = get_active_account().map_err(|e| e.to_string())? {
-        Ok(Some(AccountInfo::from_stored(&active, active_id)))
-    } else {
-        Ok(None)
-    }
 }
 
 /// Add an account from an auth.json file
@@ -731,12 +766,6 @@ fn merge_accounts_store(
             skipped_count: total_in_payload.saturating_sub(imported_count),
         },
     )
-}
-
-/// Get the list of masked account IDs
-#[tauri::command]
-pub async fn get_masked_account_ids() -> Result<Vec<String>, String> {
-    crate::auth::storage::get_masked_account_ids().map_err(|e| e.to_string())
 }
 
 /// Set the list of masked account IDs

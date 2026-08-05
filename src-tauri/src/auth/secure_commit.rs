@@ -186,7 +186,7 @@ impl SecurePairCommitter {
     }
 }
 
-fn verify_consistency(
+pub(crate) fn verify_consistency(
     vault: &VaultPayloadV1,
     metadata: &MetadataStoreV2,
 ) -> Result<(), SecureCommitError> {
