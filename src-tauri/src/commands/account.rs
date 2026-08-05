@@ -336,7 +336,7 @@ fn read_auth_json_file_contents(path: &str) -> Result<Zeroizing<Vec<u8>>, String
     Ok(raw_bytes)
 }
 
-async fn add_stored_account_with_repository(
+pub(crate) async fn add_stored_account_with_repository(
     repository: &AccountRepository,
     account: StoredAccount,
 ) -> Result<AccountInfo, String> {

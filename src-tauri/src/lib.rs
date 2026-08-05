@@ -14,11 +14,11 @@ use crate::auth::account_repository::AccountRepository;
 use crate::auth::paths::AppPaths;
 use commands::{
     ack_close_behavior_prompt, cancel_login, check_codex_processes, complete_close_behavior,
-    complete_login, export_accounts_full_encrypted_file, export_accounts_slim_text,
-    get_account_usage_stats, get_dock_display_mode, get_usage, hide_tray_window,
-    import_accounts_full_encrypted_file, import_accounts_slim_text, kill_codex_processes,
-    open_main_window, quit_app, refresh_account_metadata, refresh_all_accounts_usage, report_usage,
-    set_dock_display_mode, start_login, switch_account, warmup_account, warmup_all_accounts,
+    export_accounts_full_encrypted_file, export_accounts_slim_text, get_account_usage_stats,
+    get_dock_display_mode, get_usage, hide_tray_window, import_accounts_full_encrypted_file,
+    import_accounts_slim_text, kill_codex_processes, open_main_window, quit_app,
+    refresh_account_metadata, refresh_all_accounts_usage, report_usage, set_dock_display_mode,
+    start_login, switch_account, warmup_account, warmup_all_accounts,
 };
 use tauri::{Emitter, Manager};
 
@@ -84,7 +84,7 @@ pub fn run() {
             commands::account::secure_mutation_tauri_commands::set_masked_account_ids,
             // OAuth
             start_login,
-            complete_login,
+            commands::oauth::secure_oauth_tauri_commands::complete_login,
             cancel_login,
             // Usage
             get_usage,
