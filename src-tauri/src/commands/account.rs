@@ -1,11 +1,14 @@
 //! Account management Tauri commands
 
-use crate::auth::account_repository::{AccountMetadataPatch, AccountRepository};
+use crate::auth::account_repository::{
+    AccountMetadataPatch, AccountRepository, SecureAccountInsert,
+};
+use crate::auth::metadata_store::{AccountMetadataV2, MetadataAuthKind};
 use crate::auth::paths::AppPaths;
+use crate::auth::vault::SecretRecord;
 use crate::auth::{
-    add_account, create_chatgpt_account_from_refresh_token, import_from_auth_json,
-    import_from_auth_json_contents, load_accounts, save_accounts, set_active_account,
-    switch_to_account, touch_account,
+    create_chatgpt_account_from_refresh_token, import_from_auth_json_contents, load_accounts,
+    save_accounts, set_active_account, switch_to_account, touch_account,
 };
 use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
 
@@ -25,6 +28,7 @@ use sha2::Sha256;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
+use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -151,6 +155,15 @@ pub(crate) mod secure_mutation_tauri_commands {
     use super::*;
 
     #[tauri::command]
+    pub(crate) async fn add_account_from_file(
+        repository: tauri::State<'_, AccountRepository>,
+        path: String,
+        name: String,
+    ) -> Result<AccountInfo, String> {
+        add_account_from_file_with_repository(&repository, path, name).await
+    }
+
+    #[tauri::command]
     pub(crate) async fn delete_account(
         repository: tauri::State<'_, AccountRepository>,
         account_id: String,
@@ -176,6 +189,192 @@ pub(crate) mod secure_mutation_tauri_commands {
     }
 }
 
+const AUTH_FILE_OPEN_ERROR: &str = "Unable to open auth.json file";
+const AUTH_FILE_READ_ERROR: &str = "Unable to read auth.json file";
+const AUTH_FILE_TOO_LARGE_ERROR: &str = "auth.json file is too large";
+const AUTH_JSON_UTF8_ERROR: &str = "auth.json is not valid UTF-8";
+const AUTH_JSON_INVALID_ERROR: &str = "Invalid auth.json contents";
+const AUTH_JSON_NO_CREDENTIALS_ERROR: &str = "auth.json contains no supported credentials";
+const AUTH_DATA_MISMATCH_ERROR: &str = "Authentication data does not match auth mode";
+
+struct ImportedStoredAccountGuard {
+    account: Option<StoredAccount>,
+}
+
+impl ImportedStoredAccountGuard {
+    fn new(account: StoredAccount) -> Self {
+        Self {
+            account: Some(account),
+        }
+    }
+
+    fn into_secure_insert(mut self) -> Result<SecureAccountInsert, String> {
+        let auth_kind = {
+            let account = self
+                .account
+                .as_ref()
+                .ok_or_else(|| AUTH_DATA_MISMATCH_ERROR.to_string())?;
+            match (&account.auth_mode, &account.auth_data) {
+                (crate::types::AuthMode::ApiKey, AuthData::ApiKey { .. }) => {
+                    MetadataAuthKind::ApiKey
+                }
+                (crate::types::AuthMode::ChatGPT, AuthData::ChatGPT { .. }) => {
+                    MetadataAuthKind::ChatGpt
+                }
+                _ => return Err(AUTH_DATA_MISMATCH_ERROR.to_string()),
+            }
+        };
+
+        let account = self
+            .account
+            .take()
+            .ok_or_else(|| AUTH_DATA_MISMATCH_ERROR.to_string())?;
+        let StoredAccount {
+            id,
+            name,
+            email,
+            plan_type,
+            subscription_expires_at,
+            auth_mode: _,
+            auth_data,
+            created_at,
+            last_used_at,
+        } = account;
+
+        let secret = match (auth_kind.clone(), auth_data) {
+            (MetadataAuthKind::ApiKey, AuthData::ApiKey { key }) => SecretRecord::ApiKey { key },
+            (
+                MetadataAuthKind::ChatGpt,
+                AuthData::ChatGPT {
+                    id_token,
+                    access_token,
+                    refresh_token,
+                    account_id,
+                },
+            ) => SecretRecord::ChatGpt {
+                id_token,
+                access_token,
+                refresh_token,
+                account_id,
+            },
+            (_, mut unmatched_auth_data) => {
+                zeroize_auth_data(&mut unmatched_auth_data);
+                return Err(AUTH_DATA_MISMATCH_ERROR.to_string());
+            }
+        };
+
+        Ok(SecureAccountInsert {
+            metadata: AccountMetadataV2 {
+                id: id.clone(),
+                display_name: name,
+                email,
+                plan_type,
+                subscription_expires_at,
+                created_at,
+                last_used_at,
+                auth_kind,
+                vault_ref: id,
+            },
+            secret,
+        })
+    }
+}
+
+impl Drop for ImportedStoredAccountGuard {
+    fn drop(&mut self) {
+        if let Some(account) = self.account.as_mut() {
+            zeroize_auth_data(&mut account.auth_data);
+        }
+    }
+}
+
+fn zeroize_auth_data(auth_data: &mut AuthData) {
+    match auth_data {
+        AuthData::ApiKey { key } => key.zeroize(),
+        AuthData::ChatGPT {
+            id_token,
+            access_token,
+            refresh_token,
+            account_id,
+        } => {
+            id_token.zeroize();
+            access_token.zeroize();
+            refresh_token.zeroize();
+            if let Some(account_id) = account_id {
+                account_id.zeroize();
+            }
+        }
+    }
+}
+
+fn secure_insert_from_stored(account: StoredAccount) -> Result<SecureAccountInsert, String> {
+    ImportedStoredAccountGuard::new(account).into_secure_insert()
+}
+
+fn map_auth_json_import_error(error: anyhow::Error) -> String {
+    if error
+        .to_string()
+        .contains("auth.json contains neither API key nor tokens")
+    {
+        AUTH_JSON_NO_CREDENTIALS_ERROR.to_string()
+    } else {
+        AUTH_JSON_INVALID_ERROR.to_string()
+    }
+}
+
+fn read_auth_json_file_contents(path: &str) -> Result<Zeroizing<Vec<u8>>, String> {
+    let file = fs::File::open(path).map_err(|_| AUTH_FILE_OPEN_ERROR.to_string())?;
+    let mut raw_bytes = Zeroizing::new(Vec::new());
+    file.take(MAX_IMPORT_JSON_BYTES + 1)
+        .read_to_end(&mut raw_bytes)
+        .map_err(|_| AUTH_FILE_READ_ERROR.to_string())?;
+
+    if raw_bytes.len() > MAX_IMPORT_JSON_BYTES as usize {
+        return Err(AUTH_FILE_TOO_LARGE_ERROR.to_string());
+    }
+
+    Ok(raw_bytes)
+}
+
+async fn add_stored_account_with_repository(
+    repository: &AccountRepository,
+    account: StoredAccount,
+) -> Result<AccountInfo, String> {
+    let insert = secure_insert_from_stored(account)?;
+    repository
+        .add_account(insert)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn add_account_from_file_with_repository(
+    repository: &AccountRepository,
+    path: String,
+    name: String,
+) -> Result<AccountInfo, String> {
+    let raw_bytes = read_auth_json_file_contents(&path)?;
+    let contents =
+        std::str::from_utf8(raw_bytes.as_slice()).map_err(|_| AUTH_JSON_UTF8_ERROR.to_string())?;
+    let account =
+        import_from_auth_json_contents(contents, name).map_err(map_auth_json_import_error)?;
+    add_stored_account_with_repository(repository, account).await
+}
+
+async fn add_account_from_auth_json_text_with_repository(
+    repository: &AccountRepository,
+    name: String,
+    contents: String,
+) -> Result<AccountInfo, String> {
+    let contents = Zeroizing::new(contents);
+    if contents.len() > MAX_IMPORT_JSON_BYTES as usize {
+        return Err(AUTH_FILE_TOO_LARGE_ERROR.to_string());
+    }
+
+    let account = import_from_auth_json_contents(contents.as_str(), name)
+        .map_err(map_auth_json_import_error)?;
+    add_stored_account_with_repository(repository, account).await
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct SlimPayload {
     #[serde(rename = "v")]
@@ -198,33 +397,19 @@ struct SlimAccountPayload {
     refresh_token: Option<String>,
 }
 
-/// Add an account from an auth.json file
-#[tauri::command]
+/// Standalone adapter used by the web dispatcher, which does not have Tauri State.
 pub async fn add_account_from_file(path: String, name: String) -> Result<AccountInfo, String> {
-    // Import from the file
-    let account = import_from_auth_json(&path, name).map_err(|e| e.to_string())?;
-
-    // Add to storage
-    let stored = add_account(account).map_err(|e| e.to_string())?;
-
-    let store = load_accounts().map_err(|e| e.to_string())?;
-    let active_id = store.active_account_id.as_deref();
-
-    Ok(AccountInfo::from_stored(&stored, active_id))
+    let repository = production_repository()?;
+    add_account_from_file_with_repository(&repository, path, name).await
 }
 
-/// Add an account from uploaded auth.json contents.
+/// Standalone adapter used by the web dispatcher, which does not have Tauri State.
 pub async fn add_account_from_auth_json_text(
     name: String,
     contents: String,
 ) -> Result<AccountInfo, String> {
-    let account = import_from_auth_json_contents(&contents, name).map_err(|e| e.to_string())?;
-    let stored = add_account(account).map_err(|e| e.to_string())?;
-
-    let store = load_accounts().map_err(|e| e.to_string())?;
-    let active_id = store.active_account_id.as_deref();
-
-    Ok(AccountInfo::from_stored(&stored, active_id))
+    let repository = production_repository()?;
+    add_account_from_auth_json_text_with_repository(&repository, name, contents).await
 }
 
 /// Switch to a different account
@@ -1044,6 +1229,76 @@ mod tests {
         );
     }
 
+    fn valid_chatgpt_id_token(email: Option<&str>, account_id: &str) -> String {
+        let payload = serde_json::json!({
+            "email": email,
+            "https://api.openai.com/auth": {
+                "chatgpt_plan_type": "plus",
+                "chatgpt_account_id": account_id,
+                "chatgpt_subscription_active_until": "2026-08-05T20:00:00Z"
+            }
+        });
+        let encoded_payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        format!("header.{encoded_payload}.signature")
+    }
+
+    fn api_key_auth_json(key: &str) -> String {
+        serde_json::json!({"OPENAI_API_KEY": key}).to_string()
+    }
+
+    fn chatgpt_auth_json(email: Option<&str>, account_id: &str) -> String {
+        serde_json::json!({
+            "tokens": {
+                "id_token": valid_chatgpt_id_token(email, account_id),
+                "access_token": ACCESS_TOKEN_A,
+                "refresh_token": REFRESH_TOKEN_A,
+                "account_id": account_id
+            }
+        })
+        .to_string()
+    }
+
+    fn write_auth_file(root: &Path, contents: &str, label: &str) -> PathBuf {
+        let path = root.join(format!("{label}.json"));
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    fn stored_api_key(id: &str, name: &str, key: &str) -> StoredAccount {
+        StoredAccount {
+            id: id.to_string(),
+            name: name.to_string(),
+            email: Some("mapped@example.test".to_string()),
+            plan_type: Some("team".to_string()),
+            subscription_expires_at: Some(timestamp(20)),
+            auth_mode: AuthMode::ApiKey,
+            auth_data: AuthData::ApiKey {
+                key: key.to_string(),
+            },
+            created_at: timestamp(1),
+            last_used_at: Some(timestamp(2)),
+        }
+    }
+
+    fn stored_chatgpt(id: &str, name: &str) -> StoredAccount {
+        StoredAccount {
+            id: id.to_string(),
+            name: name.to_string(),
+            email: Some("mapped-chatgpt@example.test".to_string()),
+            plan_type: Some("pro".to_string()),
+            subscription_expires_at: Some(timestamp(21)),
+            auth_mode: AuthMode::ChatGPT,
+            auth_data: AuthData::ChatGPT {
+                id_token: ID_TOKEN_A.to_string(),
+                access_token: ACCESS_TOKEN_A.to_string(),
+                refresh_token: REFRESH_TOKEN_A.to_string(),
+                account_id: Some(CHATGPT_ACCOUNT_A.to_string()),
+            },
+            created_at: timestamp(3),
+            last_used_at: Some(timestamp(4)),
+        }
+    }
+
     #[tokio::test]
     async fn test_delete_adapter_removes_secure_account() {
         let (root, paths) = test_paths("delete_secure");
@@ -1634,6 +1889,874 @@ mod tests {
             metadata_before
         );
         assert_eq!(std::fs::read(&paths.vault_file).unwrap(), vault_before);
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_add_api_key_from_secure_text_stores_metadata_and_vault() {
+        let (root, paths) = test_paths("add_api_text");
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let info = add_account_from_auth_json_text_with_repository(
+            &repository,
+            "Imported API".to_string(),
+            api_key_auth_json(API_KEY_A),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(info.name, "Imported API");
+        assert_eq!(info.auth_mode, AuthMode::ApiKey);
+        assert!(info.is_active);
+        let metadata = load_metadata(&paths);
+        let vault = load_vault(&paths);
+        assert_eq!(metadata.accounts.len(), 1);
+        assert_eq!(metadata.get(&info.id).unwrap().display_name, "Imported API");
+        assert_api_key_secret(&vault, &info.id);
+
+        drop(repository);
+        drop(metadata);
+        drop(vault);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_add_chatgpt_from_secure_text_stores_metadata_and_vault() {
+        let (root, paths) = test_paths("add_chatgpt_text");
+        let repository = AccountRepository::for_test(paths.clone());
+        let id_token = valid_chatgpt_id_token(Some(EMAIL_A), CHATGPT_ACCOUNT_A);
+
+        let info = add_account_from_auth_json_text_with_repository(
+            &repository,
+            "Imported ChatGPT".to_string(),
+            chatgpt_auth_json(Some(EMAIL_A), CHATGPT_ACCOUNT_A),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(info.name, "Imported ChatGPT");
+        assert_eq!(info.email.as_deref(), Some(EMAIL_A));
+        assert_eq!(info.plan_type.as_deref(), Some("plus"));
+        assert_eq!(info.auth_mode, AuthMode::ChatGPT);
+        assert!(info.is_active);
+        let metadata = load_metadata(&paths);
+        let vault = load_vault(&paths);
+        assert_eq!(
+            metadata.get(&info.id).unwrap().auth_kind,
+            MetadataAuthKind::ChatGpt
+        );
+        match vault.get(&info.id) {
+            Some(SecretRecord::ChatGpt {
+                id_token: stored_id_token,
+                access_token,
+                refresh_token,
+                account_id,
+            }) => {
+                assert_eq!(stored_id_token, &id_token);
+                assert_eq!(access_token, ACCESS_TOKEN_A);
+                assert_eq!(refresh_token, REFRESH_TOKEN_A);
+                assert_eq!(account_id.as_deref(), Some(CHATGPT_ACCOUNT_A));
+            }
+            _ => panic!("expected imported ChatGPT secret"),
+        }
+
+        drop(repository);
+        drop(metadata);
+        drop(vault);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_first_secure_add_becomes_active() {
+        let (root, paths) = test_paths("first_add_active");
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let info = add_account_from_auth_json_text_with_repository(
+            &repository,
+            "First Account".to_string(),
+            api_key_auth_json(API_KEY_A),
+        )
+        .await
+        .unwrap();
+
+        assert!(info.is_active);
+        let active = repository.get_active_account().await.unwrap().unwrap();
+        assert_eq!(active.id, info.id);
+        assert!(active.is_active);
+
+        drop(repository);
+        drop(active);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_second_secure_add_preserves_active_account() {
+        let (root, paths) = test_paths("second_add_active");
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let first = add_account_from_auth_json_text_with_repository(
+            &repository,
+            "First Account".to_string(),
+            api_key_auth_json(API_KEY_A),
+        )
+        .await
+        .unwrap();
+        let second = add_account_from_auth_json_text_with_repository(
+            &repository,
+            "Second Account".to_string(),
+            api_key_auth_json(API_KEY_A),
+        )
+        .await
+        .unwrap();
+
+        assert!(first.is_active);
+        assert!(!second.is_active);
+        assert_eq!(
+            repository.get_active_account().await.unwrap().unwrap().id,
+            first.id
+        );
+
+        drop(repository);
+        drop(first);
+        drop(second);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_secure_add_preserves_account_order() {
+        let (root, paths) = test_paths("add_order");
+        let repository = AccountRepository::for_test(paths.clone());
+
+        add_account_from_auth_json_text_with_repository(
+            &repository,
+            "First Ordered Account".to_string(),
+            api_key_auth_json(API_KEY_A),
+        )
+        .await
+        .unwrap();
+        add_account_from_auth_json_text_with_repository(
+            &repository,
+            "Second Ordered Account".to_string(),
+            api_key_auth_json(API_KEY_A),
+        )
+        .await
+        .unwrap();
+
+        let metadata = load_metadata(&paths);
+        assert_eq!(
+            metadata
+                .accounts
+                .iter()
+                .map(|account| account.display_name.as_str())
+                .collect::<Vec<_>>(),
+            ["First Ordered Account", "Second Ordered Account"]
+        );
+
+        drop(repository);
+        drop(metadata);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_secure_add_account_info_contains_no_secret() {
+        let (root, paths) = test_paths("add_info_public");
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let info = add_account_from_auth_json_text_with_repository(
+            &repository,
+            "Public Account".to_string(),
+            chatgpt_auth_json(Some(EMAIL_A), CHATGPT_ACCOUNT_A),
+        )
+        .await
+        .unwrap();
+        let serialized = serde_json::to_string(&info).unwrap();
+        for secret in [
+            ID_TOKEN_A,
+            ACCESS_TOKEN_A,
+            REFRESH_TOKEN_A,
+            API_KEY_A,
+            CHATGPT_ACCOUNT_A,
+        ] {
+            assert!(!serialized.contains(secret));
+        }
+
+        drop(repository);
+        drop(info);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_add_api_key_from_file_uses_secure_repository() {
+        let (root, paths) = test_paths("add_api_file");
+        let auth_path = write_auth_file(&root, &api_key_auth_json(API_KEY_A), "api-auth");
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let info = add_account_from_file_with_repository(
+            &repository,
+            auth_path.to_string_lossy().into_owned(),
+            "File API".to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(info.name, "File API");
+        assert_eq!(info.auth_mode, AuthMode::ApiKey);
+        assert_api_key_secret(&load_vault(&paths), &info.id);
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_add_chatgpt_from_file_uses_secure_repository() {
+        let (root, paths) = test_paths("add_chatgpt_file");
+        let auth_path = write_auth_file(
+            &root,
+            &chatgpt_auth_json(Some(EMAIL_A), CHATGPT_ACCOUNT_A),
+            "chatgpt-auth",
+        );
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let info = add_account_from_file_with_repository(
+            &repository,
+            auth_path.to_string_lossy().into_owned(),
+            "File ChatGPT".to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(info.name, "File ChatGPT");
+        assert_eq!(info.auth_mode, AuthMode::ChatGPT);
+        let metadata = load_metadata(&paths);
+        let vault = load_vault(&paths);
+        assert_eq!(
+            metadata.get(&info.id).unwrap().auth_kind,
+            MetadataAuthKind::ChatGpt
+        );
+        assert!(matches!(
+            vault.get(&info.id),
+            Some(SecretRecord::ChatGpt { .. })
+        ));
+
+        drop(repository);
+        drop(metadata);
+        drop(vault);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_file_and_text_auth_json_adapters_have_same_semantics() {
+        let (file_root, file_paths) = test_paths("file_text_file");
+        let (text_root, text_paths) = test_paths("file_text_text");
+        let contents = chatgpt_auth_json(Some(EMAIL_A), CHATGPT_ACCOUNT_A);
+        let auth_path = write_auth_file(&file_root, &contents, "equivalent-auth");
+        let file_repository = AccountRepository::for_test(file_paths.clone());
+        let text_repository = AccountRepository::for_test(text_paths.clone());
+
+        let file_info = add_account_from_file_with_repository(
+            &file_repository,
+            auth_path.to_string_lossy().into_owned(),
+            "Equivalent Account".to_string(),
+        )
+        .await
+        .unwrap();
+        let text_info = add_account_from_auth_json_text_with_repository(
+            &text_repository,
+            "Equivalent Account".to_string(),
+            contents,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(file_info.name, text_info.name);
+        assert_eq!(file_info.email, text_info.email);
+        assert_eq!(file_info.plan_type, text_info.plan_type);
+        assert_eq!(file_info.auth_mode, text_info.auth_mode);
+        let file_metadata = load_metadata(&file_paths);
+        let text_metadata = load_metadata(&text_paths);
+        let file_vault = load_vault(&file_paths);
+        let text_vault = load_vault(&text_paths);
+        assert_eq!(
+            file_metadata.get(&file_info.id).unwrap().auth_kind,
+            text_metadata.get(&text_info.id).unwrap().auth_kind
+        );
+        assert!(matches!(
+            file_vault.get(&file_info.id),
+            Some(SecretRecord::ChatGpt { .. })
+        ));
+        assert!(matches!(
+            text_vault.get(&text_info.id),
+            Some(SecretRecord::ChatGpt { .. })
+        ));
+
+        drop(file_repository);
+        drop(text_repository);
+        drop(file_metadata);
+        drop(text_metadata);
+        drop(file_vault);
+        drop(text_vault);
+        cleanup(file_root);
+        cleanup(text_root);
+    }
+
+    #[tokio::test]
+    async fn test_explicit_name_trimming_is_preserved_by_secure_add() {
+        let (root, paths) = test_paths("trimmed_name");
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let info = add_account_from_auth_json_text_with_repository(
+            &repository,
+            "  Trimmed Imported Name  ".to_string(),
+            api_key_auth_json(API_KEY_A),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(info.name, "Trimmed Imported Name");
+
+        drop(repository);
+        drop(info);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_blank_chatgpt_name_uses_email_fallback() {
+        let (root, paths) = test_paths("chatgpt_email_fallback");
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let info = add_account_from_auth_json_text_with_repository(
+            &repository,
+            String::new(),
+            chatgpt_auth_json(Some(EMAIL_A), CHATGPT_ACCOUNT_A),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(info.name, EMAIL_A);
+        assert_eq!(info.email.as_deref(), Some(EMAIL_A));
+
+        drop(repository);
+        drop(info);
+        cleanup(root);
+    }
+
+    #[test]
+    fn test_secure_insert_maps_stored_account_metadata_exactly() {
+        let account = stored_chatgpt("mapped-chatgpt-id", "Mapped ChatGPT");
+        let expected_created_at = account.created_at;
+        let expected_last_used_at = account.last_used_at;
+        let insert = secure_insert_from_stored(account).unwrap();
+
+        assert_eq!(insert.metadata.id, "mapped-chatgpt-id");
+        assert_eq!(insert.metadata.vault_ref, "mapped-chatgpt-id");
+        assert_eq!(insert.metadata.display_name, "Mapped ChatGPT");
+        assert_eq!(
+            insert.metadata.email.as_deref(),
+            Some("mapped-chatgpt@example.test")
+        );
+        assert_eq!(insert.metadata.plan_type.as_deref(), Some("pro"));
+        assert_eq!(insert.metadata.subscription_expires_at, Some(timestamp(21)));
+        assert_eq!(insert.metadata.created_at, expected_created_at);
+        assert_eq!(insert.metadata.last_used_at, expected_last_used_at);
+        assert_eq!(insert.metadata.auth_kind, MetadataAuthKind::ChatGpt);
+        assert!(matches!(insert.secret, SecretRecord::ChatGpt { .. }));
+    }
+
+    #[test]
+    fn test_secure_insert_maps_api_key_metadata_and_secret_exactly() {
+        let insert = secure_insert_from_stored(stored_api_key(
+            "mapped-api-key-id",
+            "Mapped API Key",
+            API_KEY_A,
+        ))
+        .unwrap();
+
+        assert_eq!(insert.metadata.id, "mapped-api-key-id");
+        assert_eq!(insert.metadata.vault_ref, "mapped-api-key-id");
+        assert_eq!(insert.metadata.display_name, "Mapped API Key");
+        assert_eq!(
+            insert.metadata.email.as_deref(),
+            Some("mapped@example.test")
+        );
+        assert_eq!(insert.metadata.plan_type.as_deref(), Some("team"));
+        assert_eq!(insert.metadata.subscription_expires_at, Some(timestamp(20)));
+        assert_eq!(insert.metadata.created_at, timestamp(1));
+        assert_eq!(insert.metadata.last_used_at, Some(timestamp(2)));
+        assert_eq!(insert.metadata.auth_kind, MetadataAuthKind::ApiKey);
+        match &insert.secret {
+            SecretRecord::ApiKey { key } => assert_eq!(key, API_KEY_A),
+            _ => panic!("expected API key secret"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_api_key_is_only_in_decrypted_vault() {
+        let (root, paths) = test_paths("api_secret_boundary");
+        let repository = AccountRepository::for_test(paths.clone());
+        let info = add_account_from_auth_json_text_with_repository(
+            &repository,
+            "API Secret Boundary".to_string(),
+            api_key_auth_json(API_KEY_A),
+        )
+        .await
+        .unwrap();
+
+        let metadata_bytes = std::fs::read(&paths.metadata_file).unwrap();
+        let metadata_text = String::from_utf8_lossy(&metadata_bytes);
+        assert!(!metadata_text.contains(API_KEY_A));
+        let vault = load_vault(&paths);
+        assert_api_key_secret(&vault, &info.id);
+
+        drop(repository);
+        drop(info);
+        drop(vault);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_chatgpt_secrets_are_only_in_decrypted_vault() {
+        let (root, paths) = test_paths("chatgpt_secret_boundary");
+        let repository = AccountRepository::for_test(paths.clone());
+        let info = add_account_from_auth_json_text_with_repository(
+            &repository,
+            "ChatGPT Secret Boundary".to_string(),
+            chatgpt_auth_json(Some(EMAIL_A), CHATGPT_ACCOUNT_A),
+        )
+        .await
+        .unwrap();
+        let metadata_bytes = std::fs::read(&paths.metadata_file).unwrap();
+        let metadata_text = String::from_utf8_lossy(&metadata_bytes);
+        for secret in [ACCESS_TOKEN_A, REFRESH_TOKEN_A, CHATGPT_ACCOUNT_A] {
+            assert!(!metadata_text.contains(secret));
+        }
+        let vault = load_vault(&paths);
+        assert!(matches!(
+            vault.get(&info.id),
+            Some(SecretRecord::ChatGpt { .. })
+        ));
+
+        drop(repository);
+        drop(info);
+        drop(vault);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_secure_metadata_has_schema_version_and_no_legacy_version() {
+        let (root, paths) = test_paths("secure_schema_version");
+        let repository = AccountRepository::for_test(paths.clone());
+        add_account_from_auth_json_text_with_repository(
+            &repository,
+            "Schema Account".to_string(),
+            api_key_auth_json(API_KEY_A),
+        )
+        .await
+        .unwrap();
+
+        let metadata_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&paths.metadata_file).unwrap()).unwrap();
+        assert_eq!(metadata_json["schema_version"], serde_json::json!(2));
+        assert!(metadata_json.get("version").is_none());
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_secure_metadata_contains_no_prohibited_secret_fields() {
+        let (root, paths) = test_paths("secure_metadata_fields");
+        let repository = AccountRepository::for_test(paths.clone());
+        add_account_from_auth_json_text_with_repository(
+            &repository,
+            "Field Boundary Account".to_string(),
+            chatgpt_auth_json(Some(EMAIL_A), CHATGPT_ACCOUNT_A),
+        )
+        .await
+        .unwrap();
+
+        let metadata_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&paths.metadata_file).unwrap()).unwrap();
+        let serialized = metadata_json.to_string();
+        for prohibited in ["id_token", "access_token", "refresh_token", "key"] {
+            assert!(!serialized.contains(&format!("\"{prohibited}\"")));
+        }
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[test]
+    fn test_auth_mode_and_data_mismatch_is_sanitized_without_partial_insert() {
+        let (root, paths) = test_paths("auth_mismatch");
+        let mut account = stored_chatgpt("mismatch-account", "Mismatch Account");
+        account.auth_mode = AuthMode::ApiKey;
+
+        let error = secure_insert_from_stored(account).err().unwrap();
+        assert_eq!(error, AUTH_DATA_MISMATCH_ERROR);
+        assert_sanitized(&error, &root);
+        assert!(!paths.metadata_file.exists());
+        assert!(!paths.vault_file.exists());
+
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_malformed_auth_json_text_leaves_account_files_absent() {
+        let (root, paths) = test_paths("malformed_text");
+        let repository = AccountRepository::for_test(paths.clone());
+        let error = add_account_from_auth_json_text_with_repository(
+            &repository,
+            "Malformed Text".to_string(),
+            "{\"tokens\":".to_string(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, AUTH_JSON_INVALID_ERROR);
+        assert!(!paths.metadata_file.exists());
+        assert!(!paths.vault_file.exists());
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_malformed_auth_json_file_leaves_account_files_absent() {
+        let (root, paths) = test_paths("malformed_file");
+        let auth_path = write_auth_file(&root, "{\"tokens\":", "malformed-auth");
+        let repository = AccountRepository::for_test(paths.clone());
+        let error = add_account_from_file_with_repository(
+            &repository,
+            auth_path.to_string_lossy().into_owned(),
+            "Malformed File".to_string(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, AUTH_JSON_INVALID_ERROR);
+        assert!(!paths.metadata_file.exists());
+        assert!(!paths.vault_file.exists());
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_text_auth_json_size_limit_leaves_account_files_absent() {
+        let (root, paths) = test_paths("oversized_text");
+        let repository = AccountRepository::for_test(paths.clone());
+        let error = add_account_from_auth_json_text_with_repository(
+            &repository,
+            "Oversized Text".to_string(),
+            "x".repeat(MAX_IMPORT_JSON_BYTES as usize + 1),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, AUTH_FILE_TOO_LARGE_ERROR);
+        assert!(!paths.metadata_file.exists());
+        assert!(!paths.vault_file.exists());
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_file_auth_json_size_limit_leaves_account_files_absent() {
+        let (root, paths) = test_paths("oversized_file");
+        let auth_path = root.join("oversized-auth.json");
+        std::fs::write(&auth_path, vec![b'x'; MAX_IMPORT_JSON_BYTES as usize + 1]).unwrap();
+        let repository = AccountRepository::for_test(paths.clone());
+        let error = add_account_from_file_with_repository(
+            &repository,
+            auth_path.to_string_lossy().into_owned(),
+            "Oversized File".to_string(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, AUTH_FILE_TOO_LARGE_ERROR);
+        assert!(!paths.metadata_file.exists());
+        assert!(!paths.vault_file.exists());
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_missing_auth_json_file_leaves_account_files_absent() {
+        let (root, paths) = test_paths("missing_auth_file");
+        let repository = AccountRepository::for_test(paths.clone());
+        let missing_path = root.join("does-not-exist-auth.json");
+        let error = add_account_from_file_with_repository(
+            &repository,
+            missing_path.to_string_lossy().into_owned(),
+            "Missing File".to_string(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, AUTH_FILE_OPEN_ERROR);
+        assert!(!paths.metadata_file.exists());
+        assert!(!paths.vault_file.exists());
+        assert!(!error.contains(root.to_string_lossy().as_ref()));
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_unreadable_auth_json_path_leaves_account_files_absent() {
+        let (root, paths) = test_paths("unreadable_auth_path");
+        let repository = AccountRepository::for_test(paths.clone());
+        let error = add_account_from_file_with_repository(
+            &repository,
+            root.to_string_lossy().into_owned(),
+            "Unreadable Path".to_string(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error == AUTH_FILE_OPEN_ERROR || error == AUTH_FILE_READ_ERROR,
+            "unexpected sanitized file error: {error}"
+        );
+        assert!(!paths.metadata_file.exists());
+        assert!(!paths.vault_file.exists());
+        assert!(!error.contains(root.to_string_lossy().as_ref()));
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_invalid_utf8_auth_json_file_leaves_account_files_absent() {
+        let (root, paths) = test_paths("invalid_utf8_auth");
+        let auth_path = root.join("invalid-utf8-auth.json");
+        std::fs::write(&auth_path, [0xFF, 0xFE, 0xFD]).unwrap();
+        let repository = AccountRepository::for_test(paths.clone());
+        let error = add_account_from_file_with_repository(
+            &repository,
+            auth_path.to_string_lossy().into_owned(),
+            "Invalid UTF8".to_string(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, AUTH_JSON_UTF8_ERROR);
+        assert!(!paths.metadata_file.exists());
+        assert!(!paths.vault_file.exists());
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_auth_json_without_credentials_leaves_account_files_absent() {
+        let (root, paths) = test_paths("no_auth_credentials");
+        let repository = AccountRepository::for_test(paths.clone());
+        let error = add_account_from_auth_json_text_with_repository(
+            &repository,
+            "No Credentials".to_string(),
+            "{}".to_string(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, AUTH_JSON_NO_CREDENTIALS_ERROR);
+        assert!(!paths.metadata_file.exists());
+        assert!(!paths.vault_file.exists());
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_display_name_preserves_secure_pair_bytes() {
+        let (root, paths) = test_paths("duplicate_add_name");
+        let repository = seeded_repository(&paths).await;
+        let before = read_pair(&paths);
+        let error = add_account_from_auth_json_text_with_repository(
+            &repository,
+            DISPLAY_NAME_A.to_string(),
+            api_key_auth_json(API_KEY_A),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "Duplicate display name");
+        assert_eq!(read_pair(&paths), before);
+        assert!(!error.contains(DISPLAY_NAME_A));
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_auth_json_text_on_legacy_requires_migration() {
+        let (root, paths) = test_paths("legacy_add_text");
+        let metadata_before = write_legacy(&paths);
+        let repository = AccountRepository::for_test(paths.clone());
+        let error = add_account_from_auth_json_text_with_repository(
+            &repository,
+            "Legacy Text Attempt".to_string(),
+            api_key_auth_json(API_KEY_A),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "Legacy account storage requires secure migration");
+        assert_eq!(
+            std::fs::read(&paths.metadata_file).unwrap(),
+            metadata_before
+        );
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_auth_json_file_on_legacy_requires_migration() {
+        let (root, paths) = test_paths("legacy_add_file");
+        let metadata_before = write_legacy(&paths);
+        let auth_path = write_auth_file(&root, &api_key_auth_json(API_KEY_A), "legacy-auth");
+        let repository = AccountRepository::for_test(paths.clone());
+        let error = add_account_from_file_with_repository(
+            &repository,
+            auth_path.to_string_lossy().into_owned(),
+            "Legacy File Attempt".to_string(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "Legacy account storage requires secure migration");
+        assert_eq!(
+            std::fs::read(&paths.metadata_file).unwrap(),
+            metadata_before
+        );
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_auth_json_add_on_legacy_preserves_metadata_and_orphan_vault() {
+        let (root, paths) = test_paths("legacy_add_unchanged");
+        let metadata_before = write_legacy(&paths);
+        let vault_before = write_orphan_vault(&paths);
+        let auth_path = write_auth_file(&root, &api_key_auth_json(API_KEY_A), "legacy-auth");
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let text_error = add_account_from_auth_json_text_with_repository(
+            &repository,
+            "Legacy Text Attempt".to_string(),
+            api_key_auth_json(API_KEY_A),
+        )
+        .await
+        .unwrap_err();
+        let file_error = add_account_from_file_with_repository(
+            &repository,
+            auth_path.to_string_lossy().into_owned(),
+            "Legacy File Attempt".to_string(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            text_error,
+            "Legacy account storage requires secure migration"
+        );
+        assert_eq!(
+            file_error,
+            "Legacy account storage requires secure migration"
+        );
+        assert_eq!(
+            std::fs::read(&paths.metadata_file).unwrap(),
+            metadata_before
+        );
+        assert_eq!(std::fs::read(&paths.vault_file).unwrap(), vault_before);
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_unique_auth_json_adds_do_not_lose_accounts() {
+        let (root, paths) = test_paths("concurrent_adds");
+        let repository_a = AccountRepository::for_test(paths.clone());
+        let repository_b = AccountRepository::for_test(paths.clone());
+
+        let (left, right) = tokio::join!(
+            add_account_from_auth_json_text_with_repository(
+                &repository_a,
+                "Concurrent Account A".to_string(),
+                api_key_auth_json(API_KEY_A),
+            ),
+            add_account_from_auth_json_text_with_repository(
+                &repository_b,
+                "Concurrent Account B".to_string(),
+                api_key_auth_json(API_KEY_A),
+            )
+        );
+        let left = left.unwrap();
+        let right = right.unwrap();
+
+        let metadata = load_metadata(&paths);
+        let vault = load_vault(&paths);
+        assert_eq!(metadata.accounts.len(), 2);
+        assert_eq!(vault.len(), 2);
+        assert!(metadata
+            .accounts
+            .iter()
+            .any(|account| account.display_name == left.name));
+        assert!(metadata
+            .accounts
+            .iter()
+            .any(|account| account.display_name == right.name));
+
+        drop(repository_a);
+        drop(repository_b);
+        drop(left);
+        drop(right);
+        drop(metadata);
+        drop(vault);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_auth_json_errors_exclude_credentials_raw_json_and_paths() {
+        let (root, paths) = test_paths("auth_error_secrecy");
+        let repository = AccountRepository::for_test(paths.clone());
+        let raw_json = format!(
+            "{{\"OPENAI_API_KEY\":\"{API_KEY_A}\",\"id_token\":\"{ID_TOKEN_A}\",\
+\"access_token\":\"{ACCESS_TOKEN_A}\",\"refresh_token\":\"{REFRESH_TOKEN_A}\",\
+\"account_id\":\"{CHATGPT_ACCOUNT_A}\",\"email\":\"{EMAIL_A}\",\
+\"display_name\":\"{DISPLAY_NAME_A}\""
+        );
+        let malformed_error = add_account_from_auth_json_text_with_repository(
+            &repository,
+            DISPLAY_NAME_A.to_string(),
+            raw_json.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(malformed_error, AUTH_JSON_INVALID_ERROR);
+        assert_sanitized(&malformed_error, &root);
+        assert!(!malformed_error.contains(&raw_json));
+
+        let missing_error = add_account_from_file_with_repository(
+            &repository,
+            root.join("secret-path-auth.json")
+                .to_string_lossy()
+                .into_owned(),
+            DISPLAY_NAME_A.to_string(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing_error, AUTH_FILE_OPEN_ERROR);
+        assert_sanitized(&missing_error, &root);
 
         drop(repository);
         cleanup(root);
