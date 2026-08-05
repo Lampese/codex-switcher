@@ -113,6 +113,25 @@ pub(crate) mod read_only_tauri_commands {
     }
 }
 
+pub(crate) mod secure_export_tauri_commands {
+    use super::*;
+
+    #[tauri::command]
+    pub(crate) async fn export_accounts_slim_text(
+        repository: tauri::State<'_, AccountRepository>,
+    ) -> Result<String, String> {
+        export_accounts_slim_text_with_repository(&repository).await
+    }
+
+    #[tauri::command]
+    pub(crate) async fn export_accounts_full_encrypted_file(
+        repository: tauri::State<'_, AccountRepository>,
+        path: String,
+    ) -> Result<(), String> {
+        export_accounts_full_encrypted_file_with_repository(&repository, path).await
+    }
+}
+
 async fn delete_account_with_repository(
     repository: &AccountRepository,
     account_id: String,
@@ -462,6 +481,49 @@ pub fn switch_account_by_id(account_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+async fn export_accounts_slim_text_with_repository(
+    repository: &AccountRepository,
+) -> Result<String, String> {
+    let snapshot = repository
+        .export_accounts_snapshot()
+        .await
+        .map_err(|error| error.to_string())?;
+    let result = encode_slim_payload_from_store(snapshot.store())
+        .map_err(|_| "Failed to encode account export".to_string());
+    drop(snapshot);
+    result
+}
+
+async fn export_accounts_full_encrypted_file_with_repository(
+    repository: &AccountRepository,
+    path: String,
+) -> Result<(), String> {
+    let snapshot = repository
+        .export_accounts_snapshot()
+        .await
+        .map_err(|error| error.to_string())?;
+    let encoded = encode_full_encrypted_store(snapshot.store(), FULL_PRESET_PASSPHRASE)
+        .map_err(|_| "Failed to encode account export".to_string());
+    drop(snapshot);
+    let encrypted = encoded?;
+
+    write_encrypted_file(&path, &encrypted)
+        .map_err(|_| "Failed to write encrypted account export".to_string())
+}
+
+async fn export_accounts_full_encrypted_bytes_with_repository(
+    repository: &AccountRepository,
+) -> Result<Vec<u8>, String> {
+    let snapshot = repository
+        .export_accounts_snapshot()
+        .await
+        .map_err(|error| error.to_string())?;
+    let result = encode_full_encrypted_store(snapshot.store(), FULL_PRESET_PASSPHRASE)
+        .map_err(|_| "Failed to encode account export".to_string());
+    drop(snapshot);
+    result
+}
+
 /// Standalone adapter used by the web dispatcher, which does not have Tauri State.
 pub async fn delete_account(account_id: String) -> Result<(), String> {
     let repository = production_repository()?;
@@ -476,10 +538,9 @@ pub async fn rename_account(account_id: String, new_name: String) -> Result<(), 
 
 /// Export minimal account config as a compact text string.
 /// For ChatGPT accounts, only refresh token is exported.
-#[tauri::command]
 pub async fn export_accounts_slim_text() -> Result<String, String> {
-    let store = load_accounts().map_err(|e| e.to_string())?;
-    encode_slim_payload_from_store(&store).map_err(|e| e.to_string())
+    let repository = production_repository()?;
+    export_accounts_slim_text_with_repository(&repository).await
 }
 
 /// Import minimal account config from a compact text string, skipping existing accounts.
@@ -510,19 +571,15 @@ pub async fn import_accounts_slim_text(payload: String) -> Result<ImportAccounts
 }
 
 /// Export full account config as an encrypted file.
-#[tauri::command]
 pub async fn export_accounts_full_encrypted_file(path: String) -> Result<(), String> {
-    let store = load_accounts().map_err(|e| e.to_string())?;
-    let encrypted =
-        encode_full_encrypted_store(&store, FULL_PRESET_PASSPHRASE).map_err(|e| e.to_string())?;
-    write_encrypted_file(&path, &encrypted).map_err(|e| e.to_string())?;
-    Ok(())
+    let repository = production_repository()?;
+    export_accounts_full_encrypted_file_with_repository(&repository, path).await
 }
 
 /// Export full account config as encrypted bytes for browser clients.
 pub async fn export_accounts_full_encrypted_bytes() -> Result<Vec<u8>, String> {
-    let store = load_accounts().map_err(|e| e.to_string())?;
-    encode_full_encrypted_store(&store, FULL_PRESET_PASSPHRASE).map_err(|e| e.to_string())
+    let repository = production_repository()?;
+    export_accounts_full_encrypted_bytes_with_repository(&repository).await
 }
 
 /// Import full account config from an encrypted file, skipping existing accounts.
@@ -648,19 +705,38 @@ fn encode_slim_payload_from_store(store: &AccountsStore) -> anyhow::Result<Strin
         })
         .collect();
 
-    let payload = SlimPayload {
+    let mut payload = SlimPayload {
         version: SLIM_FORMAT_VERSION,
         active_name,
         accounts: slim_accounts,
     };
 
-    let json = serde_json::to_vec(&payload).context("Failed to serialize slim payload")?;
-    let compressed = compress_bytes(&json).context("Failed to compress slim payload")?;
+    let result = (|| -> anyhow::Result<String> {
+        let mut json_writer = ZeroizingVecWriter::new();
+        serde_json::to_writer(&mut json_writer, &payload)
+            .context("Failed to serialize slim payload")?;
+        let json = json_writer.into_inner();
+        let compressed =
+            compress_bytes(json.as_slice()).context("Failed to compress slim payload")?;
 
-    Ok(format!(
-        "{SLIM_EXPORT_PREFIX}{}",
-        URL_SAFE_NO_PAD.encode(compressed)
-    ))
+        Ok(format!(
+            "{SLIM_EXPORT_PREFIX}{}",
+            URL_SAFE_NO_PAD.encode(compressed.as_slice())
+        ))
+    })();
+    zeroize_slim_payload_secrets(&mut payload);
+    result
+}
+
+fn zeroize_slim_payload_secrets(payload: &mut SlimPayload) {
+    for account in &mut payload.accounts {
+        if let Some(api_key) = account.api_key.as_mut() {
+            api_key.zeroize();
+        }
+        if let Some(refresh_token) = account.refresh_token.as_mut() {
+            refresh_token.zeroize();
+        }
+    }
 }
 
 fn decode_slim_payload(payload: &str) -> anyhow::Result<SlimPayload> {
@@ -818,8 +894,10 @@ async fn restore_slim_accounts(
 }
 
 fn encode_full_encrypted_store(store: &AccountsStore, passphrase: &str) -> anyhow::Result<Vec<u8>> {
-    let json = serde_json::to_vec(store).context("Failed to serialize account store")?;
-    let compressed = compress_bytes(&json).context("Failed to compress account store")?;
+    let mut json_writer = ZeroizingVecWriter::new();
+    serde_json::to_writer(&mut json_writer, store).context("Failed to serialize account store")?;
+    let json = json_writer.into_inner();
+    let compressed = compress_bytes(json.as_slice()).context("Failed to compress account store")?;
 
     let mut salt = [0u8; FULL_SALT_LEN];
     rand::rng().fill_bytes(&mut salt);
@@ -827,8 +905,8 @@ fn encode_full_encrypted_store(store: &AccountsStore, passphrase: &str) -> anyho
     let mut nonce = [0u8; FULL_NONCE_LEN];
     rand::rng().fill_bytes(&mut nonce);
 
-    let key = derive_encryption_key(passphrase, &salt);
-    let cipher = XChaCha20Poly1305::new((&key).into());
+    let key = derive_encryption_key_zeroizing(passphrase, &salt);
+    let cipher = XChaCha20Poly1305::new((&*key).into());
     let ciphertext = cipher
         .encrypt(XNonce::from_slice(&nonce), compressed.as_slice())
         .map_err(|_| anyhow::anyhow!("Failed to encrypt account store"))?;
@@ -841,6 +919,42 @@ fn encode_full_encrypted_store(store: &AccountsStore, passphrase: &str) -> anyho
     out.extend_from_slice(&ciphertext);
 
     Ok(out)
+}
+
+struct ZeroizingVecWriter(Zeroizing<Vec<u8>>);
+
+impl ZeroizingVecWriter {
+    fn new() -> Self {
+        Self(Zeroizing::new(Vec::new()))
+    }
+
+    fn into_inner(self) -> Zeroizing<Vec<u8>> {
+        self.0
+    }
+}
+
+impl Write for ZeroizingVecWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        (&mut *self.0).write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        (&mut *self.0).flush()
+    }
+}
+
+fn compress_bytes(input: &[u8]) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    let writer = ZeroizingVecWriter::new();
+    let mut encoder = ZlibEncoder::new(writer, Compression::best());
+    encoder.write_all(input)?;
+    let writer = encoder.finish().context("Failed to finalize compression")?;
+    Ok(writer.into_inner())
+}
+
+fn derive_encryption_key_zeroizing(passphrase: &str, salt: &[u8]) -> Zeroizing<[u8; 32]> {
+    let mut key = Zeroizing::new([0u8; 32]);
+    pbkdf2_hmac::<Sha256>(passphrase.as_bytes(), salt, FULL_KDF_ITERATIONS, &mut *key);
+    key
 }
 
 fn decode_full_encrypted_store(
@@ -894,12 +1008,6 @@ fn derive_encryption_key(passphrase: &str, salt: &[u8]) -> [u8; 32] {
     let mut key = [0u8; 32];
     pbkdf2_hmac::<Sha256>(passphrase.as_bytes(), salt, FULL_KDF_ITERATIONS, &mut key);
     key
-}
-
-fn compress_bytes(input: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
-    encoder.write_all(input)?;
-    encoder.finish().context("Failed to finalize compression")
 }
 
 fn decompress_bytes_with_limit(input: &[u8], max_bytes: u64) -> anyhow::Result<Vec<u8>> {
@@ -1296,6 +1404,62 @@ mod tests {
             },
             created_at: timestamp(3),
             last_used_at: Some(timestamp(4)),
+        }
+    }
+
+    fn assert_seeded_account_prefix(store: &AccountsStore) {
+        assert!(store.accounts.len() >= 2);
+
+        let chatgpt = &store.accounts[0];
+        assert_eq!(chatgpt.id, ACCOUNT_ID_A);
+        assert_eq!(chatgpt.name, DISPLAY_NAME_A);
+        assert_eq!(chatgpt.email.as_deref(), Some(EMAIL_A));
+        assert_eq!(chatgpt.plan_type.as_deref(), Some("pro"));
+        assert_eq!(chatgpt.subscription_expires_at, Some(timestamp(20)));
+        assert_eq!(chatgpt.auth_mode, AuthMode::ChatGPT);
+        assert_eq!(chatgpt.created_at, timestamp(1));
+        assert_eq!(chatgpt.last_used_at, Some(timestamp(2)));
+        match &chatgpt.auth_data {
+            AuthData::ChatGPT {
+                id_token,
+                access_token,
+                refresh_token,
+                account_id,
+            } => {
+                assert_eq!(id_token, ID_TOKEN_A);
+                assert_eq!(access_token, ACCESS_TOKEN_A);
+                assert_eq!(refresh_token, REFRESH_TOKEN_A);
+                assert_eq!(account_id.as_deref(), Some(CHATGPT_ACCOUNT_A));
+            }
+            AuthData::ApiKey { .. } => panic!("expected seeded ChatGPT account"),
+        }
+
+        let api = &store.accounts[1];
+        assert_eq!(api.id, ACCOUNT_ID_B);
+        assert_eq!(api.name, DISPLAY_NAME_B);
+        assert_eq!(api.email.as_deref(), Some(EMAIL_B));
+        assert_eq!(api.plan_type.as_deref(), Some("pro"));
+        assert_eq!(api.subscription_expires_at, Some(timestamp(20)));
+        assert_eq!(api.auth_mode, AuthMode::ApiKey);
+        assert_eq!(api.created_at, timestamp(3));
+        assert_eq!(api.last_used_at, Some(timestamp(4)));
+        match &api.auth_data {
+            AuthData::ApiKey { key } => assert_eq!(key, API_KEY_A),
+            AuthData::ChatGPT { .. } => panic!("expected seeded API account"),
+        }
+    }
+
+    fn assert_seeded_store(store: &AccountsStore) {
+        assert_eq!(store.version, 1);
+        assert_eq!(store.accounts.len(), 2);
+        assert_eq!(store.active_account_id.as_deref(), Some(ACCOUNT_ID_A));
+        assert!(store.masked_account_ids.is_empty());
+        assert_seeded_account_prefix(store);
+    }
+
+    fn zeroize_test_store(store: &mut AccountsStore) {
+        for account in &mut store.accounts {
+            zeroize_auth_data(&mut account.auth_data);
         }
     }
 
@@ -2757,6 +2921,475 @@ mod tests {
         .unwrap_err();
         assert_eq!(missing_error, AUTH_FILE_OPEN_ERROR);
         assert_sanitized(&missing_error, &root);
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    fn zeroize_test_slim_payload(payload: &mut SlimPayload) {
+        for account in &mut payload.accounts {
+            if let Some(api_key) = account.api_key.as_mut() {
+                api_key.zeroize();
+            }
+            if let Some(refresh_token) = account.refresh_token.as_mut() {
+                refresh_token.zeroize();
+            }
+        }
+    }
+
+    fn assert_legacy_store_semantics(actual: &AccountsStore, expected: &AccountsStore) {
+        assert_eq!(actual.version, expected.version);
+        assert_eq!(actual.active_account_id, expected.active_account_id);
+        assert_eq!(actual.masked_account_ids, expected.masked_account_ids);
+        assert_eq!(actual.accounts.len(), expected.accounts.len());
+        for (actual_account, expected_account) in actual.accounts.iter().zip(&expected.accounts) {
+            assert_eq!(actual_account.id, expected_account.id);
+            assert_eq!(actual_account.name, expected_account.name);
+            assert_eq!(actual_account.email, expected_account.email);
+            assert_eq!(actual_account.plan_type, expected_account.plan_type);
+            assert_eq!(
+                actual_account.subscription_expires_at,
+                expected_account.subscription_expires_at
+            );
+            assert_eq!(actual_account.auth_mode, expected_account.auth_mode);
+            assert_eq!(actual_account.created_at, expected_account.created_at);
+            assert_eq!(actual_account.last_used_at, expected_account.last_used_at);
+            match (&actual_account.auth_data, &expected_account.auth_data) {
+                (AuthData::ApiKey { key: actual }, AuthData::ApiKey { key: expected }) => {
+                    assert_eq!(actual, expected)
+                }
+                (
+                    AuthData::ChatGPT {
+                        id_token: actual_id,
+                        access_token: actual_access,
+                        refresh_token: actual_refresh,
+                        account_id: actual_account_id,
+                    },
+                    AuthData::ChatGPT {
+                        id_token: expected_id,
+                        access_token: expected_access,
+                        refresh_token: expected_refresh,
+                        account_id: expected_account_id,
+                    },
+                ) => {
+                    assert_eq!(actual_id, expected_id);
+                    assert_eq!(actual_access, expected_access);
+                    assert_eq!(actual_refresh, expected_refresh);
+                    assert_eq!(actual_account_id, expected_account_id);
+                }
+                _ => panic!("export auth mode changed"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_secure_mixed_account_slim_export_decodes_successfully() {
+        let (root, paths) = test_paths("export_slim_decode");
+        let repository = seeded_repository(&paths).await;
+
+        let mut exported = export_accounts_slim_text_with_repository(&repository)
+            .await
+            .unwrap();
+        let mut payload = decode_slim_payload(&exported).unwrap();
+        assert_eq!(payload.version, SLIM_FORMAT_VERSION);
+        assert_eq!(payload.accounts.len(), 2);
+        assert_eq!(payload.active_name.as_deref(), Some(DISPLAY_NAME_A));
+        assert!(payload
+            .accounts
+            .iter()
+            .any(|account| account.name == DISPLAY_NAME_A));
+        assert!(payload
+            .accounts
+            .iter()
+            .any(|account| account.name == DISPLAY_NAME_B));
+
+        zeroize_test_slim_payload(&mut payload);
+        payload.accounts.clear();
+        exported.zeroize();
+        drop(payload);
+        drop(exported);
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_slim_api_key_payload_contains_expected_api_key() {
+        let (root, paths) = test_paths("export_slim_api_key");
+        let repository = seeded_repository(&paths).await;
+
+        let mut exported = export_accounts_slim_text_with_repository(&repository)
+            .await
+            .unwrap();
+        let mut payload = decode_slim_payload(&exported).unwrap();
+        let api = payload
+            .accounts
+            .iter()
+            .find(|account| account.name == DISPLAY_NAME_B)
+            .unwrap();
+        assert_eq!(api.auth_type, SLIM_AUTH_API_KEY);
+        assert_eq!(api.api_key.as_deref(), Some(API_KEY_A));
+        assert!(api.refresh_token.is_none());
+
+        zeroize_test_slim_payload(&mut payload);
+        exported.zeroize();
+        drop(payload);
+        drop(exported);
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_slim_chatgpt_payload_contains_expected_refresh_token() {
+        let (root, paths) = test_paths("export_slim_refresh");
+        let repository = seeded_repository(&paths).await;
+
+        let mut exported = export_accounts_slim_text_with_repository(&repository)
+            .await
+            .unwrap();
+        let mut payload = decode_slim_payload(&exported).unwrap();
+        let chatgpt = payload
+            .accounts
+            .iter()
+            .find(|account| account.name == DISPLAY_NAME_A)
+            .unwrap();
+        assert_eq!(chatgpt.auth_type, SLIM_AUTH_CHATGPT);
+        assert_eq!(chatgpt.refresh_token.as_deref(), Some(REFRESH_TOKEN_A));
+        assert!(chatgpt.api_key.is_none());
+
+        zeroize_test_slim_payload(&mut payload);
+        exported.zeroize();
+        drop(payload);
+        drop(exported);
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_slim_chatgpt_payload_excludes_id_and_access_tokens() {
+        let (root, paths) = test_paths("export_slim_secret_fields");
+        let repository = seeded_repository(&paths).await;
+
+        let mut exported = export_accounts_slim_text_with_repository(&repository)
+            .await
+            .unwrap();
+        let mut payload = decode_slim_payload(&exported).unwrap();
+        let serialized = serde_json::to_string(&payload).unwrap();
+        assert!(!serialized.contains(ID_TOKEN_A));
+        assert!(!serialized.contains(ACCESS_TOKEN_A));
+        assert!(serialized.contains(REFRESH_TOKEN_A));
+
+        zeroize_test_slim_payload(&mut payload);
+        exported.zeroize();
+        drop(payload);
+        drop(exported);
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_slim_export_preserves_active_account_name_semantics() {
+        let (root, paths) = test_paths("export_slim_active_name");
+        let repository = seeded_repository(&paths).await;
+
+        let mut exported = export_accounts_slim_text_with_repository(&repository)
+            .await
+            .unwrap();
+        let mut payload = decode_slim_payload(&exported).unwrap();
+        assert_eq!(payload.active_name.as_deref(), Some(DISPLAY_NAME_A));
+        assert_eq!(
+            payload
+                .accounts
+                .iter()
+                .find(|account| account.name == DISPLAY_NAME_A)
+                .unwrap()
+                .name,
+            DISPLAY_NAME_A
+        );
+
+        zeroize_test_slim_payload(&mut payload);
+        exported.zeroize();
+        drop(payload);
+        drop(exported);
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_slim_export_does_not_mutate_secure_pair_bytes() {
+        let (root, paths) = test_paths("export_slim_no_write");
+        let repository = seeded_repository(&paths).await;
+        let before = read_pair(&paths);
+
+        let mut exported = export_accounts_slim_text_with_repository(&repository)
+            .await
+            .unwrap();
+        assert_eq!(read_pair(&paths), before);
+
+        exported.zeroize();
+        drop(exported);
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_secure_full_encrypted_bytes_decode_to_exact_semantic_store() {
+        let (root, paths) = test_paths("export_full_bytes_semantics");
+        let repository = seeded_repository(&paths).await;
+
+        let mut encrypted = export_accounts_full_encrypted_bytes_with_repository(&repository)
+            .await
+            .unwrap();
+        assert_eq!(&encrypted[..4], b"CSWF");
+        let mut decoded = decode_full_encrypted_store(&encrypted, FULL_PRESET_PASSPHRASE).unwrap();
+        assert_seeded_store(&decoded);
+
+        zeroize_test_store(&mut decoded);
+        encrypted.zeroize();
+        drop(decoded);
+        drop(encrypted);
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_secure_full_encrypted_file_decodes_to_exact_semantic_store() {
+        let (root, paths) = test_paths("export_full_file_semantics");
+        let repository = seeded_repository(&paths).await;
+        let output_path = root.join("accounts.cswf");
+
+        export_accounts_full_encrypted_file_with_repository(
+            &repository,
+            output_path.to_string_lossy().into_owned(),
+        )
+        .await
+        .unwrap();
+        let mut encrypted = std::fs::read(&output_path).unwrap();
+        assert_eq!(&encrypted[..4], b"CSWF");
+        let mut decoded = decode_full_encrypted_store(&encrypted, FULL_PRESET_PASSPHRASE).unwrap();
+        assert_seeded_store(&decoded);
+
+        zeroize_test_store(&mut decoded);
+        encrypted.zeroize();
+        drop(decoded);
+        drop(encrypted);
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_full_encrypted_bytes_contain_no_plaintext_credentials() {
+        let (root, paths) = test_paths("export_full_bytes_secrets");
+        let repository = seeded_repository(&paths).await;
+        let mut encrypted = export_accounts_full_encrypted_bytes_with_repository(&repository)
+            .await
+            .unwrap();
+
+        for secret in [
+            ID_TOKEN_A,
+            ACCESS_TOKEN_A,
+            REFRESH_TOKEN_A,
+            API_KEY_A,
+            CHATGPT_ACCOUNT_A,
+        ] {
+            assert!(!encrypted
+                .windows(secret.len())
+                .any(|window| window == secret.as_bytes()));
+        }
+
+        encrypted.zeroize();
+        drop(encrypted);
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_full_encrypted_file_contains_no_plaintext_credentials() {
+        let (root, paths) = test_paths("export_full_file_secrets");
+        let repository = seeded_repository(&paths).await;
+        let output_path = root.join("accounts-secrets.cswf");
+        export_accounts_full_encrypted_file_with_repository(
+            &repository,
+            output_path.to_string_lossy().into_owned(),
+        )
+        .await
+        .unwrap();
+        let mut encrypted = std::fs::read(&output_path).unwrap();
+
+        for secret in [
+            ID_TOKEN_A,
+            ACCESS_TOKEN_A,
+            REFRESH_TOKEN_A,
+            API_KEY_A,
+            CHATGPT_ACCOUNT_A,
+        ] {
+            assert!(!encrypted
+                .windows(secret.len())
+                .any(|window| window == secret.as_bytes()));
+        }
+
+        encrypted.zeroize();
+        drop(encrypted);
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_empty_secure_full_export_produces_valid_decodable_file() {
+        let (root, paths) = test_paths("export_empty_full_file");
+        let repository = AccountRepository::for_test(paths.clone());
+        let output_path = root.join("empty.cswf");
+
+        export_accounts_full_encrypted_file_with_repository(
+            &repository,
+            output_path.to_string_lossy().into_owned(),
+        )
+        .await
+        .unwrap();
+        let mut encrypted = std::fs::read(&output_path).unwrap();
+        assert_eq!(&encrypted[..4], b"CSWF");
+        let mut decoded = decode_full_encrypted_store(&encrypted, FULL_PRESET_PASSPHRASE).unwrap();
+        assert_eq!(decoded.version, 1);
+        assert!(decoded.accounts.is_empty());
+        assert!(decoded.active_account_id.is_none());
+        assert!(decoded.masked_account_ids.is_empty());
+
+        zeroize_test_store(&mut decoded);
+        encrypted.zeroize();
+        drop(decoded);
+        drop(encrypted);
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_legacy_full_export_decodes_without_writes() {
+        let (root, paths) = test_paths("export_legacy_full");
+        let mut expected = legacy_store();
+        let metadata_before = write_legacy(&paths);
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let mut encrypted = export_accounts_full_encrypted_bytes_with_repository(&repository)
+            .await
+            .unwrap();
+        let mut decoded = decode_full_encrypted_store(&encrypted, FULL_PRESET_PASSPHRASE).unwrap();
+        assert_legacy_store_semantics(&decoded, &expected);
+        assert_eq!(
+            std::fs::read(&paths.metadata_file).unwrap(),
+            metadata_before
+        );
+        assert!(!paths.vault_file.exists());
+
+        zeroize_test_store(&mut decoded);
+        zeroize_test_store(&mut expected);
+        encrypted.zeroize();
+        drop(decoded);
+        drop(expected);
+        drop(encrypted);
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_export_file_failure_returns_fixed_sanitized_error() {
+        let (root, paths) = test_paths("export_file_failure");
+        let repository = seeded_repository(&paths).await;
+
+        let error = export_accounts_full_encrypted_file_with_repository(
+            &repository,
+            root.to_string_lossy().into_owned(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "Failed to write encrypted account export");
+        assert_sanitized(&error, &root);
+        assert!(!error.contains(FULL_PRESET_PASSPHRASE));
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_export_file_failure_does_not_include_supplied_path() {
+        let (root, paths) = test_paths("export_file_failure_path");
+        let repository = seeded_repository(&paths).await;
+        let supplied_path = root.join("missing").join("accounts.cswf");
+
+        let error = export_accounts_full_encrypted_file_with_repository(
+            &repository,
+            supplied_path.to_string_lossy().into_owned(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "Failed to write encrypted account export");
+        assert!(!error.contains(supplied_path.to_string_lossy().as_ref()));
+        assert!(!error.contains("salt"));
+        assert!(!error.contains("nonce"));
+        assert_sanitized(&error, &root);
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_export_and_secure_addition_is_coherent() {
+        let (root, paths) = test_paths("export_concurrent_add");
+        let seed = seeded_repository(&paths).await;
+        drop(seed);
+        let export_repository = AccountRepository::for_test(paths.clone());
+        let add_repository = AccountRepository::for_test(paths.clone());
+
+        let (export_result, add_result) = tokio::join!(
+            export_accounts_full_encrypted_bytes_with_repository(&export_repository),
+            add_repository.add_account(api_key_insert("command-account-C", "Concurrent Added", 5)),
+        );
+        let mut encrypted = export_result.unwrap();
+        add_result.unwrap();
+        let mut decoded = decode_full_encrypted_store(&encrypted, FULL_PRESET_PASSPHRASE).unwrap();
+
+        assert!(decoded.accounts.len() == 2 || decoded.accounts.len() == 3);
+        assert_seeded_account_prefix(&decoded);
+        if decoded.accounts.len() == 3 {
+            let added = decoded
+                .accounts
+                .iter()
+                .find(|account| account.id == "command-account-C")
+                .unwrap();
+            assert_eq!(added.name, "Concurrent Added");
+            assert_eq!(added.auth_mode, AuthMode::ApiKey);
+            match &added.auth_data {
+                AuthData::ApiKey { key } => assert_eq!(key, API_KEY_A),
+                AuthData::ChatGPT { .. } => panic!("concurrent export had wrong auth kind"),
+            }
+        }
+
+        zeroize_test_store(&mut decoded);
+        encrypted.zeroize();
+        drop(decoded);
+        drop(encrypted);
+        drop(export_repository);
+        drop(add_repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_export_errors_exclude_secrets_and_paths() {
+        let (root, paths) = test_paths("export_error_secrecy");
+        let repository = seeded_repository(&paths).await;
+        let supplied_path = root.join("secret-output-path");
+        std::fs::create_dir_all(&supplied_path).unwrap();
+
+        let error = export_accounts_full_encrypted_file_with_repository(
+            &repository,
+            supplied_path.to_string_lossy().into_owned(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "Failed to write encrypted account export");
+        assert_sanitized(&error, &root);
+        assert!(!error.contains(supplied_path.to_string_lossy().as_ref()));
+        assert!(!error.contains(FULL_PRESET_PASSPHRASE));
+        assert!(!error.contains("salt"));
+        assert!(!error.contains("nonce"));
 
         drop(repository);
         cleanup(root);

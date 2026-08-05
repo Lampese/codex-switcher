@@ -10,7 +10,7 @@ use crate::auth::operation_lock::MutationLock;
 use crate::auth::paths::AppPaths;
 use crate::auth::secure_commit::{verify_consistency, SecureCommitError, SecurePairCommitter};
 use crate::auth::vault::{SecretRecord, VaultPayloadV1, VaultStore};
-use crate::types::{AccountInfo, AccountsStore, AuthData, AuthMode};
+use crate::types::{AccountInfo, AccountsStore, AuthData, AuthMode, StoredAccount};
 
 #[cfg(test)]
 use crate::auth::secure_commit::SecureCommitTestOptions;
@@ -87,6 +87,81 @@ pub(crate) struct SecureAccountInsert {
     pub(crate) secret: SecretRecord,
 }
 
+pub(crate) struct AccountExportSnapshot {
+    store: AccountsStore,
+}
+
+impl AccountExportSnapshot {
+    pub(crate) fn store(&self) -> &AccountsStore {
+        &self.store
+    }
+
+    fn empty() -> Self {
+        Self {
+            store: AccountsStore {
+                version: 1,
+                accounts: Vec::new(),
+                active_account_id: None,
+                masked_account_ids: Vec::new(),
+            },
+        }
+    }
+
+    fn from_legacy(guard: LegacyStoreGuard) -> Self {
+        Self {
+            store: guard.into_store(),
+        }
+    }
+
+    fn from_secure(
+        metadata: MetadataStoreV2,
+        mut vault: VaultPayloadV1,
+    ) -> Result<Self, AccountRepositoryError> {
+        let mut snapshot = Self {
+            store: AccountsStore {
+                version: 1,
+                accounts: Vec::with_capacity(metadata.accounts.len()),
+                active_account_id: metadata.active_account_id,
+                masked_account_ids: metadata.masked_account_ids,
+            },
+        };
+
+        for account in metadata.accounts {
+            let secret = vault
+                .accounts
+                .remove(&account.vault_ref)
+                .ok_or(AccountRepositoryError::SecureStateInconsistent)?;
+            if !auth_kind_matches(&account.auth_kind, &secret) {
+                return Err(AccountRepositoryError::SecureStateInconsistent);
+            }
+            let auth_data = secret_into_auth_data(secret);
+
+            snapshot.store.accounts.push(StoredAccount {
+                id: account.id,
+                name: account.display_name,
+                email: account.email,
+                plan_type: account.plan_type,
+                subscription_expires_at: account.subscription_expires_at,
+                auth_mode: match account.auth_kind {
+                    MetadataAuthKind::ChatGpt => AuthMode::ChatGPT,
+                    MetadataAuthKind::ApiKey => AuthMode::ApiKey,
+                },
+                auth_data,
+                created_at: account.created_at,
+                last_used_at: account.last_used_at,
+            });
+        }
+
+        Ok(snapshot)
+    }
+}
+
+impl Drop for AccountExportSnapshot {
+    fn drop(&mut self) {
+        zeroize_account_store(&mut self.store);
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct AccountMetadataPatch {
     pub(crate) display_name: Option<String>,
@@ -133,6 +208,28 @@ impl AccountRepository {
         &self,
     ) -> Result<RepositoryFormat, AccountRepositoryError> {
         self.with_snapshot(|snapshot| Ok(snapshot.format())).await
+    }
+
+    pub(crate) async fn export_accounts_snapshot(
+        &self,
+    ) -> Result<AccountExportSnapshot, AccountRepositoryError> {
+        let snapshot = {
+            let _guard = self
+                .mutation_lock
+                .acquire()
+                .await
+                .map_err(|_| AccountRepositoryError::LockFailed)?;
+
+            match self.detect_locked()? {
+                ValidatedSnapshot::Empty => AccountExportSnapshot::empty(),
+                ValidatedSnapshot::Legacy(legacy) => AccountExportSnapshot::from_legacy(legacy),
+                ValidatedSnapshot::Secure { metadata, vault } => {
+                    AccountExportSnapshot::from_secure(metadata, vault)?
+                }
+            }
+        };
+
+        Ok(snapshot)
     }
 
     pub(crate) async fn list_accounts(&self) -> Result<Vec<AccountInfo>, AccountRepositoryError> {
@@ -590,6 +687,25 @@ fn auth_kind_matches(auth_kind: &MetadataAuthKind, secret: &SecretRecord) -> boo
     )
 }
 
+fn secret_into_auth_data(mut secret: SecretRecord) -> AuthData {
+    match &mut secret {
+        SecretRecord::ApiKey { key } => AuthData::ApiKey {
+            key: std::mem::take(key),
+        },
+        SecretRecord::ChatGpt {
+            id_token,
+            access_token,
+            refresh_token,
+            account_id,
+        } => AuthData::ChatGPT {
+            id_token: std::mem::take(id_token),
+            access_token: std::mem::take(access_token),
+            refresh_token: std::mem::take(refresh_token),
+            account_id: account_id.take(),
+        },
+    }
+}
+
 fn map_metadata_mutation_error(error: MetadataStoreError) -> AccountRepositoryError {
     match error {
         MetadataStoreError::DuplicateAccountId => AccountRepositoryError::DuplicateAccountId,
@@ -633,26 +749,38 @@ impl LegacyStoreGuard {
     fn new(store: AccountsStore) -> Self {
         Self { store }
     }
+
+    fn into_store(mut self) -> AccountsStore {
+        std::mem::take(&mut self.store)
+    }
 }
 
 impl Drop for LegacyStoreGuard {
     fn drop(&mut self) {
-        for account in &mut self.store.accounts {
-            match &mut account.auth_data {
-                AuthData::ApiKey { key } => key.zeroize(),
-                AuthData::ChatGPT {
-                    id_token,
-                    access_token,
-                    refresh_token,
-                    account_id,
-                } => {
-                    id_token.zeroize();
-                    access_token.zeroize();
-                    refresh_token.zeroize();
-                    if let Some(account_id) = account_id {
-                        account_id.zeroize();
-                    }
-                }
+        zeroize_account_store(&mut self.store);
+    }
+}
+
+fn zeroize_account_store(store: &mut AccountsStore) {
+    for account in &mut store.accounts {
+        zeroize_auth_data(&mut account.auth_data);
+    }
+}
+
+fn zeroize_auth_data(auth_data: &mut AuthData) {
+    match auth_data {
+        AuthData::ApiKey { key } => key.zeroize(),
+        AuthData::ChatGPT {
+            id_token,
+            access_token,
+            refresh_token,
+            account_id,
+        } => {
+            id_token.zeroize();
+            access_token.zeroize();
+            refresh_token.zeroize();
+            if let Some(account_id) = account_id {
+                account_id.zeroize();
             }
         }
     }
@@ -2540,6 +2668,368 @@ mod tests {
         assert_sanitized(&error.to_string());
 
         drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_export_empty_repository_produces_valid_empty_snapshot() {
+        let (root, paths) = test_paths("export_empty_snapshot");
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let snapshot = repository.export_accounts_snapshot().await.unwrap();
+        let store = snapshot.store();
+        assert_eq!(store.version, 1);
+        assert!(store.accounts.is_empty());
+        assert!(store.active_account_id.is_none());
+        assert!(store.masked_account_ids.is_empty());
+        let encoded = serde_json::to_vec(store).unwrap();
+        let decoded: AccountsStore = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.version, 1);
+        assert!(decoded.accounts.is_empty());
+        assert!(decoded.active_account_id.is_none());
+        assert!(decoded.masked_account_ids.is_empty());
+
+        drop(snapshot);
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_export_secure_api_key_account_reconstructs_exactly() {
+        let (root, paths) = test_paths("export_api_key");
+        write_secure_pair(&paths);
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let snapshot = repository.export_accounts_snapshot().await.unwrap();
+        let account = snapshot
+            .store()
+            .accounts
+            .iter()
+            .find(|account| account.id == "secure-api-B")
+            .unwrap();
+        assert_eq!(account.name, "Secure API");
+        assert_eq!(account.email.as_deref(), Some("secure-api-B@example.test"));
+        assert_eq!(account.plan_type.as_deref(), Some("pro"));
+        assert_eq!(account.auth_mode, AuthMode::ApiKey);
+        assert_eq!(account.created_at, timestamp(7));
+        assert_eq!(account.last_used_at, Some(timestamp(8)));
+        match &account.auth_data {
+            AuthData::ApiKey { key } => assert_eq!(key, API_KEY_A),
+            AuthData::ChatGPT { .. } => panic!("expected API key export record"),
+        }
+
+        drop(snapshot);
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_export_secure_chatgpt_account_reconstructs_exactly() {
+        let (root, paths) = test_paths("export_chatgpt");
+        write_secure_pair(&paths);
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let snapshot = repository.export_accounts_snapshot().await.unwrap();
+        let account = snapshot
+            .store()
+            .accounts
+            .iter()
+            .find(|account| account.id == "secure-chatgpt-A")
+            .unwrap();
+        assert_eq!(account.name, "Secure ChatGPT");
+        assert_eq!(
+            account.email.as_deref(),
+            Some("secure-chatgpt-A@example.test")
+        );
+        assert_eq!(account.plan_type.as_deref(), Some("pro"));
+        assert_eq!(account.auth_mode, AuthMode::ChatGPT);
+        assert_eq!(account.created_at, timestamp(5));
+        assert_eq!(account.last_used_at, Some(timestamp(6)));
+        match &account.auth_data {
+            AuthData::ChatGPT {
+                id_token,
+                access_token,
+                refresh_token,
+                account_id,
+            } => {
+                assert_eq!(id_token, ID_TOKEN_A);
+                assert_eq!(access_token, ACCESS_TOKEN_A);
+                assert_eq!(refresh_token, REFRESH_TOKEN_A);
+                assert_eq!(account_id.as_deref(), Some(CHATGPT_ACCOUNT_A));
+            }
+            AuthData::ApiKey { .. } => panic!("expected ChatGPT export record"),
+        }
+
+        drop(snapshot);
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_export_secure_metadata_ordering_is_preserved() {
+        let (root, paths) = test_paths("export_ordering");
+        write_secure_pair(&paths);
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let snapshot = repository.export_accounts_snapshot().await.unwrap();
+        let ids: Vec<_> = snapshot
+            .store()
+            .accounts
+            .iter()
+            .map(|account| account.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["secure-chatgpt-A", "secure-api-B"]);
+
+        drop(snapshot);
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_export_secure_active_account_is_preserved() {
+        let (root, paths) = test_paths("export_active");
+        write_secure_pair(&paths);
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let snapshot = repository.export_accounts_snapshot().await.unwrap();
+        assert_eq!(
+            snapshot.store().active_account_id.as_deref(),
+            Some("secure-api-B")
+        );
+
+        drop(snapshot);
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_export_secure_masked_account_ids_are_preserved() {
+        let (root, paths) = test_paths("export_masked");
+        write_secure_pair(&paths);
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let snapshot = repository.export_accounts_snapshot().await.unwrap();
+        assert_eq!(
+            snapshot.store().masked_account_ids,
+            vec![
+                "stale-secure-mask".to_string(),
+                "secure-chatgpt-A".to_string(),
+                "stale-secure-mask".to_string(),
+            ]
+        );
+
+        drop(snapshot);
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_export_secure_optional_metadata_and_timestamps_are_preserved() {
+        let (root, paths) = test_paths("export_optional_metadata");
+        let expected = secure_metadata_store();
+        write_secure_pair(&paths);
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let snapshot = repository.export_accounts_snapshot().await.unwrap();
+        for expected_account in &expected.accounts {
+            let actual = snapshot
+                .store()
+                .accounts
+                .iter()
+                .find(|account| account.id == expected_account.id)
+                .unwrap();
+            assert_eq!(actual.id, expected_account.id);
+            assert_eq!(actual.name, expected_account.display_name);
+            assert_eq!(actual.email, expected_account.email);
+            assert_eq!(actual.plan_type, expected_account.plan_type);
+            assert_eq!(
+                actual.subscription_expires_at,
+                expected_account.subscription_expires_at
+            );
+            assert_eq!(actual.created_at, expected_account.created_at);
+            assert_eq!(actual.last_used_at, expected_account.last_used_at);
+        }
+
+        drop(snapshot);
+        drop(expected);
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_export_legacy_repository_is_semantic_and_read_only() {
+        let (root, paths) = test_paths("export_legacy_semantic");
+        let mut expected = legacy_store();
+        let metadata_before = write_legacy(&paths, &expected);
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let snapshot = repository.export_accounts_snapshot().await.unwrap();
+        assert_eq!(snapshot.store().version, expected.version);
+        assert_eq!(
+            snapshot.store().active_account_id,
+            expected.active_account_id
+        );
+        assert_eq!(
+            snapshot.store().masked_account_ids,
+            expected.masked_account_ids
+        );
+        assert_eq!(snapshot.store().accounts.len(), expected.accounts.len());
+        for (actual, expected_account) in snapshot.store().accounts.iter().zip(&expected.accounts) {
+            assert_eq!(actual.id, expected_account.id);
+            assert_eq!(actual.name, expected_account.name);
+            assert_eq!(actual.email, expected_account.email);
+            assert_eq!(actual.plan_type, expected_account.plan_type);
+            assert_eq!(
+                actual.subscription_expires_at,
+                expected_account.subscription_expires_at
+            );
+            assert_eq!(actual.auth_mode, expected_account.auth_mode);
+            assert_eq!(actual.created_at, expected_account.created_at);
+            assert_eq!(actual.last_used_at, expected_account.last_used_at);
+        }
+        assert_eq!(
+            std::fs::read(&paths.metadata_file).unwrap(),
+            metadata_before
+        );
+        assert!(!paths.vault_file.exists());
+
+        drop(snapshot);
+        zeroize_account_store(&mut expected);
+        drop(expected);
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_export_legacy_repository_preserves_metadata_bytes() {
+        let (root, paths) = test_paths("export_legacy_metadata_bytes");
+        let mut expected = legacy_store();
+        let metadata_before = write_legacy(&paths, &expected);
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let snapshot = repository.export_accounts_snapshot().await.unwrap();
+        assert_eq!(snapshot.store().accounts.len(), expected.accounts.len());
+        assert_eq!(
+            std::fs::read(&paths.metadata_file).unwrap(),
+            metadata_before
+        );
+
+        drop(snapshot);
+        zeroize_account_store(&mut expected);
+        drop(expected);
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_export_legacy_repository_preserves_orphan_vault_bytes() {
+        let (root, paths) = test_paths("export_legacy_orphan_vault");
+        let mut expected = legacy_store();
+        write_legacy(&paths, &expected);
+        let orphan = b"opaque legacy export orphan vault".to_vec();
+        std::fs::write(&paths.vault_file, &orphan).unwrap();
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let snapshot = repository.export_accounts_snapshot().await.unwrap();
+        assert_eq!(snapshot.store().accounts.len(), expected.accounts.len());
+        assert_eq!(std::fs::read(&paths.vault_file).unwrap(), orphan);
+
+        drop(snapshot);
+        zeroize_account_store(&mut expected);
+        drop(expected);
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_export_inconsistent_secure_pair_fails_closed() {
+        let (root, paths) = test_paths("export_inconsistent_secure");
+        write_secure_metadata(&paths, &secure_metadata_store());
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let result = repository.export_accounts_snapshot().await;
+        assert!(matches!(
+            result,
+            Err(AccountRepositoryError::SecureStateInconsistent)
+        ));
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_export_secure_auth_kind_mismatch_fails_closed() {
+        let (root, paths) = test_paths("export_auth_kind_mismatch");
+        let mut metadata = MetadataStoreV2::new_empty();
+        metadata
+            .insert(metadata_account(
+                "secure-chatgpt-A",
+                "Secure ChatGPT",
+                MetadataAuthKind::ChatGpt,
+                5,
+            ))
+            .unwrap();
+        write_secure_metadata(&paths, &metadata);
+        let mut vault = VaultPayloadV1::new_empty();
+        vault
+            .insert(
+                "secure-chatgpt-A",
+                SecretRecord::ApiKey {
+                    key: API_KEY_A.to_string(),
+                },
+            )
+            .unwrap();
+        write_secure_vault(&paths, &vault);
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let result = repository.export_accounts_snapshot().await;
+        assert!(matches!(
+            result,
+            Err(AccountRepositoryError::SecureStateInconsistent)
+        ));
+
+        drop(metadata);
+        drop(vault);
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_export_repository_errors_are_sanitized() {
+        let (root, paths) = test_paths("export_error_sanitized");
+        write_secure_metadata(&paths, &secure_metadata_store());
+        std::fs::write(&paths.vault_file, b"corrupt export vault bytes").unwrap();
+        let repository = AccountRepository::for_test(paths.clone());
+
+        let error = match repository.export_accounts_snapshot().await {
+            Err(error) => error.to_string(),
+            Ok(snapshot) => {
+                drop(snapshot);
+                panic!("corrupt secure vault unexpectedly exported");
+            }
+        };
+        assert_eq!(error, "Secure vault could not be loaded");
+        assert_sanitized(&error);
+        assert!(!error.contains(root.to_string_lossy().as_ref()));
+
+        drop(repository);
+        cleanup(root);
+    }
+
+    #[tokio::test]
+    async fn test_export_partial_secure_snapshot_failure_is_zeroizing_owned() {
+        let (root, paths) = test_paths("export_partial_failure");
+        let metadata = secure_metadata_store();
+        let mut vault = secure_vault_payload();
+        vault.remove("secure-api-B");
+
+        let result = AccountExportSnapshot::from_secure(metadata, vault);
+        assert!(matches!(
+            result,
+            Err(AccountRepositoryError::SecureStateInconsistent)
+        ));
+
+        drop(paths);
         cleanup(root);
     }
 }
