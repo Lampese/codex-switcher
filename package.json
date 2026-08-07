@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "test:reset-credits": "node --experimental-strip-types --test tests/resetCredits.test.ts",
-    "test:frontend": "node --experimental-strip-types --test tests/resetCredits.test.ts tests/dateFormat.test.ts",
+    "test:frontend": "node --experimental-strip-types --test tests/resetCredits.test.ts tests/dateFormat.test.ts tests/runningSwitch.test.ts",
     "preview": "vite preview",
     "tauri": "sh ./scripts/tauri.sh",
     "tauri:win": "tauri",

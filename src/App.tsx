@@ -11,6 +11,7 @@ import {
   isTauriRuntime,
   invokeBackend,
 } from "./lib/platform";
+import { switchAndReopenCodex } from "./lib/runningSwitch";
 import {
   applyTheme,
   readStoredTheme,
@@ -740,20 +741,51 @@ function App() {
       return;
     }
 
-    try {
-      setSwitchingId(action.accountId);
-      await switchAccount(action.accountId);
-      showWarmupToast(t("switchedAfterForce"));
-    } catch (err) {
-      console.error("Failed to switch account after force close:", err);
+    setSwitchingId(action.accountId);
+    const result = await switchAndReopenCodex({
+      switchAccount: () => switchAccount(action.accountId),
+      reopenCodex: async () => {
+        if (!isTauriRuntime()) return;
+        try {
+          setIsOpeningCodex(true);
+          await invokeBackend("open_codex_app");
+        } finally {
+          setIsOpeningCodex(false);
+        }
+      },
+    });
+    setSwitchingId(null);
+
+    if (result.status === "success") {
+      if (isTauriRuntime()) {
+        showWarmupToast(t("switchedAndReopened"));
+        setTimeout(() => {
+          void checkProcesses();
+        }, 1500);
+      } else {
+        showWarmupToast(t("switchedAfterForce"));
+      }
+      return;
+    }
+
+    if (result.status === "reopen_failed") {
+      console.error("Account switched, but Codex failed to reopen:", result.error);
       showWarmupToast(
-        t("switchFailedAfterForce", { message: formatWarmupError(err) }),
+        t("switchSucceededOpenFailed", {
+          message: formatWarmupError(result.error),
+        }),
         true
       );
-    } finally {
-      setSwitchingId(null);
+      return;
     }
+
+    console.error("Failed to switch account after force close:", result.error);
+    showWarmupToast(
+      t("switchFailedAfterForce", { message: formatWarmupError(result.error) }),
+      true
+    );
   }, [
+    checkProcesses,
     forceCloseCodexProcesses,
     formatWarmupError,
     openReauthModal,
@@ -1202,7 +1234,7 @@ function App() {
   const reauthAccount = accounts.find((account) => account.id === reauthAccountId) ?? null;
   const forceCloseConfirmLabel =
     pendingForceCloseAction?.kind === "switch"
-      ? t("forceCloseAndSwitch")
+      ? t(isTauriRuntime() ? "forceCloseSwitchAndReopen" : "forceCloseAndSwitch")
       : pendingForceCloseAction?.kind === "reauth"
         ? t("forceCloseAndReauth")
         : t("forceCloseRunning");
@@ -1906,6 +1938,9 @@ function App() {
                   <span className="font-medium text-gray-900 dark:text-gray-100">
                     {pendingForceCloseAccount.name}
                   </span>
+                  {pendingForceCloseAction?.kind === "switch" && isTauriRuntime() && (
+                    <> {t("andReopenCodex")}</>
+                  )}
                   {"."}
                 </p>
               )}
