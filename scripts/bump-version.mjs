@@ -90,7 +90,7 @@ const replaceCargoVersion = (contents) =>
 
 const replaceCargoLockVersion = (contents) => {
   const blockRegex =
-    /(\[\[package\]\]\nname = "codex-switcher"\nversion = ")\d+\.\d+\.\d+("[\s\S]*?\n\n)/;
+    /(\[\[package\]\]\r?\nname = "codex-switcher"\r?\nversion = ")\d+\.\d+\.\d+("[\s\S]*?\r?\n\r?\n)/;
   if (!blockRegex.test(contents)) {
     console.error(
       "Could not find codex-switcher package in Cargo.lock",

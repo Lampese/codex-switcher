@@ -2,10 +2,13 @@
 
 use crate::auth::{
     add_account, create_chatgpt_account_from_refresh_token, get_active_account,
-    import_from_auth_json, import_from_auth_json_contents, load_accounts, remove_account,
-    save_accounts, set_active_account, switch_to_account, touch_account,
+    import_from_auth_json, import_from_auth_json_contents, load_accounts, mutate_accounts,
+    reconcile_active_account_from_codex_auth, remove_account, switch_to_account,
+    AUTH_REAUTH_REQUIRED_ERROR,
 };
-use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
+use crate::types::{
+    AccountInfo, AccountsStore, AuthData, AuthState, ImportAccountsSummary, StoredAccount,
+};
 
 use super::process::ensure_codex_not_running;
 
@@ -71,6 +74,17 @@ struct SlimAccountPayload {
 /// List all accounts with their info
 #[tauri::command]
 pub async fn list_accounts() -> Result<Vec<AccountInfo>, String> {
+    let initial = load_accounts().map_err(|e| e.to_string())?;
+    if let Some(active) = initial
+        .active_account_id
+        .as_deref()
+        .and_then(|id| initial.accounts.iter().find(|account| account.id == id))
+    {
+        if let Err(error) = reconcile_active_account_from_codex_auth(active) {
+            println!("[Auth] Failed to reconcile active Codex credentials: {error}");
+        }
+    }
+
     let store = load_accounts().map_err(|e| e.to_string())?;
     let active_id = store.active_account_id.as_deref();
 
@@ -132,25 +146,28 @@ pub async fn switch_account(account_id: String) -> Result<(), String> {
 }
 
 pub fn switch_account_by_id(account_id: &str) -> Result<(), String> {
-    let store = load_accounts().map_err(|e| e.to_string())?;
+    mutate_accounts(|store| {
+        let account_index = store
+            .accounts
+            .iter()
+            .position(|account| account.id == account_id)
+            .ok_or_else(|| anyhow::anyhow!("Account not found: {account_id}"))?;
+        let account = store.accounts[account_index].clone();
 
-    // Find the account
-    let account = store
-        .accounts
-        .iter()
-        .find(|a| a.id == account_id)
-        .ok_or_else(|| format!("Account not found: {account_id}"))?;
+        if account.auth_state == AuthState::ReauthRequired {
+            anyhow::bail!("{AUTH_REAUTH_REQUIRED_ERROR}: session_expired");
+        }
 
-    ensure_codex_not_running()?;
+        ensure_codex_not_running().map_err(anyhow::Error::msg)?;
 
-    // Write to ~/.codex/auth.json
-    switch_to_account(account).map_err(|e| e.to_string())?;
-
-    // Update the active account in our store
-    set_active_account(account_id).map_err(|e| e.to_string())?;
-
-    // Update last_used_at
-    touch_account(account_id).map_err(|e| e.to_string())?;
+        // Keep the credential snapshot and active-account update under the
+        // same store lock so a concurrent token rotation cannot be overwritten.
+        switch_to_account(&account)?;
+        store.active_account_id = Some(account_id.to_string());
+        store.accounts[account_index].last_used_at = Some(chrono::Utc::now());
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
 
     // Restart Antigravity background process if it is running
     // This allows it to pick up the new authorization file seamlessly
@@ -216,8 +233,12 @@ pub async fn import_accounts_slim_text(payload: String) -> Result<ImportAccounts
         })?;
     validate_imported_store(&imported).map_err(|e| format!("{e:#}"))?;
 
-    let (merged, summary) = merge_accounts_store(current, imported);
-    save_accounts(&merged).map_err(|e| e.to_string())?;
+    let summary = mutate_accounts(|current| {
+        let (merged, summary) = merge_accounts_store(current.clone(), imported);
+        *current = merged;
+        Ok(summary)
+    })
+    .map_err(|e| e.to_string())?;
     Ok(ImportAccountsSummary {
         total_in_payload,
         imported_count: summary.imported_count,
@@ -251,10 +272,12 @@ pub async fn import_accounts_full_encrypted_file(
         .map_err(|e| e.to_string())?;
     validate_imported_store(&imported).map_err(|e| e.to_string())?;
 
-    let current = load_accounts().map_err(|e| e.to_string())?;
-    let (merged, summary) = merge_accounts_store(current, imported);
-    save_accounts(&merged).map_err(|e| e.to_string())?;
-    Ok(summary)
+    mutate_accounts(|current| {
+        let (merged, summary) = merge_accounts_store(current.clone(), imported);
+        *current = merged;
+        Ok(summary)
+    })
+    .map_err(|e| e.to_string())
 }
 
 /// Import full account config from encrypted bytes uploaded through the browser UI.
@@ -265,10 +288,12 @@ pub async fn import_accounts_full_encrypted_bytes(
         decode_full_encrypted_store(&bytes, FULL_PRESET_PASSPHRASE).map_err(|e| e.to_string())?;
     validate_imported_store(&imported).map_err(|e| e.to_string())?;
 
-    let current = load_accounts().map_err(|e| e.to_string())?;
-    let (merged, summary) = merge_accounts_store(current, imported);
-    save_accounts(&merged).map_err(|e| e.to_string())?;
-    Ok(summary)
+    mutate_accounts(|current| {
+        let (merged, summary) = merge_accounts_store(current.clone(), imported);
+        *current = merged;
+        Ok(summary)
+    })
+    .map_err(|e| e.to_string())
 }
 
 /// Find all running Antigravity codex assistant processes

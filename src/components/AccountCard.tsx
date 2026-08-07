@@ -1,6 +1,8 @@
 import { useCallback, useState, useRef, useEffect } from "react";
 import type { AccountResetCredits, AccountUsageStats as AccountUsageStatsInfo, AccountWithUsage } from "../types";
 import { invokeBackend } from "../lib/platform";
+import { useI18n } from "../lib/i18n";
+import { formatLocalizedDate, type AppLocale } from "../lib/dateFormat";
 import { AccountUsageStats } from "./AccountUsageStats";
 import { ResetCreditsMenu } from "./ResetCreditsMenu";
 import { UsageBar } from "./UsageBar";
@@ -14,8 +16,8 @@ interface AccountCardProps {
   onDelete: () => void;
   onRefresh: () => Promise<unknown>;
   onRename: (newName: string) => Promise<void>;
+  onReauth?: () => void;
   switching?: boolean;
-  switchDisabled?: boolean;
   warmingUp?: boolean;
   masked?: boolean;
   onToggleMask?: () => void;
@@ -25,59 +27,65 @@ interface AccountCardProps {
   onToggleAutoWarmup?: () => void;
 }
 
-function formatLastRefresh(date: Date | null): string {
-  if (!date) return "Never";
+type Translate = (key: string, values?: Record<string, string | number>) => string;
+
+function formatLastRefresh(date: Date | null, t: Translate, locale: AppLocale): string {
+  if (!date) return t("never");
   const now = new Date();
   const diff = Math.floor((now.getTime() - date.getTime()) / 1000);
-  if (diff < 5) return "Just now";
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return date.toLocaleDateString();
+  if (diff < 5) return t("justNow");
+  if (diff < 60) return t("secondsAgo", { value: diff });
+  if (diff < 3600) return t("minutesAgo", { value: Math.floor(diff / 60) });
+  if (diff < 86400) return t("hoursAgo", { value: Math.floor(diff / 3600) });
+  return formatLocalizedDate(date, locale, { year: "numeric", month: "short", day: "numeric" });
 }
 
-function getSubscriptionStatus(timestamp: string | null | undefined): {
+function getSubscriptionStatus(
+  timestamp: string | null | undefined,
+  t: Translate,
+  locale: AppLocale,
+): {
   label: string;
   className: string;
 } {
   if (!timestamp) {
     return {
-      label: "Expiry unavailable",
+      label: t("expiryUnavailable"),
       className: "text-gray-400 dark:text-gray-500",
     };
   }
 
   const expiryDate = new Date(timestamp);
-  const formattedDate = new Intl.DateTimeFormat(undefined, {
+  const formattedDate = formatLocalizedDate(expiryDate, locale, {
     month: "short",
     day: "numeric",
     year: "numeric",
-  }).format(expiryDate);
+  });
 
   const remainingMs = expiryDate.getTime() - Date.now();
   if (remainingMs <= 0) {
     return {
-      label: `Expired ${formattedDate}`,
+      label: t("expired", { value: formattedDate }),
       className: "text-red-500 dark:text-red-400",
     };
   }
 
   if (remainingMs <= 3 * 24 * 60 * 60 * 1000) {
     return {
-      label: `Until ${formattedDate}`,
+      label: t("until", { value: formattedDate }),
       className: "text-red-500 dark:text-red-400",
     };
   }
 
   if (remainingMs <= 7 * 24 * 60 * 60 * 1000) {
     return {
-      label: `Until ${formattedDate}`,
+      label: t("until", { value: formattedDate }),
       className: "text-amber-500 dark:text-amber-400",
     };
   }
 
   return {
-    label: `Until ${formattedDate}`,
+    label: t("until", { value: formattedDate }),
     className: "text-gray-400 dark:text-gray-500",
   };
 }
@@ -100,8 +108,8 @@ export function AccountCard({
   onDelete,
   onRefresh,
   onRename,
+  onReauth,
   switching,
-  switchDisabled,
   warmingUp,
   masked = false,
   onToggleMask,
@@ -110,6 +118,8 @@ export function AccountCard({
   autoWarmupLabel,
   onToggleAutoWarmup,
 }: AccountCardProps) {
+  const { t, locale } = useI18n();
+  const requiresReauth = account.auth_state === "reauth_required";
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(
     account.usage && !account.usage.error ? new Date() : null
@@ -163,8 +173,8 @@ export function AccountCard({
   const planDisplay = account.plan_type
     ? account.plan_type.charAt(0).toUpperCase() + account.plan_type.slice(1)
     : account.auth_mode === "api_key"
-      ? "API Key"
-      : "Unknown";
+      ? t("apiKey")
+      : t("unknown");
 
   const planColors: Record<string, string> = {
     pro: "bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-700",
@@ -178,13 +188,13 @@ export function AccountCard({
   const planKey = account.plan_type?.toLowerCase() || "api_key";
   const planColorClass = planColors[planKey] || planColors.free;
   const showSubscriptionStatus = account.auth_mode === "chat_g_p_t";
-  const subscriptionStatus = getSubscriptionStatus(account.subscription_expires_at);
+  const subscriptionStatus = getSubscriptionStatus(account.subscription_expires_at, t, locale);
   const compactResetCredits = !account.is_active;
 
   const loadResetCredits = useCallback(async () => {
     const requestId = ++resetRequestSeq.current;
 
-    if (account.auth_mode !== "chat_g_p_t") {
+    if (account.auth_mode !== "chat_g_p_t" || requiresReauth) {
       setResetCredits(null);
       return;
     }
@@ -199,7 +209,7 @@ export function AccountCard({
       if (requestId !== resetRequestSeq.current) return;
       setResetCredits(null);
     }
-  }, [account.auth_mode, account.id]);
+  }, [account.auth_mode, account.id, requiresReauth]);
 
   const handleStatsLoaded = useCallback(
     (stats: AccountUsageStatsInfo | null) => {
@@ -211,6 +221,11 @@ export function AccountCard({
   useEffect(() => {
     setResetCredits(null);
 
+    // The active card already loads the stats panel by default and receives
+    // reset credits through onStatsLoaded. Fetch separately only for collapsed
+    // cards so the initial page load does not refresh the same token twice.
+    if (account.is_active || requiresReauth) return;
+
     void loadResetCredits();
     const timer = window.setInterval(() => {
       void loadResetCredits();
@@ -220,13 +235,15 @@ export function AccountCard({
       resetRequestSeq.current += 1;
       window.clearInterval(timer);
     };
-  }, [loadResetCredits]);
+  }, [account.is_active, loadResetCredits, requiresReauth]);
 
 
   return (
     <div
       className={`relative rounded-xl border p-5 transition-all duration-200 ${
-        account.is_active
+        requiresReauth
+          ? "bg-white dark:bg-gray-900 border-red-400 shadow-sm"
+          : account.is_active
           ? "bg-white dark:bg-gray-900 border-emerald-400 shadow-sm"
           : "bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600"
       }`}
@@ -237,8 +254,8 @@ export function AccountCard({
           <div className="flex items-center gap-2 mb-1">
             {account.is_active && (
               <span className="flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-2 w-2 rounded-full bg-green-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+                <span className={`animate-ping absolute inline-flex h-2 w-2 rounded-full opacity-75 ${requiresReauth ? "bg-red-400" : "bg-green-400"}`}></span>
+                <span className={`relative inline-flex rounded-full h-2 w-2 ${requiresReauth ? "bg-red-500" : "bg-green-500"}`}></span>
               </span>
             )}
             {isEditing ? (
@@ -259,7 +276,7 @@ export function AccountCard({
                   setEditName(account.name);
                   setIsEditing(true);
                 }}
-                title={masked ? undefined : "Click to rename"}
+                title={masked ? undefined : t("clickRename")}
               >
                 <BlurredText blur={masked}>{account.name}</BlurredText>
               </h3>
@@ -278,7 +295,7 @@ export function AccountCard({
             <button
               onClick={onToggleMask}
               className="p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
-              title={masked ? "Show info" : "Hide info"}
+              title={masked ? t("showInfo") : t("hideInfo")}
             >
               {masked ? (
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -298,22 +315,31 @@ export function AccountCard({
           >
             {planDisplay}
           </span>
-          <ResetCreditsMenu
-            compact={compactResetCredits}
-            resetCredits={resetCredits}
-          />
+          {!requiresReauth && (
+            <ResetCreditsMenu
+              compact={compactResetCredits}
+              resetCredits={resetCredits}
+            />
+          )}
         </div>
       </div>
 
       {/* Usage */}
       <div className="mb-3">
-        <UsageBar usage={account.usage} loading={isRefreshing || account.usageLoading} />
+        {requiresReauth ? (
+          <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/30 dark:text-red-200">
+            <div className="font-medium">{t("sessionExpired")}</div>
+            <div className="mt-0.5 text-xs opacity-80">{t("sessionExpiredHint")}</div>
+          </div>
+        ) : (
+          <UsageBar usage={account.usage} loading={isRefreshing || account.usageLoading} />
+        )}
       </div>
 
       {/* Last refresh time */}
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs mb-3">
         <div className="text-gray-400 dark:text-gray-500">
-          Last updated: {formatLastRefresh(lastRefresh)}
+          {t("lastUpdated", { value: formatLastRefresh(lastRefresh, t, locale) })}
         </div>
         {showSubscriptionStatus && (
           <div className={`text-right ${subscriptionStatus.className}`}>
@@ -322,54 +348,59 @@ export function AccountCard({
         )}
       </div>
 
-      <AccountUsageStats
-        accountId={account.id}
-        enabled={account.auth_mode === "chat_g_p_t"}
-        defaultOpen={account.is_active}
-        onStatsLoaded={handleStatsLoaded}
-      />
+      {!requiresReauth && (
+        <AccountUsageStats
+          accountId={account.id}
+          enabled={account.auth_mode === "chat_g_p_t"}
+          defaultOpen={account.is_active}
+          onStatsLoaded={handleStatsLoaded}
+        />
+      )}
 
       {/* Actions */}
       <div className="flex gap-2 mt-3">
-        {account.is_active ? (
+        {requiresReauth ? (
+          <button
+            onClick={onReauth}
+            disabled={!onReauth || switching}
+            className="flex-1 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-50"
+          >
+            {t("signInAgain")}
+          </button>
+        ) : account.is_active ? (
           <button
             disabled
             className="flex-1 px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700 cursor-default"
           >
-            ✓ Active
+            ✓ {t("active")}
           </button>
         ) : (
           <button
             onClick={onSwitch}
-            disabled={switching || switchDisabled}
-            className={`flex-1 px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50 ${
-              switchDisabled
-                ? "bg-gray-200 dark:bg-gray-800 text-gray-400 dark:text-gray-500 cursor-not-allowed"
-                : "bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900"
-            }`}
-            title={switchDisabled ? "Close all Codex processes first" : undefined}
+            disabled={switching}
+            className="flex-1 px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50 bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900"
           >
-            {switching ? "Switching..." : switchDisabled ? "Codex Running" : "Switch"}
+            {switching ? t("switching") : t("switch")}
           </button>
         )}
         <button
           onClick={() => {
             void onWarmup();
           }}
-          disabled={warmingUp}
+          disabled={warmingUp || requiresReauth}
           className={`px-3 py-2 text-sm rounded-lg transition-colors ${
             warmingUp
               ? "bg-amber-100 dark:bg-amber-900/30 text-amber-500 dark:text-amber-300"
               : "bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-100 dark:hover:bg-amber-900/40 text-amber-700 dark:text-amber-300"
           }`}
-          title={warmingUp ? "Sending warm-up request..." : "Send minimal warm-up request"}
+          title={warmingUp ? t("sendingWarmup") : t("sendWarmup")}
         >
           ⚡
         </button>
         {onToggleAutoWarmup && (
           <button
             onClick={onToggleAutoWarmup}
-            disabled={autoWarmupManagedByAll}
+            disabled={autoWarmupManagedByAll || requiresReauth}
             className={`px-3 py-2 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
               autoWarmupEnabled
                 ? "bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-300"
@@ -377,31 +408,31 @@ export function AccountCard({
             } disabled:opacity-60`}
             title={
               autoWarmupManagedByAll
-                ? "Auto warm-up is enabled for all accounts"
+                ? t("autoAllAccounts")
                 : autoWarmupEnabled
-                  ? "Disable auto warm-up for this account"
-                : "Enable auto warm-up for this account"
+                  ? t("disableAutoAccount")
+                  : t("enableAutoAccount")
             }
           >
-            {autoWarmupLabel ?? `Auto: ${autoWarmupEnabled ? "on" : "off"}`}
+            {autoWarmupLabel ?? (autoWarmupEnabled ? t("autoOn") : t("autoOff"))}
           </button>
         )}
         <button
           onClick={handleRefresh}
-          disabled={isRefreshing}
+          disabled={isRefreshing || requiresReauth}
           className={`px-3 py-2 text-sm rounded-lg transition-colors ${
             isRefreshing
               ? "bg-gray-200 dark:bg-gray-800 text-gray-400 dark:text-gray-500"
               : "bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300"
           }`}
-          title="Refresh usage"
+          title={t("refreshUsage")}
         >
           <span className={isRefreshing ? "animate-spin inline-block" : ""}>↻</span>
         </button>
         <button
           onClick={onDelete}
           className="px-3 py-2 text-sm rounded-lg bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-300 transition-colors"
-          title="Remove account"
+          title={t("removeAccount")}
         >
           ✕
         </button>

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import type { Update } from "@tauri-apps/plugin-updater";
 import { isTauriRuntime } from "../lib/platform";
+import { useI18n } from "../lib/i18n";
 
 type UpdateStatus =
   | { kind: "idle" }
@@ -8,13 +9,15 @@ type UpdateStatus =
   | { kind: "available"; update: Update }
   | { kind: "downloading"; downloaded: number; total: number | null }
   | { kind: "ready" }
+  | { kind: "up-to-date" }
   | { kind: "error"; message: string };
 
 export function UpdateChecker() {
+  const { t } = useI18n();
   const [status, setStatus] = useState<UpdateStatus>({ kind: "idle" });
   const [dismissed, setDismissed] = useState(false);
 
-  const checkForUpdate = useCallback(async () => {
+  const checkForUpdate = useCallback(async (manual = false) => {
     if (!isTauriRuntime()) return;
 
     try {
@@ -25,11 +28,16 @@ export function UpdateChecker() {
       if (update) {
         setStatus({ kind: "available", update });
       } else {
-        setStatus({ kind: "idle" });
+        setStatus(manual ? { kind: "up-to-date" } : { kind: "idle" });
       }
     } catch (err) {
       console.error("Update check failed:", err);
-      setStatus({ kind: "idle" });
+      if (manual) {
+        const message = err instanceof Error ? err.message : String(err);
+        setStatus({ kind: "error", message });
+      } else {
+        setStatus({ kind: "idle" });
+      }
     }
   }, []);
 
@@ -85,8 +93,26 @@ export function UpdateChecker() {
     return null;
   }
 
-  if (status.kind === "idle" || status.kind === "checking" || dismissed) {
-    return null;
+  if (
+    status.kind === "idle" ||
+    status.kind === "checking" ||
+    status.kind === "up-to-date" ||
+    dismissed
+  ) {
+    return (
+      <button
+        type="button"
+        onClick={() => void checkForUpdate(true)}
+        disabled={status.kind === "checking"}
+        className="fixed bottom-6 right-6 z-40 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-600 shadow-lg transition-colors hover:bg-gray-50 disabled:cursor-wait disabled:opacity-70 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800"
+      >
+        {status.kind === "checking"
+          ? t("updateChecking")
+          : status.kind === "up-to-date"
+            ? t("updateUpToDate")
+            : t("updateCheck")}
+      </button>
+    );
   }
 
   const formatBytes = (bytes: number) => {
@@ -102,7 +128,7 @@ export function UpdateChecker() {
           <div className="flex items-start gap-3">
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
-                Update available: v{status.update.version}
+                {t("updateAvailable", { version: status.update.version })}
               </p>
               {status.update.body && (
                 <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5 truncate">
@@ -115,13 +141,13 @@ export function UpdateChecker() {
                 onClick={() => setDismissed(true)}
                 className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 transition-colors"
               >
-                Later
+                {t("updateLater")}
               </button>
               <button
                 onClick={handleDownloadAndInstall}
                 className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors"
               >
-                Update
+                {t("updateInstall")}
               </button>
             </div>
           </div>
@@ -130,7 +156,7 @@ export function UpdateChecker() {
         {status.kind === "downloading" && (
           <div>
             <div className="flex items-center justify-between mb-2">
-              <p className="text-sm font-medium text-gray-900 dark:text-gray-100">Downloading update...</p>
+              <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{t("updateDownloading")}</p>
               <p className="text-xs text-gray-500 dark:text-gray-400">
                 {formatBytes(status.downloaded)}
                 {status.total ? ` / ${formatBytes(status.total)}` : ""}
@@ -153,20 +179,20 @@ export function UpdateChecker() {
         {status.kind === "ready" && (
           <div className="flex items-center justify-between">
             <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
-              Update ready. Restart to apply.
+              {t("updateReady")}
             </p>
             <div className="flex items-center gap-2 shrink-0">
               <button
                 onClick={() => setDismissed(true)}
                 className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 transition-colors"
               >
-                Later
+                {t("updateLater")}
               </button>
               <button
                 onClick={handleRelaunch}
                 className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors"
               >
-                Restart
+                {t("updateRestart")}
               </button>
             </div>
           </div>
@@ -175,14 +201,22 @@ export function UpdateChecker() {
         {status.kind === "error" && (
           <div className="flex items-center justify-between">
             <p className="text-sm text-red-600 dark:text-red-300">
-              Update failed: {status.message}
+              {t("updateFailed", { message: status.message })}
             </p>
-            <button
-              onClick={() => setDismissed(true)}
-              className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 transition-colors shrink-0 ml-2"
-            >
-              Dismiss
-            </button>
+            <div className="flex items-center gap-2 shrink-0 ml-2">
+              <button
+                onClick={() => void checkForUpdate(true)}
+                className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors"
+              >
+                {t("updateCheck")}
+              </button>
+              <button
+                onClick={() => setDismissed(true)}
+                className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 transition-colors"
+              >
+                {t("updateDismiss")}
+              </button>
+            </div>
           </div>
         )}
       </div>

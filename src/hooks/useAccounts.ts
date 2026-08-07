@@ -64,9 +64,9 @@ export function useAccounts() {
     []
   );
 
-  const loadAccounts = useCallback(async (preserveUsage = false) => {
+  const loadAccounts = useCallback(async (preserveUsage = false, silent = false) => {
     try {
-      setLoading(true);
+      if (!silent) setLoading(true);
       setError(null);
       const accountList = await invokeBackend<AccountInfo[]>("list_accounts");
       
@@ -90,7 +90,7 @@ export function useAccounts() {
       setError(err instanceof Error ? err.message : String(err));
       return [];
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
@@ -106,8 +106,9 @@ export function useAccounts() {
         }
 
         if (options?.refreshMetadata) {
+          const metadataTargets = list.filter((account) => account.auth_state === "ready");
           await runWithConcurrency(
-            list,
+            metadataTargets,
             async (account) => {
               await invokeBackend<AccountInfo>("refresh_account_metadata", {
                 accountId: account.id,
@@ -117,6 +118,15 @@ export function useAccounts() {
           );
 
           list = await loadAccounts(true);
+        }
+
+        // Permanently invalid sessions should stay idle until an explicit
+        // in-place sign-in succeeds. list_accounts still performs the cheap
+        // active auth.json reconciliation used for external recovery.
+        list = list.filter((account) => account.auth_state === "ready");
+        if (list.length === 0) {
+          await loadAccounts(true, true);
+          return;
         }
 
         const accountIds = list.map((account) => account.id);
@@ -164,6 +174,7 @@ export function useAccounts() {
         );
 
         reportUsageToTray(Array.from(usageResults.values()));
+        await loadAccounts(true, true);
       } catch (err) {
         console.error("Failed to refresh usage:", err);
         throw err;
@@ -178,8 +189,12 @@ export function useAccounts() {
   ) => {
     try {
       if (options?.refreshMetadata) {
-        await invokeBackend<AccountInfo>("refresh_account_metadata", { accountId });
-        await loadAccounts(true);
+        try {
+          await invokeBackend<AccountInfo>("refresh_account_metadata", { accountId });
+        } catch (metadataError) {
+          console.error("Failed to refresh account metadata:", metadataError);
+        }
+        await loadAccounts(true, true);
       }
 
       setAccounts((prev) =>
@@ -194,6 +209,7 @@ export function useAccounts() {
         )
       );
       reportUsageToTray([usage]);
+      await loadAccounts(true, true);
       return usage;
     } catch (err) {
       console.error("Failed to refresh single usage:", err);
@@ -209,6 +225,7 @@ export function useAccounts() {
             : a
         )
       );
+      await loadAccounts(true, true);
       throw err;
     }
   }, [buildUsageError, loadAccounts, reportUsageToTray]);
@@ -288,11 +305,14 @@ export function useAccounts() {
     [loadAccounts, refreshUsage]
   );
 
-  const startOAuthLogin = useCallback(async (accountName: string) => {
+  const startOAuthLogin = useCallback(async (
+    accountName: string,
+    replaceAccountId?: string
+  ) => {
     try {
       const info = await invokeBackend<{ auth_url: string; callback_port: number }>(
         "start_login",
-        { accountName }
+        { accountName, replaceAccountId }
       );
       return info;
     } catch (err) {

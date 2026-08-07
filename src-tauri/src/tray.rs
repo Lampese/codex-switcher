@@ -11,12 +11,15 @@ use tauri::{
 
 use crate::{
     api::usage::get_account_usage,
-    auth::{get_account, get_accounts_file, load_accounts, load_app_settings},
+    auth::{
+        get_account, get_accounts_file, load_accounts, load_app_settings,
+        AUTH_REAUTH_REQUIRED_ERROR,
+    },
     commands::{
         is_codex_running_switch_block, restore_main_window, switch_account_by_id,
         window::TRAY_WINDOW,
     },
-    types::{AccountsStore, TrayDisplayMode, UsageInfo},
+    types::{AccountsStore, AuthState, TrayDisplayMode, UsageInfo},
 };
 
 static TRAY_USAGE: LazyLock<Mutex<HashMap<String, UsageInfo>>> =
@@ -191,7 +194,11 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, store: &AccountsStore) -> tauri::R
         )?;
     } else {
         for account in &store.accounts {
-            let label = format!("{}{}", account.name, usage_suffix(&account.id));
+            let label = if account.auth_state == AuthState::ReauthRequired {
+                format!("{} (session expired)", account.name)
+            } else {
+                format!("{}{}", account.name, usage_suffix(&account.id))
+            };
             let item =
                 CheckMenuItemBuilder::with_id(account_menu_id(&account.id), menu_label(&label))
                     .checked(store.active_account_id.as_deref() == Some(&account.id))
@@ -271,6 +278,8 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
                             error,
                         },
                     );
+                } else if error.starts_with(AUTH_REAUTH_REQUIRED_ERROR) {
+                    show_main_window(app);
                 }
                 return;
             }
@@ -298,6 +307,13 @@ fn refresh_menu_on_main_thread<R: Runtime>(app: &AppHandle<R>) {
     match load_accounts()
         .map_err(|error| error.to_string())
         .and_then(|store| {
+            if let Ok(mut cache) = TRAY_USAGE.lock() {
+                cache.retain(|account_id, _| {
+                    store.accounts.iter().any(|account| {
+                        account.id == *account_id && account.auth_state == AuthState::Ready
+                    })
+                });
+            }
             let settings = load_app_settings().unwrap_or_default();
             let title = active_tray_title(
                 store.active_account_id.as_deref(),
@@ -520,7 +536,8 @@ fn poll_active_account_usage<R: Runtime>(app: AppHandle<R>) {
         let account = load_accounts()
             .ok()
             .and_then(|store| store.active_account_id)
-            .and_then(|id| get_account(&id).ok().flatten());
+            .and_then(|id| get_account(&id).ok().flatten())
+            .filter(|account| account.auth_state == AuthState::Ready);
 
         if let Some(account) = account {
             match tauri::async_runtime::block_on(get_account_usage(&account)) {

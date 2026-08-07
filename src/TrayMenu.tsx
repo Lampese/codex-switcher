@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { AccountInfo, AccountUsageStats, DockDisplayMode, UsageInfo } from "./types";
 import { invokeBackend, isTauriRuntime } from "./lib/platform";
+import { LanguageToggle, useI18n } from "./lib/i18n";
 import {
   applyTheme,
   syncThemeFromStorage,
@@ -16,8 +17,8 @@ import {
 const TRAY_REFRESH_EVENT = "tray-refresh";
 const ACCOUNTS_CHANGED_EVENT = "accounts-changed";
 const SWITCH_ACCOUNT_BLOCKED_EVENT = "switch-account-blocked";
-// Mirrors the backend guard message in process.rs (ensure_codex_not_running).
-const CODEX_RUNNING_PREFIX = "Cannot switch accounts while";
+// Stable backend error code from process.rs (ensure_codex_not_running).
+const CODEX_RUNNING_PREFIX = "CODEX_RUNNING";
 
 function formatError(err: unknown): string {
   if (!err) return "Unknown error";
@@ -105,6 +106,7 @@ function retainUsageForAccounts(
 }
 
 function TrayMenu() {
+  const { t } = useI18n();
   const [accounts, setAccounts] = useState<AccountInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
@@ -117,8 +119,10 @@ function TrayMenu() {
 
   // Fetch each account's rate-limit usage in parallel; rows fill in as they land.
   const loadUsage = useCallback(async (list: AccountInfo[]) => {
+    const readyAccounts = list.filter((account) => account.auth_state === "ready");
+    setUsageById((prev) => retainUsageForAccounts(prev, readyAccounts));
     await Promise.all(
-      list.map(async (account) => {
+      readyAccounts.map(async (account) => {
         try {
           const usage = await invokeBackend<UsageInfo>("get_usage", {
             accountId: account.id,
@@ -150,6 +154,14 @@ function TrayMenu() {
   const loadActiveStats = useCallback(async (list: AccountInfo[]) => {
     const active = list.find((account) => account.is_active);
     if (!active) return;
+    if (active.auth_state === "reauth_required") {
+      setStatsById((prev) => {
+        const next = { ...prev };
+        delete next[active.id];
+        return next;
+      });
+      return;
+    }
 
     try {
       const stats = await invokeBackend<AccountUsageStats>("get_account_usage_stats", {
@@ -302,6 +314,11 @@ function TrayMenu() {
   }, [load]);
 
   const handleSwitch = useCallback(async (account: AccountInfo) => {
+    if (account.auth_state === "reauth_required") {
+      setError(t("sessionExpiredHint"));
+      void invokeBackend("open_main_window");
+      return;
+    }
     if (account.is_active) {
       void invokeBackend("hide_tray_window");
       return;
@@ -327,11 +344,16 @@ function TrayMenu() {
         void invokeBackend("open_main_window"); // focus main + hide tray
         return;
       }
+      if (message.includes("AUTH_REAUTH_REQUIRED")) {
+        setError(t("sessionExpiredHint"));
+        void invokeBackend("open_main_window");
+        return;
+      }
       setError(message);
     } finally {
       setSwitchingId(null);
     }
-  }, []);
+  }, [t]);
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden rounded-xl border border-gray-200 bg-white text-gray-900 shadow-2xl dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100">
@@ -340,13 +362,14 @@ function TrayMenu() {
           C
         </div>
         <span className="text-sm font-semibold">Codex Switcher</span>
+        <LanguageToggle compact />
         <button
           onClick={() => void handleAutoWarmupToggle()}
           disabled={accounts.length === 0}
           title={
             autoWarmupAllEnabled
-              ? "Disable auto warm-up for all accounts"
-              : "Enable auto warm-up for all accounts"
+              ? t("disableAutoAll")
+              : t("enableAutoAll")
           }
           className={`ml-auto rounded-md px-2 py-1 text-[11px] font-semibold transition-colors disabled:opacity-50 ${
             autoWarmupAllEnabled
@@ -354,12 +377,12 @@ function TrayMenu() {
               : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
           }`}
         >
-          Auto: {autoWarmupAllEnabled ? "on" : "off"}
+          {autoWarmupAllEnabled ? t("autoOn") : t("autoOff")}
         </button>
         <button
           onClick={() => void handleRefresh()}
           disabled={refreshing}
-          title="Refresh usage"
+          title={t("refreshUsage")}
           className="flex h-6 w-6 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 disabled:opacity-50 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
         >
           <span className={`text-base leading-none ${refreshing ? "inline-block animate-spin" : ""}`}>
@@ -371,27 +394,28 @@ function TrayMenu() {
       <div className="flex-1 overflow-y-auto p-1.5">
         {loading ? (
           <div className="px-2 py-6 text-center text-xs text-gray-500 dark:text-gray-400">
-            Loading...
+            {t("loading")}
           </div>
         ) : accounts.length === 0 ? (
           <div className="px-2 py-6 text-center text-xs text-gray-500 dark:text-gray-400">
-            No accounts configured
+            {t("noAccounts")}
           </div>
         ) : (
           accounts.map((account) => {
+            const requiresReauth = account.auth_state === "reauth_required";
             const plan = formatPlan(account.plan_type);
-            const usage = usageById[account.id];
-            const stats = statsById[account.id];
+            const usage = requiresReauth ? undefined : usageById[account.id];
+            const stats = requiresReauth ? undefined : statsById[account.id];
             const windows =
               usage && !usage.error
                 ? ([
                     {
-                      label: "Session",
+                      label: t("session"),
                       used: usage.primary_used_percent,
                       resetAt: usage.primary_resets_at,
                     },
                     {
-                      label: "Weekly",
+                      label: t("weekly"),
                       used: usage.secondary_used_percent,
                       resetAt: usage.secondary_resets_at,
                     },
@@ -408,7 +432,9 @@ function TrayMenu() {
                 onClick={() => void handleSwitch(account)}
                 disabled={switchingId !== null}
                 className={`flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors disabled:opacity-60 ${
-                  account.is_active
+                  requiresReauth
+                    ? "bg-red-50 dark:bg-red-950/30"
+                    : account.is_active
                     ? "bg-gray-100 dark:bg-gray-800"
                     : "hover:bg-gray-100 dark:hover:bg-gray-800"
                 }`}
@@ -416,7 +442,7 @@ function TrayMenu() {
                 <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center">
                   {account.is_active && (
                     <svg
-                      className="h-4 w-4 text-emerald-500"
+                      className={`h-4 w-4 ${requiresReauth ? "text-red-500" : "text-emerald-500"}`}
                       viewBox="0 0 20 20"
                       fill="currentColor"
                     >
@@ -439,7 +465,11 @@ function TrayMenu() {
                       </span>
                     )}
                   </span>
-                  {windows.length > 0 ? (
+                  {requiresReauth ? (
+                    <span className="block truncate text-xs text-red-500 dark:text-red-400">
+                      {t("sessionExpired")}
+                    </span>
+                  ) : windows.length > 0 ? (
                     <span className="mt-1.5 block space-y-1.5">
                       {windows.map((w) => {
                         const remaining = Math.max(0, 100 - w.used);
@@ -463,11 +493,11 @@ function TrayMenu() {
                             </span>
                             <span className="mt-0.5 flex justify-between text-[11px] text-gray-500 dark:text-gray-400">
                               <span className={tone.text}>
-                                {remaining.toFixed(0)}% left
+                                {remaining.toFixed(0)}% {t("left")}
                               </span>
                               {reset && (
                                 <span>
-                                  {reset === "now" ? "Resets now" : `Resets in ${reset}`}
+                                  {reset === "now" ? t("resetsNowShort") : t("resetsIn", { value: reset })}
                                 </span>
                               )}
                             </span>
@@ -477,7 +507,7 @@ function TrayMenu() {
                     </span>
                   ) : usage?.error ? (
                     <span className="block truncate text-xs text-red-500 dark:text-red-400">
-                      Usage unavailable
+                      {t("usageUnavailableShort")}
                     </span>
                   ) : account.email ? (
                     <span className="block truncate text-xs text-gray-500 dark:text-gray-400">
@@ -490,13 +520,13 @@ function TrayMenu() {
                         <span className="block font-medium text-gray-900 dark:text-gray-100">
                           {formatTokens(sumDailyTokens(stats, 1))}
                         </span>
-                        <span>today</span>
+                        <span>{t("today")}</span>
                       </span>
                       <span className="rounded-md bg-white px-2 py-1 text-[11px] text-gray-600 shadow-sm dark:bg-gray-950 dark:text-gray-300">
                         <span className="block font-medium text-gray-900 dark:text-gray-100">
                           {formatTokens(sumDailyTokens(stats, 7))}
                         </span>
-                        <span>last 7 days</span>
+                        <span>{t("last7Short")}</span>
                       </span>
                     </span>
                   )}
@@ -519,7 +549,7 @@ function TrayMenu() {
       {dockDisplayMode && (
         <div className="flex items-center gap-1 border-t border-gray-100 px-1.5 py-1.5 dark:border-gray-800">
           <span className="px-1.5 text-[11px] font-medium text-gray-500 dark:text-gray-400">
-            Dock
+            {t("dock")}
           </span>
           <button
             onClick={() => void handleDockDisplayMode("show_in_dock")}
@@ -529,7 +559,7 @@ function TrayMenu() {
                 : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
             }`}
           >
-            Show
+            {t("show")}
           </button>
           <button
             onClick={() => void handleDockDisplayMode("menu_bar_only")}
@@ -539,7 +569,7 @@ function TrayMenu() {
                 : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
             }`}
           >
-            Menu Bar
+            {t("menuBar")}
           </button>
         </div>
       )}
@@ -549,13 +579,13 @@ function TrayMenu() {
           onClick={() => void invokeBackend("open_main_window")}
           className="flex-1 rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-gray-100 dark:hover:bg-gray-800"
         >
-          Open Codex Switcher
+          {t("openSwitcher")}
         </button>
         <button
           onClick={() => void invokeBackend("quit_app")}
           className="rounded-lg px-2 py-1.5 text-sm text-gray-500 transition-colors hover:bg-gray-100 hover:text-red-600 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-red-400"
         >
-          Quit
+          {t("quit")}
         </button>
       </div>
     </div>
