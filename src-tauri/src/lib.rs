@@ -24,6 +24,8 @@ use tauri::Emitter;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let account_store_runtime =
+        auth::initialize_accounts().expect("failed to initialize account store");
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -107,4 +109,7 @@ pub fn run() {
                 commands::restore_main_window(_app);
             }
         });
+    account_store_runtime
+        .shutdown()
+        .expect("failed to shut down account store");
 }

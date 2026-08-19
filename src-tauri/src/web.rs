@@ -72,6 +72,7 @@ struct FileImportArgs {
 }
 
 pub fn run_lan_server(host: &str, port: u16) -> anyhow::Result<()> {
+    let account_store_runtime = crate::auth::initialize_accounts()?;
     let address = format!("{host}:{port}");
     let server = Server::http(&address)
         .map_err(|err| anyhow::anyhow!("Failed to bind HTTP server on {address}: {err}"))?;
@@ -89,6 +90,7 @@ pub fn run_lan_server(host: &str, port: u16) -> anyhow::Result<()> {
         }
     }
 
+    account_store_runtime.shutdown()?;
     Ok(())
 }
 

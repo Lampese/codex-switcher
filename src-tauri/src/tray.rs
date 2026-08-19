@@ -259,24 +259,25 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
                 return;
             }
 
-            if let Err(error) = switch_account_by_id(account_id) {
-                eprintln!("Failed to switch account from tray: {error}");
-                refresh_menu(app);
-                if is_codex_running_switch_block(&error) {
-                    show_main_window(app);
-                    let _ = app.emit(
-                        SWITCH_ACCOUNT_BLOCKED_EVENT,
-                        SwitchAccountBlockedPayload {
-                            account_id: account_id.to_string(),
-                            error,
-                        },
-                    );
+            let app = app.clone();
+            let account_id = account_id.to_string();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = switch_account_by_id(&account_id).await {
+                    eprintln!("Failed to switch account from tray: {error}");
+                    refresh_menu(&app);
+                    if is_codex_running_switch_block(&error) {
+                        show_main_window(&app);
+                        let _ = app.emit(
+                            SWITCH_ACCOUNT_BLOCKED_EVENT,
+                            SwitchAccountBlockedPayload { account_id, error },
+                        );
+                    }
+                    return;
                 }
-                return;
-            }
 
-            refresh_menu(app);
-            let _ = app.emit(ACCOUNTS_CHANGED_EVENT, ());
+                refresh_menu(&app);
+                let _ = app.emit(ACCOUNTS_CHANGED_EVENT, ());
+            });
         }
     }
 }
