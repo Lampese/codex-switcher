@@ -11,10 +11,14 @@ name = "codex_switcher_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "=2.5.6", features = [] }
 
 [dependencies]
-tauri = { version = "2.10", features = ["tray-icon", "macos-private-api"] }
+tauri = { version = "=2.10.3", features = ["tray-icon", "macos-private-api"] }
+# Tauri 2.11's window runtime regresses the macOS status-item popup. Keep the
+# transitive runtime from independently crossing that compatibility boundary.
+tauri-runtime = "=2.10.1"
+tauri-runtime-wry = "=2.10.1"
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2.6"
 tauri-plugin-process = "2"
@@ -41,4 +45,12 @@ chacha20poly1305 = "0.10"
 pbkdf2 = "0.12"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+  "std",
+  "AppKitDefines",
+  "NSEvent",
+  "NSScreen",
+  "NSWindow",
+] }
 plist = "1"

@@ -1963,7 +1963,7 @@ function App() {
             </div>
             <div className="p-5 space-y-4">
               <p className="text-sm text-gray-600 dark:text-gray-300">
-                When the window is closed, Codex Switcher can stay in the Dock or live only in the menu bar.
+                When the window is closed, Codex Switcher can stay in the Dock, live only in the menu bar, or quit completely.
               </p>
               <p className="text-sm text-gray-600 dark:text-gray-300">
                 You can always change this later from the tray popup.
@@ -1999,6 +1999,13 @@ function App() {
                 className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors disabled:opacity-50"
               >
                 Menu Bar Only
+              </button>
+              <button
+                onClick={() => void invokeBackend("quit_app")}
+                disabled={isCompletingCloseBehavior}
+                className="px-4 py-2.5 text-sm font-medium rounded-lg bg-red-600 hover:bg-red-700 text-white transition-colors disabled:opacity-50"
+              >
+                Quit Codex Switcher
               </button>
             </div>
           </div>
