@@ -212,6 +212,77 @@ pub async fn create_chatgpt_account_from_refresh_token(
     ))
 }
 
+fn account_identity(account: &StoredAccount) -> Option<String> {
+    match &account.auth_data {
+        AuthData::ApiKey { .. } => None,
+        AuthData::ChatGPT {
+            id_token,
+            account_id,
+            ..
+        } => account_id
+            .clone()
+            .or_else(|| parse_chatgpt_id_token_claims(id_token).account_id),
+    }
+}
+
+fn refresh_error_invalidates_saved_session(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}").to_lowercase();
+    message.contains("refresh_token_invalidated")
+        || message.contains("refresh_token_reused")
+        || message.contains("your session has ended")
+}
+
+/// Decide whether replacing a duplicate account should require user confirmation.
+///
+/// Verify the stored refresh token once even when the current access token still
+/// works. A successful refresh means the saved session is genuinely healthy, while
+/// terminal OAuth errors such as refresh_token_invalidated/reused mean it is stale
+/// and can be replaced automatically. Transient/unknown failures stay conservative
+/// and ask before overwriting credentials.
+pub async fn duplicate_account_requires_confirmation(candidate: &StoredAccount) -> Result<bool> {
+    let store = load_accounts()?;
+    let Some(existing) = store
+        .accounts
+        .iter()
+        .find(|account| account.name == candidate.name)
+        .cloned()
+    else {
+        return Ok(false);
+    };
+
+    // Same display name but a known different ChatGPT identity is not a stale
+    // re-login of the same account. Never replace that silently.
+    if let (Some(existing_id), Some(candidate_id)) =
+        (account_identity(&existing), account_identity(candidate))
+    {
+        if existing_id != candidate_id {
+            return Ok(true);
+        }
+    }
+
+    if matches!(existing.auth_data, AuthData::ApiKey { .. }) {
+        return Ok(true);
+    }
+
+    match refresh_chatgpt_tokens(&existing).await {
+        Ok(_) => Ok(true),
+        Err(error) if refresh_error_invalidates_saved_session(&error) => {
+            eprintln!(
+                "[Auth] Existing duplicate account {} has a stale OAuth session; replacing without confirmation: {error:#}",
+                existing.name
+            );
+            Ok(false)
+        }
+        Err(error) => {
+            eprintln!(
+                "[Auth] Could not verify duplicate account {} because refresh failed transiently/unknown; asking before replacement: {error:#}",
+                existing.name
+            );
+            Ok(true)
+        }
+    }
+}
+
 fn chatgpt_tokens_need_refresh(account: &StoredAccount) -> bool {
     match &account.auth_data {
         AuthData::ApiKey { .. } => false,
@@ -350,7 +421,8 @@ async fn refresh_tokens_with_refresh_token(refresh_token: &str) -> Result<Refres
 mod tests {
     use super::{
         chatgpt_tokens_need_refresh, chatgpt_tokens_need_refresh_at, merge_refresh_response,
-        reconcile_active_account_from_auth, resolve_refreshed_id_token, RefreshTokenResponse,
+        reconcile_active_account_from_auth, refresh_error_invalidates_saved_session,
+        resolve_refreshed_id_token, RefreshTokenResponse,
     };
     use crate::types::{AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData};
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -365,6 +437,21 @@ mod tests {
             r#"{{"exp":{exp},"https://api.openai.com/auth":{{"chatgpt_account_id":"{account_id}"}}}}"#
         ));
         format!("header.{payload}.{signature}")
+    }
+
+    #[test]
+    fn terminal_refresh_errors_mark_saved_session_as_stale() {
+        let invalidated = anyhow::Error::msg(
+            r#"Token refresh failed: 401 Unauthorized - {"error":{"code":"refresh_token_invalidated"}}"#,
+        );
+        let reused = anyhow::Error::msg(
+            r#"Token refresh failed: 401 Unauthorized - {"error":{"code":"refresh_token_reused"}}"#,
+        );
+        let transient = anyhow::anyhow!("Failed to send token refresh request: timed out");
+
+        assert!(refresh_error_invalidates_saved_session(&invalidated));
+        assert!(refresh_error_invalidates_saved_session(&reused));
+        assert!(!refresh_error_invalidates_saved_session(&transient));
     }
 
     #[test]

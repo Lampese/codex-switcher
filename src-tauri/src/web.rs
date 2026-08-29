@@ -53,9 +53,12 @@ struct MaskedIdsArgs {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct UploadAuthJsonArgs {
     name: String,
     contents: String,
+    #[serde(default, alias = "force_replace")]
+    force_replace: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,9 +69,19 @@ struct UploadEncryptedArgs {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct FileImportArgs {
     path: String,
     name: String,
+    #[serde(default, alias = "force_replace")]
+    force_replace: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompleteLoginArgs {
+    #[serde(default, alias = "force_replace")]
+    force_replace: Option<bool>,
 }
 
 pub fn run_lan_server(host: &str, port: u16) -> anyhow::Result<()> {
@@ -132,11 +145,14 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
         "get_active_account_info" => to_json(get_active_account_info().await?),
         "add_account_from_file" => {
             let args: FileImportArgs = parse_args(payload)?;
-            to_json(add_account_from_file(args.path, args.name).await?)
+            to_json(add_account_from_file(args.path, args.name, args.force_replace).await?)
         }
         "add_account_from_auth_json_text" => {
             let args: UploadAuthJsonArgs = parse_args(payload)?;
-            to_json(add_account_from_auth_json_text(args.name, args.contents).await?)
+            to_json(
+                add_account_from_auth_json_text(args.name, args.contents, args.force_replace)
+                    .await?,
+            )
         }
         "get_usage" => {
             let args: AccountIdArgs = parse_args(payload)?;
@@ -172,7 +188,14 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
             let args: LoginArgs = parse_args(payload)?;
             to_json(start_login(args.account_name).await?)
         }
-        "complete_login" => to_json(complete_login().await?),
+        "complete_login" => {
+            let args = if payload.is_null() {
+                CompleteLoginArgs::default()
+            } else {
+                parse_args(payload)?
+            };
+            to_json(complete_login(args.force_replace).await?)
+        }
         "cancel_login" => to_json(cancel_login().await?),
         "export_accounts_slim_text" => to_json(export_accounts_slim_text().await?),
         "import_accounts_slim_text" => {

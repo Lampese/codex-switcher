@@ -1,10 +1,12 @@
 //! Account management Tauri commands
 
 use crate::auth::{
-    add_account, create_chatgpt_account_from_refresh_token, ensure_chatgpt_tokens_fresh_locked,
+    add_or_replace_account, create_chatgpt_account_from_refresh_token,
+    duplicate_account_requires_confirmation, ensure_chatgpt_tokens_fresh_locked,
     get_active_account, import_from_auth_json, import_from_auth_json_contents, load_accounts,
     read_current_auth, remove_account, save_accounts, set_active_account, switch_to_account,
-    sync_active_account_tokens, touch_account, AUTH_OPERATION_LOCK,
+    sync_active_account_tokens, touch_account, ACCOUNT_REPLACE_CONFIRMATION_PREFIX,
+    AUTH_OPERATION_LOCK,
 };
 use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
 
@@ -99,12 +101,27 @@ pub async fn get_active_account_info() -> Result<Option<AccountInfo>, String> {
 
 /// Add an account from an auth.json file
 #[tauri::command]
-pub async fn add_account_from_file(path: String, name: String) -> Result<AccountInfo, String> {
+pub async fn add_account_from_file(
+    path: String,
+    name: String,
+    force_replace: Option<bool>,
+) -> Result<AccountInfo, String> {
     // Import from the file
     let account = import_from_auth_json(&path, name).map_err(|e| e.to_string())?;
 
-    // Add to storage
-    let stored = add_account(account).map_err(|e| e.to_string())?;
+    let force_replace = force_replace.unwrap_or(false);
+    if !force_replace
+        && duplicate_account_requires_confirmation(&account)
+            .await
+            .map_err(|e| e.to_string())?
+    {
+        return Err(format!(
+            "{ACCOUNT_REPLACE_CONFIRMATION_PREFIX}{}",
+            account.name
+        ));
+    }
+
+    let stored = add_or_replace_account(account, true).map_err(|e| e.to_string())?;
 
     let store = load_accounts().map_err(|e| e.to_string())?;
     let active_id = store.active_account_id.as_deref();
@@ -116,9 +133,22 @@ pub async fn add_account_from_file(path: String, name: String) -> Result<Account
 pub async fn add_account_from_auth_json_text(
     name: String,
     contents: String,
+    force_replace: Option<bool>,
 ) -> Result<AccountInfo, String> {
     let account = import_from_auth_json_contents(&contents, name).map_err(|e| e.to_string())?;
-    let stored = add_account(account).map_err(|e| e.to_string())?;
+    let force_replace = force_replace.unwrap_or(false);
+    if !force_replace
+        && duplicate_account_requires_confirmation(&account)
+            .await
+            .map_err(|e| e.to_string())?
+    {
+        return Err(format!(
+            "{ACCOUNT_REPLACE_CONFIRMATION_PREFIX}{}",
+            account.name
+        ));
+    }
+
+    let stored = add_or_replace_account(account, true).map_err(|e| e.to_string())?;
 
     let store = load_accounts().map_err(|e| e.to_string())?;
     let active_id = store.active_account_id.as_deref();
