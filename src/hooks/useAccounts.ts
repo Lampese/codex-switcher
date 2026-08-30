@@ -246,8 +246,19 @@ export function useAccounts() {
   const deleteAccount = useCallback(
     async (accountId: string) => {
       try {
+        const deletedAccount = accountsRef.current.find((account) => account.id === accountId);
         await invokeBackend("delete_account", { accountId });
-        await loadAccounts();
+
+        if (deletedAccount && !deletedAccount.is_active) {
+          // Deleting an inactive account does not change any other account. Keep
+          // their already-fetched usage in place instead of rebuilding the list.
+          setAccounts((prev) => prev.filter((account) => account.id !== accountId));
+          return;
+        }
+
+        // Removing the active account can make another account active on the
+        // backend. Re-read account metadata, but never discard cached usage.
+        await loadAccounts(true);
       } catch (err) {
         throw err;
       }
