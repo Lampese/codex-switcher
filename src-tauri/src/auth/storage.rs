@@ -165,6 +165,15 @@ pub fn save_accounts(store: &AccountsStore) -> Result<()> {
 pub fn add_account(account: StoredAccount) -> Result<StoredAccount> {
     let mut store = load_accounts()?;
 
+    let stored = add_account_to_store(&mut store, account)?;
+    save_accounts(&store)?;
+    Ok(stored)
+}
+
+fn add_account_to_store(
+    store: &mut AccountsStore,
+    account: StoredAccount,
+) -> Result<StoredAccount> {
     // Check for duplicate names
     if store.accounts.iter().any(|a| a.name == account.name) {
         anyhow::bail!("An account with name '{}' already exists", account.name);
@@ -172,13 +181,6 @@ pub fn add_account(account: StoredAccount) -> Result<StoredAccount> {
 
     let account_clone = account.clone();
     store.accounts.push(account);
-
-    // If this is the first account, make it active
-    if store.accounts.len() == 1 {
-        store.active_account_id = Some(account_clone.id.clone());
-    }
-
-    save_accounts(&store)?;
     Ok(account_clone)
 }
 
@@ -364,7 +366,7 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::sync_active_account_tokens;
+    use super::{add_account_to_store, sync_active_account_tokens};
     use crate::types::{AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData};
     use base64::Engine;
 
@@ -406,6 +408,32 @@ mod tests {
             format!(r#"{{"https://api.openai.com/auth":{{"chatgpt_account_id":"{account_id}"}}}}"#);
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
         format!("header.{encoded}.{suffix}")
+    }
+
+    #[test]
+    fn adding_account_does_not_change_the_active_account() {
+        let active = StoredAccount::new_api_key("A".into(), "sk-a".into());
+        let active_id = active.id.clone();
+        let stores = [
+            AccountsStore::default(),
+            AccountsStore {
+                accounts: vec![active],
+                active_account_id: Some(active_id),
+                ..AccountsStore::default()
+            },
+        ];
+
+        for mut store in stores {
+            let expected_active_id = store.active_account_id.clone();
+
+            add_account_to_store(
+                &mut store,
+                StoredAccount::new_api_key("B".into(), "sk-b".into()),
+            )
+            .unwrap();
+
+            assert_eq!(store.active_account_id, expected_active_id);
+        }
     }
 
     #[test]
