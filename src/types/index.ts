@@ -30,6 +30,23 @@ export interface UsageInfo {
   error: string | null;
 }
 
+export interface CursorAccountInfo {
+  id: string;
+  name: string;
+  email: string | null;
+  plan_type: string | null;
+  is_connected: boolean;
+}
+
+export interface AppSettings {
+  tray_display_mode: "icon_and_session" | "active_usage_text" | "hidden";
+  dock_display_mode: DockDisplayMode;
+  close_behavior_prompt_enabled: boolean;
+  floating_panel_enabled: boolean;
+  floating_account_ids: string[];
+  floating_show_reset_times: boolean;
+}
+
 export interface AccountUsageSummary {
   lifetime_tokens: number | null;
   peak_daily_tokens: number | null;
