@@ -26,6 +26,20 @@ struct RefreshTokenResponse {
     refresh_token: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct RefreshTokenErrorResponse {
+    #[serde(default)]
+    error: Option<RefreshTokenErrorDetails>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RefreshTokenErrorDetails {
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+}
+
 #[derive(Debug)]
 struct TokenRefreshUpdate {
     id_token: String,
@@ -34,20 +48,52 @@ struct TokenRefreshUpdate {
     id_token_error: Option<anyhow::Error>,
 }
 
-/// Ensure the account has non-expired ChatGPT OAuth tokens.
-/// Returns an updated account when a refresh was performed.
+/// Ensure the account has a usable ChatGPT access token for background API calls.
+///
+/// Usage polling and warm-up do not need a fresh ID token. Refreshing only because
+/// an ID token expired can unnecessarily consume a single-use refresh token while
+/// the access token and the live Codex session are still perfectly valid.
 pub async fn ensure_chatgpt_tokens_fresh(account: &StoredAccount) -> Result<StoredAccount> {
-    if !chatgpt_tokens_need_refresh(account) {
+    if !chatgpt_access_token_needs_refresh(account) {
         return Ok(account.clone());
     }
 
     let _auth_guard = AUTH_OPERATION_LOCK.lock().await;
-    ensure_chatgpt_tokens_fresh_locked(account).await
+    ensure_chatgpt_tokens_fresh_with_policy_locked(account, false).await
 }
 
-/// Ensure ChatGPT OAuth tokens are fresh while the caller holds AUTH_OPERATION_LOCK.
+/// Ensure the full ChatGPT OAuth token set is fresh while the caller holds
+/// AUTH_OPERATION_LOCK. Account switching still needs a fresh ID token because
+/// Codex can reject auth.json when its ID token is expired.
 pub(crate) async fn ensure_chatgpt_tokens_fresh_locked(
     account: &StoredAccount,
+) -> Result<StoredAccount> {
+    match ensure_chatgpt_tokens_fresh_with_policy_locked(account, true).await {
+        Ok(account) => Ok(account),
+        Err(refresh_error) => {
+            // A stale/invalidated refresh token must not make the Switch button
+            // unusable while the stored access token is still accepted. We still
+            // prefer a full refresh first (fresh ID token is best for Codex), but
+            // if that cannot be done, fall back to the latest stored/live account
+            // as long as its access token is still usable.
+            let (fallback, _) = load_account_reconciling_live_auth(&account.id)?;
+            if can_switch_with_existing_access_token(&fallback) {
+                eprintln!(
+                    "[Auth] Full OAuth refresh failed before switch for account {}: {refresh_error:#}. \
+Proceeding with the existing usable access token.",
+                    fallback.name
+                );
+                Ok(fallback)
+            } else {
+                Err(refresh_error)
+            }
+        }
+    }
+}
+
+async fn ensure_chatgpt_tokens_fresh_with_policy_locked(
+    account: &StoredAccount,
+    require_fresh_id_token: bool,
 ) -> Result<StoredAccount> {
     if matches!(account.auth_data, AuthData::ApiKey { .. }) {
         return Ok(account.clone());
@@ -64,9 +110,20 @@ pub(crate) async fn ensure_chatgpt_tokens_fresh_locked(
             access_token,
             ..
         } => {
-            if chatgpt_tokens_need_refresh_at(id_token, access_token, Utc::now().timestamp()) {
+            let needs_refresh = if require_fresh_id_token {
+                chatgpt_tokens_need_refresh_at(id_token, access_token, Utc::now().timestamp())
+            } else {
+                token_expired_or_near_expiry_at(access_token, Utc::now().timestamp())
+            };
+
+            if needs_refresh {
+                let reason = if require_fresh_id_token {
+                    "OAuth token"
+                } else {
+                    "access token"
+                };
                 println!(
-                    "[Auth] OAuth token expired/near expiry for account {}, refreshing",
+                    "[Auth] {reason} expired/near expiry for account {}, refreshing",
                     current.name
                 );
                 refresh_chatgpt_tokens_locked(&current).await
@@ -212,6 +269,19 @@ pub async fn create_chatgpt_account_from_refresh_token(
     ))
 }
 
+fn chatgpt_access_token_needs_refresh(account: &StoredAccount) -> bool {
+    match &account.auth_data {
+        AuthData::ApiKey { .. } => false,
+        AuthData::ChatGPT { access_token, .. } => {
+            token_expired_or_near_expiry_at(access_token, Utc::now().timestamp())
+        }
+    }
+}
+
+fn can_switch_with_existing_access_token(account: &StoredAccount) -> bool {
+    !chatgpt_access_token_needs_refresh(account)
+}
+
 fn chatgpt_tokens_need_refresh(account: &StoredAccount) -> bool {
     match &account.auth_data {
         AuthData::ApiKey { .. } => false,
@@ -293,6 +363,30 @@ fn parse_jwt_exp(token: &str) -> Option<i64> {
     json.get("exp").and_then(|v| v.as_i64())
 }
 
+fn format_token_refresh_error(status: reqwest::StatusCode, body: &str) -> String {
+    let parsed = serde_json::from_str::<RefreshTokenErrorResponse>(body).ok();
+    let details = parsed.as_ref().and_then(|payload| payload.error.as_ref());
+    let code = details.and_then(|error| error.code.as_deref());
+
+    match code {
+        Some("refresh_token_invalidated") => {
+            "Session expired. Re-authenticate this account.".to_string()
+        }
+        Some("refresh_token_reused") => {
+            "Session expired. Re-authenticate this account.".to_string()
+        }
+        _ => {
+            if let Some(message) = details.and_then(|error| error.message.as_deref()) {
+                format!("Could not refresh the saved Codex Switcher session ({status}). {message}")
+            } else {
+                format!(
+                    "Could not refresh the saved Codex Switcher session ({status}). Please try again."
+                )
+            }
+        }
+    }
+}
+
 async fn refresh_tokens_with_refresh_token(refresh_token: &str) -> Result<RefreshTokenResponse> {
     let client = reqwest::Client::new();
     let body = format!(
@@ -337,7 +431,8 @@ async fn refresh_tokens_with_refresh_token(refresh_token: &str) -> Result<Refres
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("Token refresh failed: {status} - {body}");
+        eprintln!("[Auth] Token refresh failed: {status} - {body}");
+        anyhow::bail!("{}", format_token_refresh_error(status, &body));
     }
 
     response
@@ -349,7 +444,9 @@ async fn refresh_tokens_with_refresh_token(refresh_token: &str) -> Result<Refres
 #[cfg(test)]
 mod tests {
     use super::{
-        chatgpt_tokens_need_refresh, chatgpt_tokens_need_refresh_at, merge_refresh_response,
+        can_switch_with_existing_access_token, chatgpt_access_token_needs_refresh,
+        chatgpt_tokens_need_refresh,
+        chatgpt_tokens_need_refresh_at, format_token_refresh_error, merge_refresh_response,
         reconcile_active_account_from_auth, resolve_refreshed_id_token, RefreshTokenResponse,
     };
     use crate::types::{AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData};
@@ -368,7 +465,59 @@ mod tests {
     }
 
     #[test]
-    fn refresh_required_when_id_token_expired_but_access_token_valid() {
+    fn background_refresh_ignores_expired_id_token_when_access_token_is_valid() {
+        let now = chrono::Utc::now().timestamp();
+        let account = StoredAccount::new_chatgpt(
+            "Background".into(),
+            None,
+            None,
+            None,
+            jwt_with_exp(now - 3_600),
+            jwt_with_exp(now + 3_600),
+            "refresh".into(),
+            None,
+        );
+
+        assert!(!chatgpt_access_token_needs_refresh(&account));
+        assert!(chatgpt_tokens_need_refresh(&account));
+    }
+
+    #[test]
+    fn switch_fallback_allows_valid_access_token_when_full_refresh_fails() {
+        let now = chrono::Utc::now().timestamp();
+        let account = StoredAccount::new_chatgpt(
+            "Switch fallback".into(),
+            None,
+            None,
+            None,
+            jwt_with_exp(now - 3_600),
+            jwt_with_exp(now + 3_600),
+            "stale-refresh".into(),
+            None,
+        );
+
+        assert!(can_switch_with_existing_access_token(&account));
+    }
+
+    #[test]
+    fn switch_fallback_rejects_expired_access_token() {
+        let now = chrono::Utc::now().timestamp();
+        let account = StoredAccount::new_chatgpt(
+            "Expired access".into(),
+            None,
+            None,
+            None,
+            jwt_with_exp(now - 3_600),
+            jwt_with_exp(now - 3_600),
+            "stale-refresh".into(),
+            None,
+        );
+
+        assert!(!can_switch_with_existing_access_token(&account));
+    }
+
+    #[test]
+    fn refresh_required_when_id_token_expired_but_access_token_valid_for_switching() {
         let now = 1_800_000_000;
         let id_token = jwt_with_exp(now - 3_600);
         let access_token = jwt_with_exp(now + 3_600);
@@ -530,5 +679,23 @@ mod tests {
         assert_eq!(update.id_token, current_id_token);
         assert_eq!(update.refresh_token, "rotated-refresh");
         assert!(update.id_token_error.is_some());
+    }
+
+    #[test]
+    fn refresh_token_invalidated_error_is_human_readable() {
+        let body = r#"{"error":{"message":"Your session has ended. Please log in again.","type":"invalid_request_error","param":null,"code":"refresh_token_invalidated"}}"#;
+        let message = format_token_refresh_error(reqwest::StatusCode::UNAUTHORIZED, body);
+
+        assert_eq!(message, "Session expired. Re-authenticate this account.");
+        assert!(!message.contains("{\"error\""));
+    }
+
+    #[test]
+    fn refresh_token_reused_error_is_human_readable() {
+        let body = r#"{"error":{"message":"already used","code":"refresh_token_reused"}}"#;
+        let message = format_token_refresh_error(reqwest::StatusCode::UNAUTHORIZED, body);
+
+        assert_eq!(message, "Session expired. Re-authenticate this account.");
+        assert!(!message.contains("{\"error\""));
     }
 }
