@@ -9,6 +9,28 @@
   Easily switch between accounts, monitor usage, schedule warm-ups, and stay in control of your quota
 </p>
 
+## Unofficial Cursor Integration Disclaimer
+
+The Cursor integration in this branch is a community contribution. It is not
+affiliated with, endorsed by, or supported by the original Codex Switcher
+maintainers, OpenAI, or Cursor. Use it only with accounts you own and in
+accordance with each provider's terms. The integration reads Cursor's local
+session database in read-only mode and sends the resulting short-lived session
+only to Cursor-owned endpoints; it does not persist Cursor passwords or access
+tokens.
+
+The upstream repository currently declares no software license. This GitHub
+fork and branch are provided only for upstream review and contribution through
+GitHub's fork and pull-request workflow. They do not claim or grant independent
+permission to redistribute the upstream source or compiled binaries. No public
+binary release is provided from this fork.
+
+## AI-Assisted Development Disclosure
+
+The Cursor integration in this fork was primarily implemented by OpenAI's
+GPT-5.6 SOL. Human maintainers provide the product requirements, scope
+decisions, review, and final acceptance.
+
 ## Features
 
 - **Multi-Account Management** – Add, rename, mask, import, export, and manage multiple Codex accounts in one place
@@ -22,6 +44,8 @@
 - **Rate-Limit Monitoring** – View real-time 5-hour session and weekly usage, reset timing, credits, and subscription expiry
 - **Blocked Switch Recovery** – Detect running Codex sessions and offer a force-close flow before retrying the account switch
 - **Dual Login Mode** – Authenticate with ChatGPT OAuth or import existing `auth.json` files
+- **Cursor Account Integration** – Detect a signed-in Cursor account without storing its password or access token
+- **Resizable Floating Panel** – Pin, drag, resize, and filter the existing tray popup without adding a separate UI surface
 
 ## Installation
 

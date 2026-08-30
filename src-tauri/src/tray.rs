@@ -37,6 +37,8 @@ const OPEN_ITEM_ID: &str = "open";
 const QUIT_ITEM_ID: &str = "quit";
 const TRAY_WIDTH: f64 = 300.0;
 const TRAY_HEIGHT: f64 = 420.0;
+const TRAY_MIN_WIDTH: f64 = 280.0;
+const TRAY_MIN_HEIGHT: f64 = 300.0;
 
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -109,7 +111,8 @@ fn create_tray_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let window = WebviewWindowBuilder::new(app, TRAY_WINDOW, WebviewUrl::App("tray.html".into()))
         .title("Codex Switcher")
         .inner_size(TRAY_WIDTH, TRAY_HEIGHT)
-        .resizable(false)
+        .min_inner_size(TRAY_MIN_WIDTH, TRAY_MIN_HEIGHT)
+        .resizable(true)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
@@ -117,12 +120,18 @@ fn create_tray_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .visible(false)
         .build()?;
 
-    // Hide the popup as soon as it loses focus so it behaves like a native menu.
+    // In normal mode this behaves like a native popup. Floating mode deliberately
+    // keeps this same panel visible; it does not create a second UI surface.
     let app_handle = app.clone();
     window.on_window_event(move |event| {
         if let WindowEvent::Focused(false) = event {
-            if let Some(window) = app_handle.get_webview_window(TRAY_WINDOW) {
-                let _ = window.hide();
+            let pinned = crate::auth::load_app_settings()
+                .map(|settings| settings.floating_panel_enabled)
+                .unwrap_or(false);
+            if !pinned {
+                if let Some(window) = app_handle.get_webview_window(TRAY_WINDOW) {
+                    let _ = window.hide();
+                }
             }
         }
     });
@@ -149,12 +158,17 @@ fn toggle_tray_window<R: Runtime>(app: &AppHandle<R>, cursor: PhysicalPosition<f
         return;
     };
 
-    if window.is_visible().unwrap_or(false) {
+    let pinned = crate::auth::load_app_settings()
+        .map(|settings| settings.floating_panel_enabled)
+        .unwrap_or(false);
+    if window.is_visible().unwrap_or(false) && !pinned {
         let _ = window.hide();
         return;
     }
 
-    position_near_cursor(&window, cursor);
+    if !pinned {
+        position_near_cursor(&window, cursor);
+    }
     let _ = window.show();
     let _ = window.set_focus();
     let _ = app.emit_to(TRAY_WINDOW, TRAY_REFRESH_EVENT, ());
@@ -405,14 +419,12 @@ fn active_usage_title(active_account_id: Option<&str>) -> String {
         .and_then(|cache| cache.get(active_account_id).cloned());
 
     match usage {
-        Some(usage) if usage.error.is_none() => {
-            usage_title(
-                usage.primary_used_percent,
-                usage.primary_window_minutes,
-                usage.secondary_used_percent,
-                usage.secondary_window_minutes,
-            )
-        }
+        Some(usage) if usage.error.is_none() => usage_title(
+            usage.primary_used_percent,
+            usage.primary_window_minutes,
+            usage.secondary_used_percent,
+            usage.secondary_window_minutes,
+        ),
         _ => "H:-- W:--".to_string(),
     }
 }
@@ -425,13 +437,13 @@ fn usage_title(
 ) -> String {
     let mut parts = Vec::new();
     if let Some(remaining) = remaining_percent_label(primary_used_percent) {
-        let label = window_duration_label(primary_window_minutes)
-            .unwrap_or_else(|| "H".to_string());
+        let label =
+            window_duration_label(primary_window_minutes).unwrap_or_else(|| "H".to_string());
         parts.push(format!("{label}:{remaining}"));
     }
     if let Some(remaining) = remaining_percent_label(secondary_used_percent) {
-        let label = window_duration_label(secondary_window_minutes)
-            .unwrap_or_else(|| "W".to_string());
+        let label =
+            window_duration_label(secondary_window_minutes).unwrap_or_else(|| "W".to_string());
         parts.push(format!("{label}:{remaining}"));
     }
 
@@ -485,8 +497,8 @@ fn usage_suffix(account_id: &str) -> String {
 
     let mut parts = Vec::new();
     if let Some(remaining) = session_remaining_title(usage.primary_used_percent, false) {
-        let label = window_duration_label(usage.primary_window_minutes)
-            .unwrap_or_else(|| "S".to_string());
+        let label =
+            window_duration_label(usage.primary_window_minutes).unwrap_or_else(|| "S".to_string());
         parts.push(format!("{label}:{remaining}"));
     }
     if let Some(used) = usage.secondary_used_percent {
@@ -644,17 +656,17 @@ mod tests {
             usage_title(None, None, Some(35.0), Some(7 * 24 * 60)),
             "7d:65%"
         );
-        assert_eq!(
-            usage_title(Some(27.0), Some(5 * 60), None, None),
-            "5h:73%"
-        );
+        assert_eq!(usage_title(Some(27.0), Some(5 * 60), None, None), "5h:73%");
         assert_eq!(usage_title(None, None, None, None), "H:-- W:--");
     }
 
     #[test]
     fn window_duration_labels_round_to_hours_and_days() {
         assert_eq!(window_duration_label(Some(5 * 60)), Some("5h".to_string()));
-        assert_eq!(window_duration_label(Some(12 * 60)), Some("12h".to_string()));
+        assert_eq!(
+            window_duration_label(Some(12 * 60)),
+            Some("12h".to_string())
+        );
         assert_eq!(
             window_duration_label(Some(7 * 24 * 60)),
             Some("7d".to_string())

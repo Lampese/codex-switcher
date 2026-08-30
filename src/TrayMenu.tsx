@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
-import type { AccountInfo, AccountUsageStats, DockDisplayMode, UsageInfo } from "./types";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import type {
+  AccountInfo,
+  AccountUsageStats,
+  AppSettings,
+  CursorAccountInfo,
+  DockDisplayMode,
+  UsageInfo,
+} from "./types";
 import { invokeBackend, isTauriRuntime } from "./lib/platform";
 import {
   applyTheme,
@@ -16,6 +24,7 @@ import {
 const TRAY_REFRESH_EVENT = "tray-refresh";
 const ACCOUNTS_CHANGED_EVENT = "accounts-changed";
 const SWITCH_ACCOUNT_BLOCKED_EVENT = "switch-account-blocked";
+const trayWindow = getCurrentWindow();
 // Mirrors the backend guard message in process.rs (ensure_codex_not_running).
 const CODEX_RUNNING_PREFIX = "Cannot switch accounts while";
 
@@ -93,6 +102,21 @@ function sumDailyTokens(stats: AccountUsageStats, days: number): number {
   return stats.daily.reduce((total, day) => (keys.has(day.date) ? total + day.tokens : total), 0);
 }
 
+type TrayAccount = AccountInfo & { provider: "codex" | "cursor" };
+
+function rateWindowLabel(
+  provider: TrayAccount["provider"],
+  slot: "primary" | "secondary",
+  minutes: number | null
+): string {
+  if (minutes === 5 * 60) return "5h";
+  if (minutes === 7 * 24 * 60) return "7d";
+  if (provider === "cursor") {
+    return slot === "primary" ? "Third-party models" : "First-party models";
+  }
+  return slot === "primary" ? "Session" : "Weekly";
+}
+
 function retainUsageForAccounts(
   usageById: Record<string, UsageInfo>,
   accounts: AccountInfo[]
@@ -114,6 +138,15 @@ function TrayMenu() {
   const [refreshing, setRefreshing] = useState(false);
   const [autoWarmupAllEnabled, setAutoWarmupAllEnabled] = useState(readAutoWarmupAllEnabled);
   const [dockDisplayMode, setDockDisplayMode] = useState<DockDisplayMode | null>(null);
+  const [cursorAccount, setCursorAccount] = useState<CursorAccountInfo | null>(null);
+  const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
+
+  const handleTitlebarDrag = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    if (!isTauriRuntime() || event.button !== 0) return;
+    if ((event.target as HTMLElement).closest("button")) return;
+    event.preventDefault();
+    void trayWindow.startDragging();
+  }, []);
 
   // Fetch each account's rate-limit usage in parallel; rows fill in as they land.
   const loadUsage = useCallback(async (list: AccountInfo[]) => {
@@ -201,11 +234,38 @@ function TrayMenu() {
   const load = useCallback(async () => {
     try {
       void loadDockDisplayMode();
-      const list = await invokeBackend<AccountInfo[]>("list_accounts");
+      const [list, cursor, settings] = await Promise.all([
+        invokeBackend<AccountInfo[]>("list_accounts"),
+        invokeBackend<CursorAccountInfo | null>("cursor_account").catch(() => null),
+        invokeBackend<AppSettings>("get_app_settings"),
+      ]);
       setAccounts(list);
+      setCursorAccount(cursor);
+      setAppSettings(settings);
       setUsageById((prev) => retainUsageForAccounts(prev, list));
       setError(null);
       void loadUsage(list); // Don't block the list render on the usage calls.
+      if (cursor) {
+        void invokeBackend<UsageInfo>("cursor_usage")
+          .then((usage) => setUsageById((prev) => ({ ...prev, [cursor.id]: usage })))
+          .catch((err) => setUsageById((prev) => ({
+            ...prev,
+            [cursor.id]: {
+              account_id: cursor.id,
+              plan_type: cursor.plan_type,
+              primary_used_percent: null,
+              primary_window_minutes: null,
+              primary_resets_at: null,
+              secondary_used_percent: null,
+              secondary_window_minutes: null,
+              secondary_resets_at: null,
+              has_credits: null,
+              unlimited_credits: null,
+              credits_balance: null,
+              error: formatError(err),
+            },
+          })));
+      }
       void loadActiveStats(list);
     } catch (err) {
       setError(formatError(err));
@@ -218,11 +278,25 @@ function TrayMenu() {
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      const list = await invokeBackend<AccountInfo[]>("list_accounts");
+      const [list, cursor, settings] = await Promise.all([
+        invokeBackend<AccountInfo[]>("list_accounts"),
+        invokeBackend<CursorAccountInfo | null>("cursor_account").catch(() => null),
+        invokeBackend<AppSettings>("get_app_settings"),
+      ]);
       setAccounts(list);
+      setCursorAccount(cursor);
+      setAppSettings(settings);
       setUsageById((prev) => retainUsageForAccounts(prev, list));
       setError(null);
-      await Promise.all([loadUsage(list), loadActiveStats(list)]);
+      await Promise.all([
+        loadUsage(list),
+        loadActiveStats(list),
+        cursor
+          ? invokeBackend<UsageInfo>("cursor_usage").then((usage) =>
+              setUsageById((prev) => ({ ...prev, [cursor.id]: usage }))
+            )
+          : Promise.resolve(),
+      ]);
     } catch (err) {
       setError(formatError(err));
     } finally {
@@ -301,7 +375,8 @@ function TrayMenu() {
     };
   }, [load]);
 
-  const handleSwitch = useCallback(async (account: AccountInfo) => {
+  const handleSwitch = useCallback(async (account: TrayAccount) => {
+    if (account.provider === "cursor") return;
     if (account.is_active) {
       void invokeBackend("hide_tray_window");
       return;
@@ -333,9 +408,35 @@ function TrayMenu() {
     }
   }, []);
 
+  const displayAccounts: TrayAccount[] = [
+    ...accounts.map((account) => ({ ...account, provider: "codex" as const })),
+    ...(cursorAccount
+      ? [{
+          id: cursorAccount.id,
+          name: cursorAccount.name,
+          email: cursorAccount.email,
+          plan_type: cursorAccount.plan_type,
+          subscription_expires_at: null,
+          auth_mode: "chat_g_p_t" as const,
+          is_active: false,
+          created_at: "",
+          last_used_at: null,
+          provider: "cursor" as const,
+        }]
+      : []),
+  ].filter((account) =>
+    !appSettings ||
+    appSettings.floating_account_ids.length === 0 ||
+    appSettings.floating_account_ids.includes(account.id)
+  );
+
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden rounded-xl border border-gray-200 bg-white text-gray-900 shadow-2xl dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100">
-      <div className="flex items-center gap-2 border-b border-gray-100 px-3 py-2 dark:border-gray-800">
+      <div
+        data-tauri-drag-region
+        onMouseDown={handleTitlebarDrag}
+        className="flex cursor-move select-none items-center gap-2 border-b border-gray-100 px-3 py-2 dark:border-gray-800"
+      >
         <div className="flex h-6 w-6 items-center justify-center rounded-md bg-black text-xs font-bold text-white">
           C
         </div>
@@ -373,12 +474,12 @@ function TrayMenu() {
           <div className="px-2 py-6 text-center text-xs text-gray-500 dark:text-gray-400">
             Loading...
           </div>
-        ) : accounts.length === 0 ? (
+        ) : displayAccounts.length === 0 ? (
           <div className="px-2 py-6 text-center text-xs text-gray-500 dark:text-gray-400">
             No accounts configured
           </div>
         ) : (
-          accounts.map((account) => {
+          displayAccounts.map((account) => {
             const plan = formatPlan(account.plan_type);
             const usage = usageById[account.id];
             const stats = statsById[account.id];
@@ -386,12 +487,12 @@ function TrayMenu() {
               usage && !usage.error
                 ? ([
                     {
-                      label: "Session",
+                      label: rateWindowLabel(account.provider, "primary", usage.primary_window_minutes),
                       used: usage.primary_used_percent,
                       resetAt: usage.primary_resets_at,
                     },
                     {
-                      label: "Weekly",
+                      label: rateWindowLabel(account.provider, "secondary", usage.secondary_window_minutes),
                       used: usage.secondary_used_percent,
                       resetAt: usage.secondary_resets_at,
                     },
@@ -465,7 +566,7 @@ function TrayMenu() {
                               <span className={tone.text}>
                                 {remaining.toFixed(0)}% left
                               </span>
-                              {reset && (
+                              {appSettings?.floating_show_reset_times !== false && reset && (
                                 <span>
                                   {reset === "now" ? "Resets now" : `Resets in ${reset}`}
                                 </span>
@@ -484,7 +585,7 @@ function TrayMenu() {
                       {account.email}
                     </span>
                   ) : null}
-                  {account.is_active && stats?.available && (
+                  {account.provider === "codex" && account.is_active && stats?.available && (
                     <span className="mt-2 grid grid-cols-2 gap-1.5">
                       <span className="rounded-md bg-white px-2 py-1 text-[11px] text-gray-600 shadow-sm dark:bg-gray-950 dark:text-gray-300">
                         <span className="block font-medium text-gray-900 dark:text-gray-100">
