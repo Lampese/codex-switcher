@@ -1,5 +1,7 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::thread;
 
 use anyhow::Context;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -18,6 +20,8 @@ use crate::commands::{
     rename_account, set_masked_account_ids, start_login, switch_account, warmup_account,
     warmup_all_accounts,
 };
+
+const WEB_WORKER_THREADS: usize = 8;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,23 +77,60 @@ struct FileImportArgs {
 
 pub fn run_lan_server(host: &str, port: u16) -> anyhow::Result<()> {
     let address = format!("{host}:{port}");
-    let server = Server::http(&address)
-        .map_err(|err| anyhow::anyhow!("Failed to bind HTTP server on {address}: {err}"))?;
-    let runtime = Runtime::new().context("Failed to start async runtime")?;
-    let dist_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("dist");
+    let server = Arc::new(
+        Server::http(&address)
+            .map_err(|err| anyhow::anyhow!("Failed to bind HTTP server on {address}: {err}"))?,
+    );
+    let runtime = Arc::new(Runtime::new().context("Failed to start async runtime")?);
+    let dist_dir = Arc::new(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("dist"),
+    );
 
     println!("Codex Switcher web server listening on http://{address}");
     println!("Serving static files from {}", dist_dir.display());
 
-    for request in server.incoming_requests() {
+    let workers = spawn_http_workers(Arc::clone(&server), WEB_WORKER_THREADS, move |request| {
         if let Err(error) = handle_request(request, &runtime, &dist_dir) {
             eprintln!("[web] request failed: {error:#}");
         }
+    });
+
+    for worker in workers {
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("Web worker thread panicked"))?;
     }
 
     Ok(())
+}
+
+fn spawn_http_workers<F>(
+    server: Arc<Server>,
+    worker_count: usize,
+    handler: F,
+) -> Vec<thread::JoinHandle<()>>
+where
+    F: Fn(Request) + Send + Sync + 'static,
+{
+    let handler = Arc::new(handler);
+
+    (0..worker_count)
+        .map(|_| {
+            let server = Arc::clone(&server);
+            let handler = Arc::clone(&handler);
+            thread::spawn(move || loop {
+                match server.recv() {
+                    Ok(request) => handler(request),
+                    Err(error) => {
+                        eprintln!("[web] accept failed: {error}");
+                        break;
+                    }
+                }
+            })
+        })
+        .collect()
 }
 
 fn handle_request(mut request: Request, runtime: &Runtime, dist_dir: &Path) -> anyhow::Result<()> {
@@ -325,5 +366,82 @@ fn mime_type_for_path(path: &Path) -> &'static str {
         "txt" => "text/plain; charset=utf-8",
         "webp" => "image/webp",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::sync::{mpsc, Condvar, Mutex};
+    use std::time::Duration;
+
+    fn http_get(address: &str, path: &str) -> String {
+        let mut stream = TcpStream::connect(address).expect("connect to test server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set read timeout");
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        )
+        .expect("write request");
+        stream.flush().expect("flush request");
+
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("read response");
+        response
+    }
+
+    #[test]
+    fn worker_pool_keeps_serving_while_one_request_is_blocked() {
+        let server = Arc::new(Server::http("127.0.0.1:0").expect("bind test server"));
+        let address = server.server_addr().to_string();
+        let (started_tx, started_rx) = mpsc::channel();
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let handler_gate = Arc::clone(&gate);
+
+        let workers = spawn_http_workers(Arc::clone(&server), 2, move |request| {
+            if request.url() == "/block" {
+                started_tx.send(()).expect("signal blocked request");
+                let (released, wake) = &*handler_gate;
+                let mut released = released.lock().expect("lock release gate");
+                while !*released {
+                    released = wake.wait(released).expect("wait for release");
+                }
+                request
+                    .respond(Response::from_string("done"))
+                    .expect("respond to blocked request");
+            } else {
+                request
+                    .respond(Response::from_string("ok"))
+                    .expect("respond to concurrent request");
+            }
+        });
+
+        let blocked_address = address.clone();
+        let blocked = thread::spawn(move || http_get(&blocked_address, "/block"));
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("blocked request should occupy one worker");
+
+        let response = http_get(&address, "/health");
+        assert!(response.starts_with("HTTP/1.1 200"));
+        assert!(response.contains("ok"));
+
+        let (released, wake) = &*gate;
+        *released.lock().expect("lock release gate") = true;
+        wake.notify_all();
+
+        let blocked_response = blocked.join().expect("join blocked client");
+        assert!(blocked_response.contains("done"));
+
+        for _ in 0..workers.len() {
+            server.unblock();
+        }
+        for worker in workers {
+            worker.join().expect("join worker");
+        }
     }
 }
