@@ -458,6 +458,8 @@ export function AccountCard({
         accountId={account.id}
         enabled={account.auth_mode === "chat_g_p_t"}
         open={statsOpen}
+        usage={account.usage}
+        usageLoading={account.usageLoading}
         onStatsLoaded={handleStatsLoaded}
       />
     </div>

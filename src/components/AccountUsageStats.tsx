@@ -3,15 +3,16 @@ import type {
   AccountDailyUsage,
   AccountTopInvocation,
   AccountUsageStats as AccountUsageStatsInfo,
+  UsageInfo,
 } from "../types";
 import { invokeBackend } from "../lib/platform";
-
-const PROFILE_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 interface AccountUsageStatsProps {
   accountId: string;
   enabled: boolean;
   open: boolean;
+  usage?: UsageInfo;
+  usageLoading?: boolean;
   onStatsLoaded?: (stats: AccountUsageStatsInfo | null) => void;
 }
 
@@ -345,16 +346,22 @@ export function AccountUsageStats({
   accountId,
   enabled,
   open,
+  usage,
+  usageLoading = false,
   onStatsLoaded,
 }: AccountUsageStatsProps) {
   const [stats, setStats] = useState<AccountUsageStatsInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const requestSeq = useRef(0);
+  const backgroundInFlight = useRef(false);
+  const lastObservedUsage = useRef<UsageInfo | undefined>(usage);
 
-  const loadStats = useCallback(async () => {
+  const loadStats = useCallback(async (background = false) => {
+    if (background && backgroundInFlight.current) return;
     const requestId = ++requestSeq.current;
 
     if (!enabled) {
+      if (background) return;
       const next = emptyStats(accountId, "Usage stats are available for ChatGPT accounts only.");
       setStats(next);
       onStatsLoaded?.(next);
@@ -362,21 +369,28 @@ export function AccountUsageStats({
       return;
     }
 
-    setLoading(true);
+    if (background) {
+      backgroundInFlight.current = true;
+    } else {
+      setLoading(true);
+    }
     try {
       const next = await invokeBackend<AccountUsageStatsInfo>("get_account_usage_stats", {
         accountId,
       });
       if (requestId !== requestSeq.current) return;
+      if (background && (!next.available || next.error)) return;
       setStats(next);
       onStatsLoaded?.(next);
     } catch (err) {
-      if (requestId !== requestSeq.current) return;
+      if (background || requestId !== requestSeq.current) return;
       const next = emptyStats(accountId, err instanceof Error ? err.message : String(err));
       setStats(next);
       onStatsLoaded?.(next);
     } finally {
-      if (requestId === requestSeq.current) {
+      if (background) {
+        backgroundInFlight.current = false;
+      } else if (requestId === requestSeq.current) {
         setLoading(false);
       }
     }
@@ -390,17 +404,11 @@ export function AccountUsageStats({
   }, [accountId, onStatsLoaded]);
 
   useEffect(() => {
-    if (!open) return;
-    void loadStats();
-  }, [loadStats, open]);
-
-  useEffect(() => {
-    if (!enabled || !open) return;
-    const timer = window.setInterval(() => {
-      void loadStats();
-    }, PROFILE_REFRESH_INTERVAL_MS);
-    return () => window.clearInterval(timer);
-  }, [enabled, loadStats, open]);
+    const usageChanged = usage !== lastObservedUsage.current;
+    lastObservedUsage.current = usage;
+    if (!usageChanged || !enabled || !open || usageLoading || !usage || usage.error) return;
+    void loadStats(true);
+  }, [enabled, loadStats, open, usage, usageLoading]);
 
   const currentStats = stats?.account_id === accountId ? stats : null;
   const generatedAt = currentStats ? formatGeneratedAt(currentStats.generated_at) : "";
