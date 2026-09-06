@@ -11,6 +11,18 @@ use std::collections::HashMap;
 #[cfg(any(unix, windows, test))]
 use std::collections::HashSet;
 
+#[cfg(unix)]
+use std::fs::OpenOptions;
+
+#[cfg(unix)]
+use std::io::Write;
+
+#[cfg(unix)]
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+
+#[cfg(unix)]
+use std::path::{Component, Path, PathBuf};
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
@@ -60,7 +72,11 @@ pub struct KillCodexProcessesResult {
 struct UnixProcessSnapshot {
     children_by_parent: HashMap<u32, Vec<u32>>,
     uid_by_pid: HashMap<u32, u32>,
+    tty_by_pid: HashMap<u32, PathBuf>,
 }
+
+#[cfg(unix)]
+const CODEX_TERMINAL_RESET: &[u8] = b"\x1b[<u\x1b[<u\x1b[>4;0m\x1b[0 q\x1b[?25h";
 
 const CODEX_RUNNING_SWITCH_BLOCKED_PREFIX: &str = "Cannot switch accounts while ";
 
@@ -119,6 +135,9 @@ fn kill_codex_processes_blocking() -> Result<KillCodexProcessesResult, String> {
     #[cfg(unix)]
     let targets = expand_process_targets(&pids, snapshot.as_ref());
 
+    #[cfg(unix)]
+    let tty_targets = unix_terminal_targets(&targets, snapshot.as_ref());
+
     #[cfg(windows)]
     let targets = expand_process_targets(&pids);
 
@@ -170,6 +189,9 @@ fn kill_codex_processes_blocking() -> Result<KillCodexProcessesResult, String> {
         failed_pids = still_failed;
     }
 
+    #[cfg(unix)]
+    restore_codex_terminals(&tty_targets, &failed_pids);
+
     Ok(KillCodexProcessesResult {
         targeted_count,
         killed_pids,
@@ -219,13 +241,19 @@ fn expand_process_targets(root_pids: &[u32]) -> Vec<u32> {
 #[cfg(unix)]
 fn read_unix_process_snapshot() -> Option<UnixProcessSnapshot> {
     let output = Command::new("ps")
-        .args(["-axo", "pid=,ppid=,uid="])
+        .args(["-axo", "pid=,ppid=,uid=,tty="])
         .output()
         .ok()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    Some(parse_unix_process_snapshot(&stdout))
+}
+
+#[cfg(unix)]
+fn parse_unix_process_snapshot(stdout: &str) -> UnixProcessSnapshot {
     let mut children_by_parent = HashMap::new();
     let mut uid_by_pid = HashMap::new();
+    let mut tty_by_pid = HashMap::new();
 
     for line in stdout.lines() {
         let mut parts = line.split_whitespace();
@@ -238,6 +266,7 @@ fn read_unix_process_snapshot() -> Option<UnixProcessSnapshot> {
         let Some(uid_str) = parts.next() else {
             continue;
         };
+        let tty = parts.next();
         let (Ok(pid), Ok(ppid), Ok(uid)) = (
             pid_str.parse::<u32>(),
             ppid_str.parse::<u32>(),
@@ -251,12 +280,83 @@ fn read_unix_process_snapshot() -> Option<UnixProcessSnapshot> {
             .or_insert_with(Vec::new)
             .push(pid);
         uid_by_pid.insert(pid, uid);
+
+        if let Some(tty_path) = tty.and_then(unix_tty_path) {
+            tty_by_pid.insert(pid, tty_path);
+        }
     }
 
-    Some(UnixProcessSnapshot {
+    UnixProcessSnapshot {
         children_by_parent,
         uid_by_pid,
-    })
+        tty_by_pid,
+    }
+}
+
+#[cfg(unix)]
+fn unix_tty_path(tty: &str) -> Option<PathBuf> {
+    let relative = Path::new(tty);
+    if tty.is_empty()
+        || tty == "?"
+        || tty == "??"
+        || relative.is_absolute()
+        || !relative
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return None;
+    }
+
+    Some(Path::new("/dev").join(relative))
+}
+
+#[cfg(unix)]
+fn unix_terminal_targets(
+    targets: &[u32],
+    snapshot: Option<&UnixProcessSnapshot>,
+) -> HashMap<PathBuf, Vec<u32>> {
+    let mut tty_targets = HashMap::new();
+
+    if let Some(snapshot) = snapshot {
+        for pid in targets {
+            if let Some(tty_path) = snapshot.tty_by_pid.get(pid) {
+                tty_targets
+                    .entry(tty_path.clone())
+                    .or_insert_with(Vec::new)
+                    .push(*pid);
+            }
+        }
+    }
+
+    tty_targets
+}
+
+#[cfg(unix)]
+fn restore_codex_terminals(tty_targets: &HashMap<PathBuf, Vec<u32>>, failed_pids: &[u32]) {
+    for (tty_path, pids) in tty_targets {
+        if pids.iter().any(|pid| failed_pids.contains(pid)) {
+            continue;
+        }
+
+        let Ok(metadata) = tty_path.metadata() else {
+            continue;
+        };
+        if !metadata.file_type().is_char_device() {
+            continue;
+        }
+
+        let Ok(mut tty) = OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NOCTTY)
+            .open(tty_path)
+        else {
+            continue;
+        };
+
+        // SIGKILL bypasses Codex's normal TUI cleanup. Mirror its keyboard
+        // reporting reset so the parent shell does not receive CSI-u key codes.
+        let _ = tty.write_all(CODEX_TERMINAL_RESET);
+    }
 }
 
 fn force_kill_process(pid: u32) -> bool {
@@ -733,12 +833,17 @@ fn is_ide_plugin_process(command: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    use super::is_macos_codex_desktop_process;
     use super::{
         classify_windows_codex_processes, is_windows_codex_root_process,
         parse_windows_codex_processes, WindowsCodexProcess,
     };
+    #[cfg(unix)]
+    use super::{
+        is_macos_codex_desktop_process, parse_unix_process_snapshot, unix_terminal_targets,
+        unix_tty_path,
+    };
+    #[cfg(unix)]
+    use std::path::PathBuf;
 
     fn windows_process(
         name: &str,
@@ -756,6 +861,52 @@ mod tests {
             executable_path: executable_path.to_string(),
             main_window_title: main_window_title.to_string(),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parses_safe_tty_paths_from_unix_process_snapshot() {
+        let snapshot = parse_unix_process_snapshot(
+            "100 1 1000 pts/4\n\
+             101 100 1000 pts/4\n\
+             102 1 1000 ?\n\
+             103 1 1000 ../../tmp/not-a-tty\n",
+        );
+
+        assert_eq!(
+            snapshot.tty_by_pid.get(&100),
+            Some(&PathBuf::from("/dev/pts/4"))
+        );
+        assert_eq!(
+            snapshot.tty_by_pid.get(&101),
+            Some(&PathBuf::from("/dev/pts/4"))
+        );
+        assert!(!snapshot.tty_by_pid.contains_key(&102));
+        assert!(!snapshot.tty_by_pid.contains_key(&103));
+        assert_eq!(snapshot.children_by_parent.get(&100), Some(&vec![101]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn groups_kill_targets_by_terminal() {
+        let snapshot = parse_unix_process_snapshot(
+            "100 1 1000 pts/4\n\
+             101 100 1000 pts/4\n\
+             200 1 1000 ttys001\n",
+        );
+
+        let tty_targets = unix_terminal_targets(&[101, 200, 100], Some(&snapshot));
+
+        assert_eq!(
+            tty_targets.get(&PathBuf::from("/dev/pts/4")),
+            Some(&vec![101, 100])
+        );
+        assert_eq!(
+            tty_targets.get(&PathBuf::from("/dev/ttys001")),
+            Some(&vec![200])
+        );
+        assert_eq!(unix_tty_path("/dev/pts/4"), None);
+        assert_eq!(unix_tty_path("../pts/4"), None);
     }
 
     #[cfg(unix)]
