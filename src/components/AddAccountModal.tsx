@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   describeFileSource,
   isTauriRuntime,
@@ -14,9 +14,12 @@ interface AddAccountModalProps {
   onStartOAuth: (name: string) => Promise<{ auth_url: string }>;
   onCompleteOAuth: () => Promise<unknown>;
   onCancelOAuth: () => Promise<void>;
+  onStartCursorLogin: () => Promise<void>;
+  onCompleteCursorLogin: () => Promise<unknown>;
+  onCancelCursorLogin: () => Promise<void>;
 }
 
-type Tab = "oauth" | "import";
+type Tab = "oauth" | "cursor" | "import";
 
 export function AddAccountModal({
   isOpen,
@@ -25,16 +28,20 @@ export function AddAccountModal({
   onStartOAuth,
   onCompleteOAuth,
   onCancelOAuth,
+  onStartCursorLogin,
+  onCompleteCursorLogin,
+  onCancelCursorLogin,
 }: AddAccountModalProps) {
   const [activeTab, setActiveTab] = useState<Tab>("oauth");
   const [name, setName] = useState("");
   const [fileSource, setFileSource] = useState<FileSource | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [oauthPending, setOauthPending] = useState(false);
+  const [pendingProvider, setPendingProvider] = useState<"oauth" | "cursor" | null>(null);
   const [authUrl, setAuthUrl] = useState<string>("");
   const [copied, setCopied] = useState<boolean>(false);
-  const isPrimaryDisabled = loading || (activeTab === "oauth" && oauthPending);
+  const loginAttemptRef = useRef(0);
+  const isPrimaryDisabled = loading || pendingProvider !== null;
   const tauriRuntime = isTauriRuntime();
 
   const resetForm = () => {
@@ -42,34 +49,74 @@ export function AddAccountModal({
     setFileSource(null);
     setError(null);
     setLoading(false);
-    setOauthPending(false);
+    setPendingProvider(null);
     setAuthUrl("");
   };
 
-  const handleClose = () => {
-    if (oauthPending) {
-      onCancelOAuth();
+  const cancelPendingLogin = () => {
+    const provider = pendingProvider;
+    loginAttemptRef.current += 1;
+    setPendingProvider(null);
+    setLoading(false);
+    if (provider === "oauth") {
+      void onCancelOAuth().catch((err) => console.error("Failed to cancel ChatGPT login:", err));
+    } else if (provider === "cursor") {
+      void onCancelCursorLogin().catch((err) => console.error("Failed to cancel Cursor login:", err));
     }
+  };
+
+  const handleClose = () => {
+    cancelPendingLogin();
+    resetForm();
+    onClose();
+  };
+
+  const finishAndClose = () => {
+    loginAttemptRef.current += 1;
     resetForm();
     onClose();
   };
 
   const handleOAuthLogin = async () => {
+    const attempt = loginAttemptRef.current + 1;
+    loginAttemptRef.current = attempt;
     try {
       setLoading(true);
       setError(null);
       const info = await onStartOAuth(name.trim());
+      if (loginAttemptRef.current !== attempt) return;
       setAuthUrl(info.auth_url);
-      setOauthPending(true);
+      setPendingProvider("oauth");
       setLoading(false);
 
       // Wait for completion
       await onCompleteOAuth();
-      handleClose();
+      if (loginAttemptRef.current === attempt) finishAndClose();
     } catch (err) {
+      if (loginAttemptRef.current !== attempt) return;
       setError(err instanceof Error ? err.message : String(err));
       setLoading(false);
-      setOauthPending(false);
+      setPendingProvider(null);
+    }
+  };
+
+  const handleCursorLogin = async () => {
+    const attempt = loginAttemptRef.current + 1;
+    loginAttemptRef.current = attempt;
+    try {
+      setLoading(true);
+      setError(null);
+      await onStartCursorLogin();
+      if (loginAttemptRef.current !== attempt) return;
+      setPendingProvider("cursor");
+      setLoading(false);
+      await onCompleteCursorLogin();
+      if (loginAttemptRef.current === attempt) finishAndClose();
+    } catch (err) {
+      if (loginAttemptRef.current !== attempt) return;
+      setError(err instanceof Error ? err.message : String(err));
+      setLoading(false);
+      setPendingProvider(null);
     }
   };
 
@@ -117,17 +164,11 @@ export function AddAccountModal({
 
         {/* Tabs */}
         <div className="flex border-b border-gray-100 dark:border-gray-800">
-          {(["oauth", "import"] as Tab[]).map((tab) => (
+          {(["oauth", "cursor", "import"] as Tab[]).map((tab) => (
             <button
               key={tab}
               onClick={() => {
-                if (tab === "import" && oauthPending) {
-                  void onCancelOAuth().catch((err) => {
-                    console.error("Failed to cancel login:", err);
-                  });
-                  setOauthPending(false);
-                  setLoading(false);
-                }
+                if (tab !== activeTab && pendingProvider) cancelPendingLogin();
                 setActiveTab(tab);
                 setError(null);
               }}
@@ -136,7 +177,7 @@ export function AddAccountModal({
                   : "text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300"
                 }`}
             >
-              {tab === "oauth" ? "ChatGPT Login" : "Import File"}
+              {tab === "oauth" ? "ChatGPT Login" : tab === "cursor" ? "Cursor Login" : "Import File"}
             </button>
           ))}
         </div>
@@ -144,7 +185,7 @@ export function AddAccountModal({
         {/* Content */}
         <div className="p-5 space-y-4">
           {/* Account name is optional; the backend derives one when blank. */}
-          <div>
+          {activeTab !== "cursor" && <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
               Account Name (optional)
             </label>
@@ -155,12 +196,12 @@ export function AddAccountModal({
               placeholder="Leave blank to use email"
               className="w-full px-4 py-2.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-gray-400 dark:focus:border-gray-500 focus:ring-1 focus:ring-gray-400 dark:focus:ring-gray-500 transition-colors"
             />
-          </div>
+          </div>}
 
           {/* Tab-specific content */}
           {activeTab === "oauth" && (
             <div className="text-sm text-gray-500 dark:text-gray-400">
-              {oauthPending ? (
+              {pendingProvider === "oauth" ? (
                 <div className="text-center py-4">
                   <div className="animate-spin h-8 w-8 border-2 border-gray-900 dark:border-gray-100 border-t-transparent rounded-full mx-auto mb-3"></div>
                   <p className="text-gray-700 dark:text-gray-300 font-medium mb-2">Waiting for browser login...</p>
@@ -219,6 +260,26 @@ export function AddAccountModal({
             </div>
           )}
 
+          {activeTab === "cursor" && (
+            <div className="text-sm text-gray-500 dark:text-gray-400">
+              {pendingProvider === "cursor" ? (
+                <div className="py-4 text-center">
+                  <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-2 border-gray-900 border-t-transparent dark:border-gray-100 dark:border-t-transparent" />
+                  <p className="mb-2 font-medium text-gray-700 dark:text-gray-300">
+                    Waiting for Cursor login...
+                  </p>
+                  <p className="text-xs">
+                    Sign in from the official Cursor window. Codex Switcher will detect the session automatically.
+                  </p>
+                </div>
+              ) : (
+                <p>
+                  Open Cursor and sign in there. Codex Switcher only reads the resulting local session and never stores your Cursor password.
+                </p>
+              )}
+            </div>
+          )}
+
           {activeTab === "import" && (
             <div>
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
@@ -258,7 +319,7 @@ export function AddAccountModal({
             Cancel
           </button>
           <button
-            onClick={activeTab === "oauth" ? handleOAuthLogin : handleImportFile}
+            onClick={activeTab === "oauth" ? handleOAuthLogin : activeTab === "cursor" ? handleCursorLogin : handleImportFile}
             disabled={isPrimaryDisabled}
             className="flex-1 px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors disabled:opacity-50"
           >
@@ -266,6 +327,8 @@ export function AddAccountModal({
               ? "Adding..."
               : activeTab === "oauth"
                 ? "Generate Login Link"
+                : activeTab === "cursor"
+                  ? "Open Cursor"
                 : "Import"}
           </button>
         </div>

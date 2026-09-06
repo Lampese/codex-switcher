@@ -47,6 +47,12 @@ pub struct AppSettings {
     pub dock_display_mode: DockDisplayMode,
     #[serde(default = "default_close_behavior_prompt_enabled")]
     pub close_behavior_prompt_enabled: bool,
+    /// Keep the existing tray panel visible when it loses focus.
+    pub floating_panel_enabled: bool,
+    /// Account ids included in the tray/floating panel. Empty means all.
+    pub floating_account_ids: Vec<String>,
+    /// Show reset countdowns beside rate windows.
+    pub floating_show_reset_times: bool,
 }
 
 impl Default for AppSettings {
@@ -55,6 +61,9 @@ impl Default for AppSettings {
             tray_display_mode: TrayDisplayMode::default(),
             dock_display_mode: DockDisplayMode::default(),
             close_behavior_prompt_enabled: true,
+            floating_panel_enabled: false,
+            floating_account_ids: Vec::new(),
+            floating_show_reset_times: true,
         }
     }
 }
@@ -411,6 +420,17 @@ pub struct UsageInfo {
     pub credits_balance: Option<String>,
     /// Error message if usage fetch failed
     pub error: Option<String>,
+}
+
+/// Read-only Cursor account metadata. Cursor remains the credential owner;
+/// Codex Switcher never persists the desktop app's access token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CursorAccountInfo {
+    pub id: String,
+    pub name: String,
+    pub email: Option<String>,
+    pub plan_type: Option<String>,
+    pub is_connected: bool,
 }
 
 impl UsageInfo {

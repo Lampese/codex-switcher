@@ -9,13 +9,15 @@ use serde_json::{json, Value};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use tokio::runtime::Runtime;
 
+use crate::auth::load_app_settings;
 use crate::commands::{
-    add_account_from_auth_json_text, add_account_from_file, cancel_login, check_codex_processes,
-    complete_login, delete_account, export_accounts_full_encrypted_bytes,
-    export_accounts_slim_text, fetch_usage, get_account_usage_stats, get_active_account_info,
-    get_masked_account_ids, import_accounts_full_encrypted_bytes, import_accounts_slim_text,
-    kill_codex_processes, list_accounts, refresh_account_metadata, refresh_all_accounts_usage,
-    rename_account, set_masked_account_ids, start_login, switch_account, warmup_account,
+    add_account_from_auth_json_text, add_account_from_file, cancel_cursor_login, cancel_login,
+    check_codex_processes, complete_cursor_login, complete_login, cursor_account, cursor_usage,
+    delete_account, export_accounts_full_encrypted_bytes, export_accounts_slim_text, fetch_usage,
+    get_account_usage_stats, get_active_account_info, get_masked_account_ids,
+    import_accounts_full_encrypted_bytes, import_accounts_slim_text, kill_codex_processes,
+    list_accounts, refresh_account_metadata, refresh_all_accounts_usage, rename_account,
+    set_masked_account_ids, start_cursor_login, start_login, switch_account, warmup_account,
     warmup_all_accounts,
 };
 
@@ -174,6 +176,12 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
         }
         "complete_login" => to_json(complete_login().await?),
         "cancel_login" => to_json(cancel_login().await?),
+        "start_cursor_login" => to_json(start_cursor_login().await?),
+        "complete_cursor_login" => to_json(complete_cursor_login().await?),
+        "cancel_cursor_login" => to_json(cancel_cursor_login().await?),
+        "cursor_account" => to_json(cursor_account().await?),
+        "cursor_usage" => to_json(cursor_usage().await?),
+        "get_app_settings" => to_json(load_app_settings().map_err(|error| error.to_string())?),
         "export_accounts_slim_text" => to_json(export_accounts_slim_text().await?),
         "import_accounts_slim_text" => {
             let args: ImportSlimArgs = parse_args(payload)?;

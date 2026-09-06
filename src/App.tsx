@@ -3,7 +3,14 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAccounts } from "./hooks/useAccounts";
 import { useForceCloseCodexProcesses } from "./hooks/useForceCloseCodexProcesses";
 import { AccountCard, AddAccountModal, UpdateChecker } from "./components";
-import type { AccountWithUsage, CodexProcessInfo, DockDisplayMode, UsageInfo } from "./types";
+import type {
+  AccountWithUsage,
+  AppSettings,
+  CodexProcessInfo,
+  CursorAccountInfo,
+  DockDisplayMode,
+  UsageInfo,
+} from "./types";
 import {
   exportFullBackupFile,
   importFullBackupFile,
@@ -226,6 +233,9 @@ function App() {
     readTimedWarmupTimes()
   );
   const [isTimedWarmupOpen, setIsTimedWarmupOpen] = useState(false);
+  const [isFloatingSettingsOpen, setIsFloatingSettingsOpen] = useState(false);
+  const [cursorAccount, setCursorAccount] = useState<CursorAccountInfo | null>(null);
+  const [floatingSettings, setFloatingSettings] = useState<AppSettings | null>(null);
   const [timedWarmupRunning, setTimedWarmupRunning] = useState(false);
   const [timedWarmupDraft, setTimedWarmupDraft] = useState("");
   const [maskedAccounts, setMaskedAccounts] = useState<Set<string>>(new Set());
@@ -262,6 +272,63 @@ function App() {
   useEffect(() => {
     accountsRef.current = accounts;
   }, [accounts]);
+
+  const loadProviderSettings = useCallback(async () => {
+    const [settings, cursor] = await Promise.all([
+      invokeBackend<AppSettings>("get_app_settings"),
+      invokeBackend<CursorAccountInfo | null>("cursor_account").catch(() => null),
+    ]);
+    setFloatingSettings(settings);
+    setCursorAccount(cursor);
+  }, []);
+
+  useEffect(() => {
+    void loadProviderSettings();
+  }, [loadProviderSettings]);
+
+  const saveFloatingSettings = useCallback(
+    async (next: Pick<AppSettings, "floating_panel_enabled" | "floating_account_ids" | "floating_show_reset_times">) => {
+      const settings = await invokeBackend<AppSettings>("set_floating_panel_settings", {
+        enabled: next.floating_panel_enabled,
+        accountIds: next.floating_account_ids,
+        showResetTimes: next.floating_show_reset_times,
+      });
+      setFloatingSettings(settings);
+    },
+    []
+  );
+
+  const toggleFloatingAccount = useCallback(
+    (accountId: string) => {
+      if (!floatingSettings) return;
+      const allIds = [...accounts.map((account) => account.id), ...(cursorAccount ? [cursorAccount.id] : [])];
+      const selected = floatingSettings.floating_account_ids.length === 0
+        ? new Set(allIds)
+        : new Set(floatingSettings.floating_account_ids);
+      if (selected.has(accountId)) selected.delete(accountId);
+      else selected.add(accountId);
+      void saveFloatingSettings({
+        ...floatingSettings,
+        floating_account_ids: Array.from(selected),
+      });
+    },
+    [accounts, cursorAccount, floatingSettings, saveFloatingSettings]
+  );
+
+  const startCursorLogin = useCallback(async () => {
+    await invokeBackend("start_cursor_login");
+  }, []);
+
+  const completeCursorLogin = useCallback(async () => {
+    const account = await invokeBackend<CursorAccountInfo>("complete_cursor_login");
+    setCursorAccount(account);
+    window.dispatchEvent(new CustomEvent("accounts-changed"));
+    return account;
+  }, []);
+
+  const cancelCursorLogin = useCallback(async () => {
+    await invokeBackend("cancel_cursor_login");
+  }, []);
 
   useEffect(() => {
     if (!isAccountSearchEnabled && accountSearchQuery) {
@@ -1449,6 +1516,7 @@ function App() {
                 <button
                   onClick={() => {
                     setIsTimedWarmupOpen(false);
+                    setIsFloatingSettingsOpen(false);
                     setIsNavMenuOpen((prev) => !prev);
                   }}
                   className={`flex h-10 w-10 items-center justify-center rounded-lg transition-colors shrink-0 ${
@@ -1515,6 +1583,23 @@ function App() {
                         {themeMode === "dark" ? "☾ Dark" : "☀ Light"}
                       </span>
                     </button>
+                    <button
+                      onClick={() => {
+                        setIsNavMenuOpen(false);
+                        setIsTimedWarmupOpen(false);
+                        setIsFloatingSettingsOpen((prev) => !prev);
+                      }}
+                      className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 dark:text-white dark:hover:bg-neutral-900"
+                    >
+                      <span>Floating Panel</span>
+                      <span className={`rounded-md px-1.5 py-0.5 text-[11px] font-medium ${
+                        floatingSettings?.floating_panel_enabled
+                          ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
+                          : "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400"
+                      }`}>
+                        {floatingSettings?.floating_panel_enabled ? "On" : "Off"}
+                      </span>
+                    </button>
                   </div>
                 )}
                 {isTimedWarmupOpen && (
@@ -1571,6 +1656,43 @@ function App() {
                       >
                         Add
                       </button>
+                    </div>
+                  </div>
+                )}
+                {isFloatingSettingsOpen && floatingSettings && (
+                  <div className="absolute right-0 z-20 mt-2 w-64 rounded-lg border border-gray-200 bg-white p-3 shadow-lg dark:border-gray-700 dark:bg-gray-900">
+                    <label className="flex items-center justify-between text-sm font-medium text-gray-800 dark:text-gray-100">
+                      <span>Floating panel</span>
+                      <input
+                        type="checkbox"
+                        checked={floatingSettings.floating_panel_enabled}
+                        onChange={(event) => void saveFloatingSettings({ ...floatingSettings, floating_panel_enabled: event.target.checked })}
+                        className="h-4 w-4 accent-emerald-600"
+                      />
+                    </label>
+                    <label className="mt-3 flex items-center justify-between text-sm text-gray-700 dark:text-gray-200">
+                      <span>Show reset time</span>
+                      <input
+                        type="checkbox"
+                        checked={floatingSettings.floating_show_reset_times}
+                        onChange={(event) => void saveFloatingSettings({ ...floatingSettings, floating_show_reset_times: event.target.checked })}
+                        className="h-4 w-4 accent-emerald-600"
+                      />
+                    </label>
+                    <div className="mt-3 border-t border-gray-100 pt-2 dark:border-gray-800">
+                      <p className="mb-1 text-[11px] font-medium text-gray-500 dark:text-gray-400">Accounts</p>
+                      {[
+                        ...accounts.map((account) => ({ account, provider: "Codex" })),
+                        ...(cursorAccount ? [{ account: cursorAccount, provider: "Cursor" }] : []),
+                      ].map(({ account, provider }) => {
+                        const selected = floatingSettings.floating_account_ids.length === 0 || floatingSettings.floating_account_ids.includes(account.id);
+                        return (
+                          <label key={account.id} className="flex items-center gap-2 rounded-md px-1 py-1 text-sm text-gray-700 dark:text-gray-200">
+                            <input type="checkbox" checked={selected} onChange={() => toggleFloatingAccount(account.id)} className="h-4 w-4 accent-emerald-600" />
+                            <span className="min-w-0 flex-1 truncate">{account.name} · {provider}</span>
+                          </label>
+                        );
+                      })}
                     </div>
                   </div>
                 )}
@@ -2013,6 +2135,9 @@ function App() {
         onStartOAuth={startOAuthLogin}
         onCompleteOAuth={completeOAuthLogin}
         onCancelOAuth={cancelOAuthLogin}
+        onStartCursorLogin={startCursorLogin}
+        onCompleteCursorLogin={completeCursorLogin}
+        onCancelCursorLogin={cancelCursorLogin}
       />
 
       {/* Import/Export Config Modal */}

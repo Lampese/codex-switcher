@@ -9,7 +9,7 @@ use tauri::{AppHandle, Manager, Runtime};
 
 use crate::{
     auth::{load_app_settings, save_app_settings},
-    types::{DockDisplayMode, UsageInfo},
+    types::{AppSettings, DockDisplayMode, UsageInfo},
 };
 
 /// Label of the borderless tray popup window.
@@ -33,6 +33,34 @@ pub fn report_usage(app: AppHandle, usages: Vec<UsageInfo>) {
     crate::tray::ingest_usage(&app, usages);
     #[cfg(not(desktop))]
     let _ = (app, usages);
+}
+
+#[tauri::command]
+pub fn get_app_settings() -> Result<AppSettings, String> {
+    load_app_settings().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn set_floating_panel_settings(
+    app: AppHandle,
+    enabled: bool,
+    account_ids: Vec<String>,
+    show_reset_times: bool,
+) -> Result<AppSettings, String> {
+    let mut settings = load_app_settings().map_err(|error| error.to_string())?;
+    settings.floating_panel_enabled = enabled;
+    settings.floating_account_ids = account_ids;
+    settings.floating_show_reset_times = show_reset_times;
+    save_app_settings(&settings).map_err(|error| error.to_string())?;
+
+    if let Some(window) = app.get_webview_window(TRAY_WINDOW) {
+        let _ = window.set_always_on_top(true);
+        if enabled {
+            let _ = window.show();
+        }
+    }
+    let _ = tauri::Emitter::emit_to(&app, TRAY_WINDOW, "tray-refresh", ());
+    Ok(settings)
 }
 
 /// Hide the tray popup window (called by the tray UI after an action).
