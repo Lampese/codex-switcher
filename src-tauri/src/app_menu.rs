@@ -61,6 +61,9 @@ fn tray_display_mode_for_item(item_id: &str) -> Option<TrayDisplayMode> {
 pub(crate) fn update_tray_display_mode(app: &AppHandle, mode: TrayDisplayMode) {
     let mut settings = load_app_settings().unwrap_or_default();
     if settings.tray_display_mode == mode {
+        // Treat reselecting the active mode as an explicit repair request. This
+        // is useful if macOS retained the status item but stopped painting it.
+        crate::tray::refresh_display(app);
         return;
     }
 
