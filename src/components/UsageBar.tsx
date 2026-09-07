@@ -36,6 +36,40 @@ function formatWindowDuration(minutes: number | null | undefined): string {
   return `${Math.floor(hours / 24)}d`;
 }
 
+function formatUsageError(error: string): { title: string; message: string } {
+  if (
+    error.includes("refresh_token_invalidated") ||
+    error.includes("saved session is out of date")
+  ) {
+    return {
+      title: "Session expired",
+      message: "Re-authenticate this account.",
+    };
+  }
+
+  if (error.includes("refresh_token_reused") || error.includes("outdated refresh token")) {
+    return {
+      title: "Session expired",
+      message: "Re-authenticate this account.",
+    };
+  }
+
+  // Older builds may still surface a raw backend JSON payload. Never dump that
+  // into the account card; keep the UI concise while logs retain the details.
+  if (error.includes("Token refresh failed:") && error.includes('"error"')) {
+    return {
+      title: "Couldn’t refresh Switcher session",
+      message:
+        "The saved Switcher credentials could not be refreshed. Your Codex session may still be valid. Retry usage before re-authenticating.",
+    };
+  }
+
+  return {
+    title: "Usage unavailable",
+    message: error,
+  };
+}
+
 function RateLimitBar({
   label,
   usedPercent,
@@ -49,7 +83,7 @@ function RateLimitBar({
 }) {
   // Calculate remaining percentage
   const remainingPercent = Math.max(0, 100 - usedPercent);
-  
+
   // Color based on remaining (green = plenty left, red = almost none left)
   const colorClass =
     remainingPercent <= 10
@@ -105,9 +139,25 @@ export function UsageBar({ usage, loading }: UsageBarProps) {
   }
 
   if (usage.error) {
+    const friendlyError = formatUsageError(usage.error);
     return (
-      <div className="text-xs text-gray-400 dark:text-gray-500 italic py-1">
-        {usage.error}
+      <div className="rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 dark:border-amber-800/70 dark:bg-amber-950/20">
+        <div className="flex items-start gap-2">
+          <span
+            className="mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-amber-100 text-[10px] font-bold text-amber-700 dark:bg-amber-900/60 dark:text-amber-300"
+            aria-hidden="true"
+          >
+            !
+          </span>
+          <div className="min-w-0">
+            <div className="text-xs font-medium text-amber-800 dark:text-amber-200">
+              {friendlyError.title}
+            </div>
+            <div className="mt-0.5 text-xs leading-relaxed text-amber-700 dark:text-amber-300/90">
+              {friendlyError.message}
+            </div>
+          </div>
+        </div>
       </div>
     );
   }

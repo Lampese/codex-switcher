@@ -524,17 +524,22 @@ function App() {
   }, []);
 
   const handleSwitch = async (accountId: string) => {
-    // Check processes before switching
+    // Never make the Switch button look dead. If Codex is running, reuse the
+    // existing force-close confirmation flow and automatically retry the switch.
     const latestProcessInfo = await checkProcesses();
     if (latestProcessInfo && !latestProcessInfo.can_switch) {
+      setPendingTraySwitchAccountId(accountId);
+      setForceCloseConfirmOpen(true);
       return;
     }
 
     try {
       setSwitchingId(accountId);
       await switchAccount(accountId);
+      showWarmupToast("Switched account.");
     } catch (err) {
       console.error("Failed to switch account:", err);
+      showWarmupToast(`Switch failed: ${formatWarmupError(err)}`, true);
     } finally {
       setSwitchingId(null);
     }
