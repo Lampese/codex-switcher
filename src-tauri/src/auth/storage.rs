@@ -66,8 +66,16 @@ pub fn sync_active_account_tokens(store: &mut AccountsStore, auth: &AuthDotJson)
 
 /// Get the path to the codex-switcher config directory
 pub fn get_config_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("Could not find home directory")?;
-    Ok(home.join(".codex-switcher"))
+    #[cfg(test)]
+    {
+        Ok(super::test_support::home_dir()?.join(".codex-switcher"))
+    }
+
+    #[cfg(not(test))]
+    {
+        let home = dirs::home_dir().context("Could not find home directory")?;
+        Ok(home.join(".codex-switcher"))
+    }
 }
 
 /// Get the path to accounts.json

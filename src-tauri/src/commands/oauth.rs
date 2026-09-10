@@ -74,3 +74,7 @@ pub async fn cancel_login() -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "oauth_tests.rs"]
+mod tests;
