@@ -70,6 +70,26 @@ function formatResetAt(resetAt: number | null | undefined): string | null {
   return `${Math.floor(diff / 86_400)}d ${Math.floor((diff % 86_400) / 3600)}h`;
 }
 
+function formatExactResetTime(
+  resetAt: number | null | undefined,
+  isWeekly: boolean,
+): string | null {
+  if (!resetAt) return null;
+
+  const date = new Date(resetAt * 1000);
+  const diff = resetAt - Math.floor(Date.now() / 1000);
+
+  if (isWeekly && diff > 86_400) {
+    return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(date);
+  }
+
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  const period = date.getHours() >= 12 ? "PM" : "AM";
+  const hour12 = date.getHours() % 12 || 12;
+
+  return `${hour12}:${minutes} ${period}`;
+}
+
 function formatTokens(tokens: number | null | undefined): string {
   if (tokens === null || tokens === undefined || !Number.isFinite(tokens)) return "--";
   const abs = Math.abs(tokens);
@@ -445,6 +465,7 @@ function TrayMenu() {
                         const remaining = Math.max(0, 100 - w.used);
                         const tone = remainingTone(remaining);
                         const reset = formatResetAt(w.resetAt);
+                        const exactReset = formatExactResetTime(w.resetAt, w.label === "Weekly");
                         return (
                           <span key={w.label} className="block">
                             <span className="flex items-center gap-1">
@@ -466,8 +487,9 @@ function TrayMenu() {
                                 {remaining.toFixed(0)}% left
                               </span>
                               {reset && (
-                                <span>
+                                <span className="shrink-0 whitespace-nowrap">
                                   {reset === "now" ? "Resets now" : `Resets in ${reset}`}
+                                  {exactReset && ` • ${exactReset}`}
                                 </span>
                               )}
                             </span>
