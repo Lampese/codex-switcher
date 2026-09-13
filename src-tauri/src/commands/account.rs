@@ -762,7 +762,6 @@ fn merge_accounts_store(
     imported: AccountsStore,
 ) -> (AccountsStore, ImportAccountsSummary) {
     let imported_version = imported.version;
-    let imported_active_id = imported.active_account_id;
     let total_in_payload = imported.accounts.len();
     let mut imported_count = 0usize;
     let mut existing_ids: HashSet<String> = current.accounts.iter().map(|a| a.id.clone()).collect();
@@ -786,16 +785,9 @@ fn merge_accounts_store(
         .as_ref()
         .is_some_and(|id| current.accounts.iter().any(|a| &a.id == id));
 
+    // Importing credentials does not apply them to Codex.
     if !current_active_is_valid {
-        if let Some(imported_active) = imported_active_id {
-            if current.accounts.iter().any(|a| a.id == imported_active) {
-                current.active_account_id = Some(imported_active);
-            } else {
-                current.active_account_id = current.accounts.first().map(|a| a.id.clone());
-            }
-        } else {
-            current.active_account_id = current.accounts.first().map(|a| a.id.clone());
-        }
+        current.active_account_id = None;
     }
 
     (
@@ -824,6 +816,27 @@ pub async fn set_masked_account_ids(ids: Vec<String>) -> Result<(), String> {
 mod provider_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn importing_accounts_never_activates_saved_credentials() {
+        let imported_account = custom_account();
+        let imported = AccountsStore {
+            active_account_id: Some(imported_account.id.clone()),
+            accounts: vec![imported_account],
+            ..Default::default()
+        };
+        let (merged, _) = merge_accounts_store(AccountsStore::default(), imported.clone());
+        assert!(merged.active_account_id.is_none());
+
+        let regular = StoredAccount::new_api_key("Regular".into(), "test-key".into());
+        let current = AccountsStore {
+            active_account_id: Some(regular.id.clone()),
+            accounts: vec![regular.clone()],
+            ..Default::default()
+        };
+        let (merged, _) = merge_accounts_store(current, imported);
+        assert_eq!(merged.active_account_id, Some(regular.id));
+    }
 
     #[test]
     fn direct_api_key_requires_nonempty_key_and_allows_optional_overrides() {

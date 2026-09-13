@@ -49,8 +49,25 @@ fn read_optional(path: &std::path::Path) -> Result<Option<Vec<u8>>> {
     }
 }
 
+/// Replacing a symlink would silently disconnect a user-managed credential/config file.
+fn reject_symlink(path: &std::path::Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => anyhow::ensure!(
+            !metadata.file_type().is_symlink(),
+            "Refusing to modify symlink: {}",
+            path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Err(error) => {
+            return Err(error).with_context(|| format!("Could not inspect {}", path.display()))
+        }
+    }
+    Ok(())
+}
+
 fn atomic_write(path: &std::path::Path, content: Option<&[u8]>) -> Result<()> {
     use std::io::Write;
+    reject_symlink(path)?;
     if let Some(content) = content {
         let mut temp =
             tempfile::NamedTempFile::new_in(path.parent().context("Missing parent directory")?)?;
@@ -85,12 +102,15 @@ fn switch_in_home_with_writer(
     let auth_path = home.join("auth.json");
     let config_path = home.join("config.toml");
     let snapshot_path = home.join(super::provider_config::SNAPSHOT_FILE);
+    reject_symlink(&auth_path)?;
+    reject_symlink(&snapshot_path)?;
     let old_auth = read_optional(&auth_path)?;
     let old_snapshot = read_optional(&snapshot_path)?;
     // Ordinary switching does not parse or read config unless restoration is needed.
     if account.custom_provider.is_none() && old_snapshot.is_none() {
         return write(&auth_path, Some(&auth));
     }
+    reject_symlink(&config_path)?;
     let old_config = read_optional(&config_path)?;
     let (config, snapshot) = super::provider_config::prepare(
         old_config.as_deref(),
@@ -279,7 +299,16 @@ mod provider_switch_tests {
         let home = tempfile::tempdir().unwrap();
         let config = home.path().join("config.toml");
         fs::write(&config, "# My configuration\nmodel = 'original' # chosen model\nmodel_provider = 'other'\nreview_model = 'review'\nprofile = 'work'\nopenai_base_url = 'https://original.example'\ncli_auth_credentials_store = 'keyring'\n[model_providers.other]\nname = 'Existing'\n[profiles.work]\nmodel = 'profile-model'\n").unwrap();
-        let normal = StoredAccount::new_api_key("Normal".into(), "test-normal".into());
+        let normal = StoredAccount::new_chatgpt(
+            "Normal".into(),
+            Some("fake@example.com".into()),
+            None,
+            None,
+            "fake-id-token".into(),
+            "fake-access-token".into(),
+            "fake-refresh-token".into(),
+            Some("fake-account".into()),
+        );
         switch_in_home(home.path(), &normal).unwrap();
         let original = fs::read_to_string(&config).unwrap();
         switch_in_home(home.path(), &gateway("one")).unwrap();
@@ -359,15 +388,14 @@ mod provider_switch_tests {
             .path()
             .join(super::super::provider_config::SNAPSHOT_FILE)
             .exists());
-        assert_eq!(
-            serde_json::from_slice::<AuthDotJson>(
-                &fs::read(home.path().join("auth.json")).unwrap()
-            )
-            .unwrap()
-            .openai_api_key
-            .as_deref(),
-            Some("test-normal")
-        );
+        let auth: AuthDotJson =
+            serde_json::from_slice(&fs::read(home.path().join("auth.json")).unwrap()).unwrap();
+        assert!(auth.openai_api_key.is_none());
+        let tokens = auth.tokens.unwrap();
+        assert_eq!(tokens.id_token, "fake-id-token");
+        assert_eq!(tokens.access_token, "fake-access-token");
+        assert_eq!(tokens.refresh_token, "fake-refresh-token");
+        assert_eq!(tokens.account_id.as_deref(), Some("fake-account"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -381,6 +409,53 @@ mod provider_switch_tests {
             );
         }
     }
+    #[cfg(unix)]
+    #[test]
+    fn symlink_auth_is_refused_for_auth_only_and_direct_writes() {
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("managed-auth.json");
+        let link = home.path().join("auth.json");
+        fs::write(&target, "original credentials").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let account = StoredAccount::new_api_key("Normal".into(), "fake-key".into());
+        assert!(switch_in_home(home.path(), &account)
+            .unwrap_err()
+            .to_string()
+            .contains("symlink"));
+        assert!(atomic_write(&link, Some(b"replacement")).is_err());
+        assert!(atomic_write(&link, None).is_err());
+        assert_eq!(fs::read_link(&link).unwrap(), target);
+        assert_eq!(fs::read_to_string(&target).unwrap(), "original credentials");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_config_refusal_preserves_active_snapshot_and_credentials() {
+        let home = tempfile::tempdir().unwrap();
+        switch_in_home(home.path(), &gateway("one")).unwrap();
+        let config = home.path().join("config.toml");
+        let target = home.path().join("managed-config.toml");
+        fs::rename(&config, &target).unwrap();
+        std::os::unix::fs::symlink(&target, &config).unwrap();
+        let previous_config = fs::read(&target).unwrap();
+        let previous_auth = fs::read(home.path().join("auth.json")).unwrap();
+        let snapshot_path = home
+            .path()
+            .join(super::super::provider_config::SNAPSHOT_FILE);
+        let previous_snapshot = fs::read(&snapshot_path).unwrap();
+        assert!(switch_in_home(home.path(), &gateway("two"))
+            .unwrap_err()
+            .to_string()
+            .contains("symlink"));
+        assert_eq!(fs::read_link(&config).unwrap(), target);
+        assert_eq!(fs::read(&target).unwrap(), previous_config);
+        assert_eq!(
+            fs::read(home.path().join("auth.json")).unwrap(),
+            previous_auth
+        );
+        assert_eq!(fs::read(snapshot_path).unwrap(), previous_snapshot);
+    }
+
     #[test]
     fn invalid_config_does_not_change_credentials() {
         let home = tempfile::tempdir().unwrap();
