@@ -248,3 +248,5 @@ pnpm release patch -- --push
 # For non-interactive use, pass the note explicitly.
 pnpm release patch -- --push --note "Fixed account switching issues"
 ```
+
+Provider presets can be registered by name and base URL in Add Account, then selected for other accounts. Presets are saved locally in this app/browser and contain no API keys; they are not included in account backups. Load models shows a selectable list that fills the account’s default model, with manual entry available.

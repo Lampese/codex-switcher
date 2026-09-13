@@ -19,6 +19,16 @@ interface AddAccountModalProps {
   onCancelOAuth: () => Promise<void>;
 }
 
+type SavedProvider = Pick<CustomProvider, "name" | "base_url">;
+const PROVIDERS_KEY = "codex-switcher.saved-providers";
+function readProviders(): SavedProvider[] {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(PROVIDERS_KEY) || "[]");
+    return Array.isArray(value) ? value.filter((p): p is SavedProvider =>
+      !!p && typeof p.name === "string" && typeof p.base_url === "string") : [];
+  } catch { return []; }
+}
+
 type Tab = "oauth" | "api_key" | "import";
 
 export function AddAccountModal({
@@ -37,6 +47,24 @@ export function AddAccountModal({
   const [fileSource, setFileSource] = useState<FileSource | null>(null);
   const [useCustomProvider, setUseCustomProvider] = useState(false);
   const [provider, setProvider] = useState<CustomProvider>({ name: "", base_url: "", model: "" });
+  const [savedProviders, setSavedProviders] = useState<SavedProvider[]>(readProviders);
+  const [registeringProvider, setRegisteringProvider] = useState(false);
+  const registerProvider = () => {
+    try {
+      const name = provider.name.trim();
+      const url = new URL(provider.base_url.trim());
+      if (!name || (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))) || url.username || url.password || url.search || url.hash) {
+        throw new Error("Enter a provider name and HTTPS base URL (or local HTTP URL), without credentials, query, or fragment.");
+      }
+      const entry = { name, base_url: url.href.replace(/\/$/, "") };
+      const next = [...savedProviders.filter(p => p.base_url !== entry.base_url), entry];
+      localStorage.setItem(PROVIDERS_KEY, JSON.stringify(next));
+      setSavedProviders(next);
+      setProvider({ ...entry, model: provider.model });
+      setRegisteringProvider(false);
+      setError(null);
+    } catch (err) { setError(String(err)); }
+  };
   const [models, setModels] = useState<string[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
@@ -76,6 +104,7 @@ export function AddAccountModal({
     clearModels();
     setFileSource(null);
     setUseCustomProvider(false);
+    setRegisteringProvider(false);
     setProvider({ name: "", base_url: "", model: "" });
     setError(null);
     setLoading(false);
@@ -313,21 +342,50 @@ export function AddAccountModal({
               {!useCustomProvider && <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">Leave off for regular OpenAI accounts. Enable for a custom API endpoint and model.</p>}
               {useCustomProvider && (
                 <div className="mt-3 space-y-3">
-                  {([
-                    ["name", "Provider name", "My provider"],
-                    ["base_url", "API base URL", "https://gateway.example/v1"],
-                    ["model", "Model", "Your provider's model ID"],
-                  ] as const).map(([field, label, placeholder]) => (
-                    <label key={field} className="block text-sm text-gray-700 dark:text-gray-300">
-                      {label}
-                      <input type={field === "base_url" ? "url" : "text"} value={provider[field]}
-                        disabled={loading} placeholder={placeholder}
-                        list={field === "model" && models.length ? "provider-models" : undefined}
-                        onChange={(e) => { setProvider({ ...provider, [field]: e.target.value }); if (field === "base_url") clearModels(); }}
-                        className="mt-1 w-full px-3 py-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100" />
-                    </label>
-                  ))}
-                  <datalist id="provider-models">{models.map((model) => <option key={model} value={model} />)}</datalist>
+                  <label className="block text-sm text-gray-700 dark:text-gray-300">
+                    Provider
+                    <select value={registeringProvider ? "" : provider.base_url} disabled={loading}
+                      onChange={e => {
+                        const selected = savedProviders.find(p => p.base_url === e.target.value);
+                        setProvider({ name: selected?.name || "", base_url: selected?.base_url || "", model: "" });
+                        setRegisteringProvider(false);
+                        clearModels();
+                      }}
+                      className="mt-1 w-full px-3 py-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg">
+                      <option value="">Select a provider</option>
+                      {savedProviders.map(p => <option key={p.base_url} value={p.base_url}>{p.name} — {p.base_url}</option>)}
+                    </select>
+                  </label>
+                  <button type="button" disabled={loading} onClick={() => {
+                    setRegisteringProvider(true);
+                    setProvider({ name: "", base_url: "", model: "" });
+                    clearModels();
+                  }} className="text-sm text-blue-600 dark:text-blue-400">Register provider</button>
+                  {registeringProvider && <div className="space-y-3 rounded-lg border border-gray-200 dark:border-gray-700 p-3">
+                    {([["name", "Provider name", "My provider"], ["base_url", "API base URL", "https://gateway.example/v1"]] as const).map(([field, label, placeholder]) => (
+                      <label key={field} className="block text-sm text-gray-700 dark:text-gray-300">{label}
+                        <input type={field === "base_url" ? "url" : "text"} value={provider[field]} disabled={loading} placeholder={placeholder}
+                          onChange={e => { setProvider({ ...provider, [field]: e.target.value }); clearModels(); }}
+                          className="mt-1 w-full px-3 py-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg" />
+                      </label>
+                    ))}
+                    <button type="button" onClick={registerProvider} disabled={loading} className="px-3 py-2 text-sm rounded-lg bg-blue-600 text-white">Save provider</button>
+                    <p className="text-xs text-gray-500">Saved on this device. API keys belong to each account.</p>
+                  </div>}
+                  {models.length > 0 && <label className="block text-sm text-gray-700 dark:text-gray-300">
+                    Available models
+                    <select size={Math.min(models.length + 1, 6)} value={models.includes(provider.model) ? provider.model : ""}
+                      disabled={loading || modelsLoading} onChange={e => setProvider({ ...provider, model: e.target.value })}
+                      className="mt-1 w-full px-3 py-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg">
+                      <option value="" disabled>Select the default model</option>
+                      {models.map(model => <option key={model} value={model}>{model}</option>)}
+                    </select>
+                  </label>}
+                  <label className="block text-sm text-gray-700 dark:text-gray-300">Default model
+                    <input value={provider.model} disabled={loading} placeholder="Choose a model or enter its ID"
+                      onChange={e => setProvider({ ...provider, model: e.target.value })}
+                      className="mt-1 w-full px-3 py-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg" />
+                  </label>
                   {activeTab === "api_key" && (
                     <div>
                       <button type="button" onClick={() => void loadModels()}
@@ -335,7 +393,7 @@ export function AddAccountModal({
                         className="px-3 py-2 text-sm rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 disabled:opacity-50">
                         {modelsLoading ? "Loading models..." : "Load models"}
                       </button>
-                      {models.length > 0 && <p className="text-xs text-gray-500 mt-2">{models.length} models loaded. Choose a suggestion in the Model field or enter another ID.</p>}
+                      {models.length > 0 && <p className="text-xs text-gray-500 mt-2">{models.length} models loaded. Select a default from the list above, or enter its ID.</p>}
                       {modelsError && <p role="status" className="text-xs text-amber-700 dark:text-amber-400 mt-2">{modelsError}</p>}
                     </div>
                   )}
