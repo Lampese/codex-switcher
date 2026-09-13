@@ -6,8 +6,8 @@ use chrono::Utc;
 use tokio::time::{sleep, Duration};
 
 use super::{
-    load_accounts, read_current_auth, save_accounts, switch_to_account, sync_active_account_tokens,
-    update_account_chatgpt_tokens, AUTH_OPERATION_LOCK,
+    load_accounts, read_current_auth, save_accounts, sync_active_account_tokens,
+    update_account_chatgpt_tokens, write_account_credentials, AUTH_OPERATION_LOCK,
 };
 use crate::types::{
     parse_chatgpt_id_token_claims, AccountsStore, AuthData, AuthDotJson, StoredAccount,
@@ -136,7 +136,7 @@ async fn refresh_chatgpt_tokens_locked(account: &StoredAccount) -> Result<Stored
     // Re-read active state after the network request before touching auth.json.
     let is_active = load_accounts()?.active_account_id.as_deref() == Some(account.id.as_str());
     if is_active {
-        if let Err(err) = switch_to_account(&updated) {
+        if let Err(err) = write_account_credentials(&updated) {
             println!("[Auth] Failed to sync active auth.json after token refresh: {err}");
         }
     }

@@ -10,8 +10,8 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use tokio::runtime::Runtime;
 
 use crate::commands::{
-    add_account_from_auth_json_text, add_account_from_file, cancel_login, check_codex_processes,
-    complete_login, delete_account, export_accounts_full_encrypted_bytes,
+    add_account_from_api_key, add_account_from_auth_json_text, add_account_from_file, cancel_login,
+    check_codex_processes, complete_login, delete_account, export_accounts_full_encrypted_bytes,
     export_accounts_slim_text, fetch_usage, get_account_usage_stats, get_active_account_info,
     get_masked_account_ids, import_accounts_full_encrypted_bytes, import_accounts_slim_text,
     kill_codex_processes, list_accounts, refresh_account_metadata, refresh_all_accounts_usage,
@@ -56,6 +56,24 @@ struct MaskedIdsArgs {
 struct UploadAuthJsonArgs {
     name: String,
     contents: String,
+    #[serde(default, rename = "customProvider", alias = "custom_provider")]
+    custom_provider: Option<crate::types::CustomProvider>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiKeyArgs {
+    name: String,
+    api_key: String,
+    #[serde(default)]
+    custom_provider: Option<crate::types::CustomProvider>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderModelsArgs {
+    api_key: String,
+    base_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +87,8 @@ struct UploadEncryptedArgs {
 struct FileImportArgs {
     path: String,
     name: String,
+    #[serde(default, rename = "customProvider", alias = "custom_provider")]
+    custom_provider: Option<crate::types::CustomProvider>,
 }
 
 pub fn run_lan_server(host: &str, port: u16) -> anyhow::Result<()> {
@@ -129,14 +149,25 @@ fn handle_request(mut request: Request, runtime: &Runtime, dist_dir: &Path) -> a
 async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, String> {
     match command {
         "list_accounts" => to_json(list_accounts().await?),
+        "list_provider_models" => {
+            let args: ProviderModelsArgs = parse_args(payload)?;
+            to_json(crate::commands::list_provider_models(args.api_key, args.base_url).await?)
+        }
+        "add_account_from_api_key" => {
+            let args: ApiKeyArgs = parse_args(payload)?;
+            to_json(add_account_from_api_key(args.name, args.api_key, args.custom_provider).await?)
+        }
         "get_active_account_info" => to_json(get_active_account_info().await?),
         "add_account_from_file" => {
             let args: FileImportArgs = parse_args(payload)?;
-            to_json(add_account_from_file(args.path, args.name).await?)
+            to_json(add_account_from_file(args.path, args.name, args.custom_provider).await?)
         }
         "add_account_from_auth_json_text" => {
             let args: UploadAuthJsonArgs = parse_args(payload)?;
-            to_json(add_account_from_auth_json_text(args.name, args.contents).await?)
+            to_json(
+                add_account_from_auth_json_text(args.name, args.contents, args.custom_provider)
+                    .await?,
+            )
         }
         "get_usage" => {
             let args: AccountIdArgs = parse_args(payload)?;

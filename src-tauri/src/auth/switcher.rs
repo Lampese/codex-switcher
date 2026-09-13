@@ -26,31 +26,100 @@ pub fn get_codex_auth_file() -> Result<PathBuf> {
     Ok(get_codex_home()?.join("auth.json"))
 }
 
-/// Switch to a specific account by writing its credentials to ~/.codex/auth.json
+/// Switch credentials and provider configuration together, rolling back on I/O errors.
 pub fn switch_to_account(account: &StoredAccount) -> Result<()> {
-    let codex_home = get_codex_home()?;
+    switch_in_home(&get_codex_home()?, account)
+}
 
-    // Ensure the codex home directory exists
-    fs::create_dir_all(&codex_home)
-        .with_context(|| format!("Failed to create codex home: {}", codex_home.display()))?;
+/// Refresh credentials without changing the active provider selection.
+pub fn write_account_credentials(account: &StoredAccount) -> Result<()> {
+    let home = get_codex_home()?;
+    fs::create_dir_all(&home)?;
+    atomic_write(
+        &home.join("auth.json"),
+        Some(&serde_json::to_vec_pretty(&create_auth_json(account)?)?),
+    )
+}
 
-    let auth_json = create_auth_json(account)?;
-
-    let auth_path = codex_home.join("auth.json");
-    let content =
-        serde_json::to_string_pretty(&auth_json).context("Failed to serialize auth.json")?;
-
-    fs::write(&auth_path, content)
-        .with_context(|| format!("Failed to write auth.json: {}", auth_path.display()))?;
-
-    // Set restrictive permissions on Unix
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(&auth_path, perms)?;
+fn read_optional(path: &std::path::Path) -> Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("Could not read {}", path.display())),
     }
+}
 
+fn atomic_write(path: &std::path::Path, content: Option<&[u8]>) -> Result<()> {
+    use std::io::Write;
+    if let Some(content) = content {
+        let mut temp =
+            tempfile::NamedTempFile::new_in(path.parent().context("Missing parent directory")?)?;
+        // NamedTempFile is created with 0600 on Unix, before secrets are written.
+        temp.write_all(content)?;
+        temp.as_file().sync_all()?;
+        temp.persist(path)
+            .map_err(|error| error.error)
+            .with_context(|| format!("Could not replace {}", path.display()))?;
+    } else {
+        match fs::remove_file(path) {
+            Ok(()) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn switch_in_home(home: &std::path::Path, account: &StoredAccount) -> Result<()> {
+    switch_in_home_with_writer(home, account, atomic_write)
+}
+
+fn switch_in_home_with_writer(
+    home: &std::path::Path,
+    account: &StoredAccount,
+    mut write: impl FnMut(&std::path::Path, Option<&[u8]>) -> Result<()>,
+) -> Result<()> {
+    account.validate_custom_provider()?;
+    let auth = serde_json::to_vec_pretty(&create_auth_json(account)?)?;
+    fs::create_dir_all(home)?;
+    let auth_path = home.join("auth.json");
+    let config_path = home.join("config.toml");
+    let snapshot_path = home.join(super::provider_config::SNAPSHOT_FILE);
+    let old_auth = read_optional(&auth_path)?;
+    let old_snapshot = read_optional(&snapshot_path)?;
+    // Ordinary switching does not parse or read config unless restoration is needed.
+    if account.custom_provider.is_none() && old_snapshot.is_none() {
+        return write(&auth_path, Some(&auth));
+    }
+    let old_config = read_optional(&config_path)?;
+    let (config, snapshot) = super::provider_config::prepare(
+        old_config.as_deref(),
+        old_snapshot.as_deref(),
+        account.custom_provider.as_ref(),
+    )?
+    .context("Missing provider changes")?;
+    let changes = [
+        (&snapshot_path, snapshot.as_deref(), old_snapshot.as_deref()),
+        (&config_path, config.as_deref(), old_config.as_deref()),
+        (&auth_path, Some(auth.as_slice()), old_auth.as_deref()),
+    ];
+    for (index, (path, new, _)) in changes.iter().enumerate() {
+        if let Err(error) = write(path, *new) {
+            let mut failures = Vec::new();
+            for (path, _, old) in changes[..index].iter().rev() {
+                if let Err(rollback) = atomic_write(path, *old) {
+                    failures.push(rollback.to_string());
+                }
+            }
+            if !failures.is_empty() {
+                anyhow::bail!(
+                    "Account switch failed: {error}; rollback failed: {}",
+                    failures.join("; ")
+                );
+            }
+            return Err(error.context("Account switch failed; previous files restored"));
+        }
+    }
     Ok(())
 }
 
@@ -189,5 +258,212 @@ mod tests {
             import_from_auth_json_contents(&auth_json(json!({}), "acct-87654321"), "".into())
                 .unwrap();
         assert_eq!(account.name, "ChatGPT account (87654321)");
+    }
+}
+
+#[cfg(test)]
+mod provider_switch_tests {
+    use super::*;
+    use crate::types::CustomProvider;
+    fn gateway(name: &str) -> StoredAccount {
+        let mut account = StoredAccount::new_api_key(name.into(), format!("test-{name}"));
+        account.custom_provider = Some(CustomProvider {
+            name: name.into(),
+            base_url: format!("https://{name}.example/v1"),
+            model: format!("model-{name}"),
+        });
+        account
+    }
+    #[test]
+    fn normal_custom_custom_normal_preserves_settings_and_restores_selection() {
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join("config.toml");
+        fs::write(&config, "# My configuration\nmodel = 'original' # chosen model\nmodel_provider = 'other'\nreview_model = 'review'\nprofile = 'work'\nopenai_base_url = 'https://original.example'\ncli_auth_credentials_store = 'keyring'\n[model_providers.other]\nname = 'Existing'\n[profiles.work]\nmodel = 'profile-model'\n").unwrap();
+        let normal = StoredAccount::new_api_key("Normal".into(), "test-normal".into());
+        switch_in_home(home.path(), &normal).unwrap();
+        let original = fs::read_to_string(&config).unwrap();
+        switch_in_home(home.path(), &gateway("one")).unwrap();
+        let first = fs::read_to_string(&config)
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert_eq!(first["model"].as_str(), Some("model-one"));
+        assert_eq!(first["cli_auth_credentials_store"].as_str(), Some("file"));
+        assert!(first.get("profile").is_none());
+        assert!(first.get("review_model").is_none());
+        assert!(first.get("openai_base_url").is_none());
+        let id = first["model_provider"].as_str().unwrap().to_owned();
+        assert_eq!(
+            first["model_providers"][&id]["requires_openai_auth"].as_bool(),
+            Some(true)
+        );
+        let snapshot = fs::read(
+            home.path()
+                .join(super::super::provider_config::SNAPSHOT_FILE),
+        )
+        .unwrap();
+        switch_in_home(home.path(), &gateway("two")).unwrap();
+        let before: serde_json::Value = serde_json::from_slice(&snapshot).unwrap();
+        let after: serde_json::Value = serde_json::from_slice(
+            &fs::read(
+                home.path()
+                    .join(super::super::provider_config::SNAPSHOT_FILE),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(before["original_config"], after["original_config"]);
+        let mut second = fs::read_to_string(&config)
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        let second_id = second["model_provider"].as_str().unwrap().to_owned();
+        assert_ne!(second_id, id);
+        assert!(second["model_providers"]
+            .as_table()
+            .unwrap()
+            .get(&id)
+            .is_none());
+        assert_eq!(
+            second["model_providers"][&second_id]["base_url"].as_str(),
+            Some("https://two.example/v1")
+        );
+        second["added_setting"] = toml_edit::value(true);
+        fs::write(&config, second.to_string()).unwrap();
+        switch_in_home(home.path(), &normal).unwrap();
+        let restored_text = fs::read_to_string(&config).unwrap();
+        let restored = restored_text.parse::<toml_edit::DocumentMut>().unwrap();
+        let original = original.parse::<toml_edit::DocumentMut>().unwrap();
+        for key in [
+            "model",
+            "model_provider",
+            "review_model",
+            "profile",
+            "openai_base_url",
+        ] {
+            assert_eq!(restored[key].to_string(), original[key].to_string());
+        }
+        assert_eq!(
+            restored["cli_auth_credentials_store"].as_str(),
+            Some("file")
+        );
+        assert!(restored_text.contains("# chosen model"));
+        assert!(restored_text.contains("# My configuration"));
+        assert_eq!(restored["added_setting"].as_bool(), Some(true));
+        assert!(restored["model_providers"]
+            .as_table()
+            .unwrap()
+            .get(&id)
+            .is_none());
+        assert!(!home
+            .path()
+            .join(super::super::provider_config::SNAPSHOT_FILE)
+            .exists());
+        assert_eq!(
+            serde_json::from_slice::<AuthDotJson>(
+                &fs::read(home.path().join("auth.json")).unwrap()
+            )
+            .unwrap()
+            .openai_api_key
+            .as_deref(),
+            Some("test-normal")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(home.path().join("auth.json"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+    #[test]
+    fn invalid_config_does_not_change_credentials() {
+        let home = tempfile::tempdir().unwrap();
+        fs::write(home.path().join("auth.json"), "original credentials").unwrap();
+        fs::write(home.path().join("config.toml"), "invalid = [").unwrap();
+        assert!(switch_in_home(home.path(), &gateway("one")).is_err());
+        assert_eq!(
+            fs::read_to_string(home.path().join("auth.json")).unwrap(),
+            "original credentials"
+        );
+        assert!(!home
+            .path()
+            .join(super::super::provider_config::SNAPSHOT_FILE)
+            .exists());
+        // Ordinary account switching does not interpret unrelated config.
+        switch_in_home(
+            home.path(),
+            &StoredAccount::new_api_key("Normal".into(), "normal-key".into()),
+        )
+        .unwrap();
+    }
+    #[test]
+    fn auth_write_failure_rolls_back_config_and_snapshot() {
+        let home = tempfile::tempdir().unwrap();
+        fs::write(home.path().join("auth.json"), "old-auth").unwrap();
+        fs::write(home.path().join("config.toml"), "model = 'original'\n").unwrap();
+        let result = switch_in_home_with_writer(home.path(), &gateway("one"), |path, data| {
+            if path.ends_with("auth.json") {
+                anyhow::bail!("injected auth write failure");
+            }
+            atomic_write(path, data)
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read_to_string(home.path().join("config.toml")).unwrap(),
+            "model = 'original'\n"
+        );
+        assert_eq!(
+            fs::read_to_string(home.path().join("auth.json")).unwrap(),
+            "old-auth"
+        );
+        assert!(!home
+            .path()
+            .join(super::super::provider_config::SNAPSHOT_FILE)
+            .exists());
+    }
+    #[test]
+    fn actual_config_write_failure_rolls_back_snapshot() {
+        let home = tempfile::tempdir().unwrap();
+        fs::write(home.path().join("auth.json"), "old-auth").unwrap();
+        // An actual failed replacement, after the snapshot was successfully persisted.
+        let result = switch_in_home_with_writer(home.path(), &gateway("one"), |path, data| {
+            if path.ends_with("config.toml") {
+                fs::create_dir(path)?;
+            }
+            atomic_write(path, data)
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read_to_string(home.path().join("auth.json")).unwrap(),
+            "old-auth"
+        );
+        assert!(!home
+            .path()
+            .join(super::super::provider_config::SNAPSHOT_FILE)
+            .exists());
+    }
+    #[test]
+    fn missing_config_retains_file_credentials_after_restoration() {
+        let home = tempfile::tempdir().unwrap();
+        switch_in_home(home.path(), &gateway("one")).unwrap();
+        switch_in_home(
+            home.path(),
+            &StoredAccount::new_api_key("Normal".into(), "normal".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(home.path().join("config.toml"))
+                .unwrap()
+                .parse::<toml_edit::DocumentMut>()
+                .unwrap()["cli_auth_credentials_store"]
+                .as_str(),
+            Some("file")
+        );
     }
 }

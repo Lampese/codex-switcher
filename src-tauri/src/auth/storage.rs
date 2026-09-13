@@ -164,7 +164,12 @@ pub fn save_accounts(store: &AccountsStore) -> Result<()> {
 /// Add a new account to the store
 pub fn add_account(account: StoredAccount) -> Result<StoredAccount> {
     let mut store = load_accounts()?;
+    let account_clone = insert_account(&mut store, account)?;
+    save_accounts(&store)?;
+    Ok(account_clone)
+}
 
+fn insert_account(store: &mut AccountsStore, account: StoredAccount) -> Result<StoredAccount> {
     // Check for duplicate names
     if store.accounts.iter().any(|a| a.name == account.name) {
         anyhow::bail!("An account with name '{}' already exists", account.name);
@@ -173,12 +178,8 @@ pub fn add_account(account: StoredAccount) -> Result<StoredAccount> {
     let account_clone = account.clone();
     store.accounts.push(account);
 
-    // If this is the first account, make it active
-    if store.accounts.len() == 1 {
-        store.active_account_id = Some(account_clone.id.clone());
-    }
-
-    save_accounts(&store)?;
+    // Importing saves credentials only. Mark active after a successful switch,
+    // otherwise the first API-key account cannot be selected from the UI.
     Ok(account_clone)
 }
 
@@ -384,6 +385,27 @@ mod tests {
     use super::sync_active_account_tokens;
     use crate::types::{AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData};
     use base64::Engine;
+
+    #[test]
+    fn saving_first_account_does_not_claim_it_is_active() {
+        let mut store = AccountsStore::default();
+        let added = super::insert_account(
+            &mut store,
+            StoredAccount::new_api_key("First".into(), "test-key".into()),
+        )
+        .unwrap();
+        assert!(
+            !crate::types::AccountInfo::from_stored(&added, store.active_account_id.as_deref())
+                .is_active
+        );
+        store.active_account_id = Some(added.id.clone());
+        super::insert_account(
+            &mut store,
+            StoredAccount::new_api_key("Second".into(), "test-key-2".into()),
+        )
+        .unwrap();
+        assert_eq!(store.active_account_id.as_deref(), Some(added.id.as_str()));
+    }
 
     fn account(name: &str, account_id: &str, suffix: &str) -> StoredAccount {
         StoredAccount::new_chatgpt(
