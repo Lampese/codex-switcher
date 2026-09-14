@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DesktopReopenPreference } from "../lib/desktopReopen";
+import type { CodexClosePreference } from "../lib/codexClosePreference";
 import { invokeBackend, isTauriRuntime } from "../lib/platform";
 import type { DockDisplayMode } from "../types";
 
@@ -10,12 +11,20 @@ interface DisplaySettings {
 }
 
 interface SettingsModalProps {
-  preference: DesktopReopenPreference;
-  onChange: (value: DesktopReopenPreference) => void;
+  reopenPreference: DesktopReopenPreference;
+  onReopenPreferenceChange: (value: DesktopReopenPreference) => void;
+  closePreference: CodexClosePreference;
+  onClosePreferenceChange: (value: CodexClosePreference) => void;
   onClose: () => void;
 }
 
-export function SettingsModal({ preference, onChange, onClose }: SettingsModalProps) {
+export function SettingsModal({
+  reopenPreference,
+  onReopenPreferenceChange,
+  closePreference,
+  onClosePreferenceChange,
+  onClose,
+}: SettingsModalProps) {
   const [displaySettings, setDisplaySettings] = useState<DisplaySettings | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -119,16 +128,27 @@ export function SettingsModal({ preference, onChange, onClose }: SettingsModalPr
               <div className="border-t border-gray-100 dark:border-gray-800" />
             </>
           )}
-          <label htmlFor="desktop-reopen-preference" className="block text-sm font-medium text-gray-900 dark:text-gray-100">
-            Reopen Codex after force close
+          <label htmlFor="codex-close-preference" className="block text-sm font-medium text-gray-900 dark:text-gray-100">
+            Codex close method
           </label>
-          <select id="desktop-reopen-preference" value={preference} onChange={(event) => onChange(event.target.value as DesktopReopenPreference)} className={selectClassName}>
+          <select id="codex-close-preference" value={closePreference} onChange={(event) => onClosePreferenceChange(event.target.value as CodexClosePreference)} className={selectClassName}>
+            <option value="ask">Ask every time</option>
+            <option value="graceful">Gracefully close</option>
+            <option value="force">Force close</option>
+          </select>
+          <p className="text-sm text-gray-500 dark:text-gray-400">
+            Graceful close lets Codex finish cleanup. Force close stops it immediately and may lose unsaved work.
+          </p>
+          <label htmlFor="desktop-reopen-preference" className="block text-sm font-medium text-gray-900 dark:text-gray-100">
+            Reopen Codex after close
+          </label>
+          <select id="desktop-reopen-preference" value={reopenPreference} onChange={(event) => onReopenPreferenceChange(event.target.value as DesktopReopenPreference)} className={selectClassName}>
             <option value="ask">Ask every time</option>
             <option value="always">Reopen desktop app</option>
             <option value="never">Keep closed</option>
           </select>
           <p className="text-sm text-gray-500 dark:text-gray-400">
-            Applies to detected Codex desktop apps on macOS and Windows. When switching accounts, the app reopens after the switch succeeds. Force close always requires confirmation.
+            Applies to detected Codex desktop apps on macOS and Windows. When switching accounts, the app reopens after the switch succeeds.
           </p>
         </div>
         <div className="flex justify-end p-5 border-t border-gray-100 dark:border-gray-800">

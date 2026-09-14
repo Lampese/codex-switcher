@@ -19,6 +19,10 @@ pub(super) struct CapturedDesktop {
     target: DesktopTarget,
 }
 
+pub(super) fn desktop_pids(desktops: &[CapturedDesktop]) -> Vec<u32> {
+    desktops.iter().map(|desktop| desktop.pid).collect()
+}
+
 struct ReopenTicket {
     token: String,
     created_at: Instant,

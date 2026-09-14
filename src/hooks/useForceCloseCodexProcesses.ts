@@ -25,13 +25,13 @@ export function useForceCloseCodexProcesses({
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [isForceClosing, setIsForceClosing] = useState(false);
 
-  const forceCloseCodexProcesses = useCallback(async (reopenDesktop = false) => {
+  const closeCodexProcesses = useCallback(async (reopenDesktop = false, forceClose = false) => {
     try {
       setIsForceClosing(true);
 
       const result = await invokeBackend<KillCodexProcessesResult>(
         "kill_codex_processes",
-        { reopenDesktop }
+        { reopenDesktop, forceClose }
       );
       const latestProcessInfo = await checkProcesses();
       const remainingCount = latestProcessInfo?.count ?? processCount;
@@ -43,18 +43,18 @@ export function useForceCloseCodexProcesses({
         showToast("No running Codex processes found.");
       } else if (remainingCount === 0) {
         showToast(
-          `Force closed ${processCount} Codex session${
+          `${forceClose ? "Force closed" : "Closed"} ${processCount} Codex session${
             processCount === 1 ? "" : "s"
           }.`
         );
       } else if (closedCount > 0) {
         showToast(
-          `Force closed ${closedCount}/${processCount} Codex sessions. ${remainingCount} still running.`,
+          `${forceClose ? "Force closed" : "Closed"} ${closedCount}/${processCount} Codex sessions. ${remainingCount} still running.`,
           true
         );
       } else {
         showToast(
-          `Could not force close ${remainingCount} Codex session${
+          `Could not ${forceClose ? "force close" : "gracefully close"} ${remainingCount} Codex session${
             remainingCount === 1 ? "" : "s"
           }.`,
           true
@@ -63,8 +63,8 @@ export function useForceCloseCodexProcesses({
 
       return { processInfo: latestProcessInfo, reopenToken: result.reopen_token ?? null };
     } catch (err) {
-      console.error("Failed to force close Codex processes:", err);
-      showToast(`Force close failed: ${formatError(err)}`, true);
+      console.error("Failed to close Codex processes:", err);
+      showToast(`Close failed: ${formatError(err)}`, true);
       return null;
     } finally {
       setConfirmOpen(false);
@@ -76,6 +76,6 @@ export function useForceCloseCodexProcesses({
     forceCloseConfirmOpen: confirmOpen,
     setForceCloseConfirmOpen: setConfirmOpen,
     isForceClosingCodex: isForceClosing,
-    forceCloseCodexProcesses,
+    closeCodexProcesses,
   };
 }

@@ -52,6 +52,13 @@ struct MaskedIdsArgs {
     ids: Vec<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CloseCodexArgs {
+    reopen_desktop: Option<bool>,
+    force_close: Option<bool>,
+}
+
 #[derive(Debug, Deserialize)]
 struct UploadAuthJsonArgs {
     name: String,
@@ -196,7 +203,10 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
             to_json(set_masked_account_ids(args.ids).await?)
         }
         "check_codex_processes" => to_json(check_codex_processes().await?),
-        "kill_codex_processes" => to_json(kill_codex_processes(None).await?),
+        "kill_codex_processes" => {
+            let args: CloseCodexArgs = parse_args(payload)?;
+            to_json(kill_codex_processes(args.reopen_desktop, args.force_close).await?)
+        }
         _ => Err(format!("Unsupported web command: {command}")),
     }
 }
