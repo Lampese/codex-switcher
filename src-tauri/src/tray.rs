@@ -85,7 +85,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     #[cfg(target_os = "windows")]
     watch_system_theme(app.clone());
     poll_active_account_usage(app.clone());
-    poll_account_metadata();
+    poll_account_metadata(app.clone());
     Ok(())
 }
 
@@ -697,9 +697,8 @@ fn poll_active_account_usage<R: Runtime>(app: AppHandle<R>) {
 }
 
 /// Keep subscription dates current even when the main webview is hidden or
-/// suspended. Metadata changes are persisted by the command and picked up by
-/// the accounts-file watcher above.
-fn poll_account_metadata() {
+/// suspended. Live metadata stays in memory and is announced to the webviews.
+fn poll_account_metadata<R: Runtime>(app: AppHandle<R>) {
     std::thread::spawn(move || loop {
         let accounts = load_accounts()
             .map(|store| store.accounts)
@@ -719,6 +718,8 @@ fn poll_account_metadata() {
                 );
             }
         }
+
+        let _ = app.emit(ACCOUNTS_CHANGED_EVENT, ());
 
         std::thread::sleep(ACCOUNT_METADATA_REFRESH_INTERVAL);
     });

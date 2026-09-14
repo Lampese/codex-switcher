@@ -360,22 +360,14 @@ pub struct AccountInfo {
 
 impl AccountInfo {
     pub fn from_stored(account: &StoredAccount, active_id: Option<&str>) -> Self {
-        let fallback_subscription_expires_at = match &account.auth_data {
-            AuthData::ChatGPT { id_token, .. } => {
-                parse_chatgpt_id_token_claims(id_token).subscription_expires_at
-            }
-            AuthData::ApiKey { .. } => None,
-        };
-
         Self {
             id: account.id.clone(),
             name: account.name.clone(),
             email: account.email.clone(),
             plan_type: account.plan_type.clone(),
-            subscription_expires_at: account
-                .subscription_expires_at
-                .clone()
-                .or(fallback_subscription_expires_at),
+            // Subscription expiry is live account metadata. Stored values and
+            // ID-token claims become stale and must not be used for display.
+            subscription_expires_at: None,
             auth_mode: account.auth_mode,
             is_active: active_id == Some(&account.id),
             created_at: account.created_at,
@@ -500,8 +492,12 @@ pub struct CreditStatusDetails {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_chatgpt_id_token_claims, AppSettings, DockDisplayMode, TrayDisplayMode};
+    use super::{
+        parse_chatgpt_id_token_claims, AccountInfo, AppSettings, DockDisplayMode, StoredAccount,
+        TrayDisplayMode,
+    };
     use base64::Engine;
+    use chrono::{TimeZone, Utc};
 
     #[test]
     fn parses_subscription_expiry_from_realistic_id_token_claims() {
@@ -520,6 +516,25 @@ mod tests {
                 .map(|value| value.to_rfc3339()),
             Some("2026-04-23T05:03:38+00:00".to_string())
         );
+    }
+
+    #[test]
+    fn stored_subscription_expiry_is_not_exposed_as_live_metadata() {
+        let stored_expiry = Utc.with_ymd_and_hms(2026, 8, 27, 5, 23, 19).unwrap();
+        let account = StoredAccount::new_chatgpt(
+            "account".into(),
+            None,
+            Some("plus".into()),
+            Some(stored_expiry),
+            "header.payload.signature".into(),
+            "access".into(),
+            "refresh".into(),
+            Some("account-id".into()),
+        );
+
+        let info = AccountInfo::from_stored(&account, None);
+
+        assert_eq!(info.subscription_expires_at, None);
     }
 
     #[test]
