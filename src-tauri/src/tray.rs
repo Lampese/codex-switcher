@@ -37,6 +37,7 @@ const OPEN_ITEM_ID: &str = "open";
 const QUIT_ITEM_ID: &str = "quit";
 const TRAY_WIDTH: f64 = 300.0;
 const TRAY_HEIGHT: f64 = 420.0;
+const ACCOUNT_METADATA_REFRESH_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -79,6 +80,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 
     watch_accounts_file(app.clone());
     poll_active_account_usage(app.clone());
+    poll_account_metadata();
     Ok(())
 }
 
@@ -563,6 +565,34 @@ fn poll_active_account_usage<R: Runtime>(app: AppHandle<R>) {
         }
 
         std::thread::sleep(Duration::from_secs(60));
+    });
+}
+
+/// Keep subscription dates current even when the main webview is hidden or
+/// suspended. Metadata changes are persisted by the command and picked up by
+/// the accounts-file watcher above.
+fn poll_account_metadata() {
+    std::thread::spawn(move || loop {
+        let accounts = load_accounts()
+            .map(|store| store.accounts)
+            .unwrap_or_default();
+
+        for account in accounts {
+            if matches!(account.auth_data, crate::types::AuthData::ApiKey { .. }) {
+                continue;
+            }
+
+            if tauri::async_runtime::block_on(crate::commands::refresh_account_metadata(account.id))
+                .is_err()
+            {
+                eprintln!(
+                    "[Account] Failed to refresh subscription metadata for: {}",
+                    account.name
+                );
+            }
+        }
+
+        std::thread::sleep(ACCOUNT_METADATA_REFRESH_INTERVAL);
     });
 }
 

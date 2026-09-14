@@ -8,15 +8,11 @@ import type {
 } from "../types";
 import { invokeBackend, isTauriRuntime, type FileSource } from "../lib/platform";
 
-const METADATA_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
-const METADATA_REFRESH_CHECK_INTERVAL_MS = 5 * 60 * 1000;
-
 export function useAccounts() {
   const [accounts, setAccounts] = useState<AccountWithUsage[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const accountsRef = useRef<AccountWithUsage[]>([]);
-  const metadataRefreshAtRef = useRef(new Map<string, number>());
   const metadataRefreshInFlightRef = useRef(new Set<string>());
   const maxConcurrentUsageRequests = 10;
 
@@ -101,23 +97,16 @@ export function useAccounts() {
 
   const refreshMetadata = useCallback(
     async (
-      accountList?: AccountInfo[] | AccountWithUsage[],
-      force = false
+      accountList?: AccountInfo[] | AccountWithUsage[]
     ) => {
       const list = accountList ?? accountsRef.current;
-      const now = Date.now();
-      const dueAccounts = list.filter((account) => {
-        const lastRefreshAt = metadataRefreshAtRef.current.get(account.id) ?? 0;
-        return (
-          !metadataRefreshInFlightRef.current.has(account.id) &&
-          (force || now - lastRefreshAt >= METADATA_REFRESH_INTERVAL_MS)
-        );
-      });
+      const dueAccounts = list.filter(
+        (account) => !metadataRefreshInFlightRef.current.has(account.id)
+      );
 
       // Mark attempts before starting requests so overlapping refresh cycles
       // cannot issue duplicate metadata calls for the same account.
       dueAccounts.forEach((account) => {
-        metadataRefreshAtRef.current.set(account.id, now);
         metadataRefreshInFlightRef.current.add(account.id);
       });
 
@@ -140,8 +129,6 @@ export function useAccounts() {
               )
             );
           } catch (err) {
-            // Allow the next metadata check to retry a transient failure.
-            metadataRefreshAtRef.current.delete(account.id);
             console.warn("Failed to refresh account metadata:", err);
           } finally {
             metadataRefreshInFlightRef.current.delete(account.id);
@@ -167,7 +154,7 @@ export function useAccounts() {
         // Explicit refreshes include metadata, but run it beside usage so a
         // slow accounts endpoint never delays healthy rate-limit updates.
         const metadataPromise = options?.refreshMetadata
-          ? refreshMetadata(list, true)
+          ? refreshMetadata(list)
           : Promise.resolve();
 
         const accountIds = list.map((account) => account.id);
@@ -237,7 +224,7 @@ export function useAccounts() {
     try {
       const account = accountsRef.current.find((item) => item.id === accountId);
       const metadataPromise = options?.refreshMetadata && account
-        ? refreshMetadata([account], true)
+        ? refreshMetadata([account])
         : Promise.resolve();
 
       setAccounts((prev) =>
@@ -450,7 +437,9 @@ export function useAccounts() {
   useEffect(() => {
     loadAccounts().then((accountList) => {
       void refreshUsage(accountList);
-      void refreshMetadata(accountList);
+      // Desktop metadata is refreshed by the native background process so it
+      // continues while the webview is hidden. Web mode keeps a local poller.
+      if (!isTauriRuntime()) void refreshMetadata(accountList);
     });
     
     // Auto-refresh usage every 60 seconds (same as official Codex CLI)
@@ -458,15 +447,15 @@ export function useAccounts() {
       refreshUsage().catch(() => {});
     }, 60000);
 
-    // Subscription metadata changes much less often than usage. The cache
-    // prevents this check from producing network traffic more than every 6h.
-    const metadataInterval = setInterval(() => {
-      refreshMetadata().catch(() => {});
-    }, METADATA_REFRESH_CHECK_INTERVAL_MS);
+    const metadataInterval = !isTauriRuntime()
+      ? setInterval(() => {
+          refreshMetadata().catch(() => {});
+        }, 6 * 60 * 60 * 1000)
+      : undefined;
     
     return () => {
       clearInterval(usageInterval);
-      clearInterval(metadataInterval);
+      if (metadataInterval !== undefined) clearInterval(metadataInterval);
     };
   }, [loadAccounts, refreshMetadata, refreshUsage]);
 
