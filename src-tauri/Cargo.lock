@@ -526,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "codex-switcher"
-version = "0.2.15"
+version = "0.2.17"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -555,6 +555,7 @@ dependencies = [
  "urlencoding",
  "uuid",
  "webbrowser",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
