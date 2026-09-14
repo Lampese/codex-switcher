@@ -6,7 +6,9 @@ use crate::auth::{
     read_current_auth, remove_account, save_accounts, set_active_account, switch_to_account,
     sync_active_account_tokens, touch_account, AUTH_OPERATION_LOCK,
 };
-use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
+use crate::types::{
+    AccountInfo, AccountsStore, AuthData, CustomProvider, ImportAccountsSummary, StoredAccount,
+};
 
 use super::process::ensure_codex_not_running;
 
@@ -67,6 +69,8 @@ struct SlimAccountPayload {
     api_key: Option<String>,
     #[serde(rename = "r", skip_serializing_if = "Option::is_none")]
     refresh_token: Option<String>,
+    #[serde(rename = "p", default, skip_serializing_if = "Option::is_none")]
+    custom_provider: Option<CustomProvider>,
 }
 
 /// List all accounts with their info
@@ -97,11 +101,49 @@ pub async fn get_active_account_info() -> Result<Option<AccountInfo>, String> {
     }
 }
 
+fn prepare_api_key_account(
+    name: String,
+    api_key: String,
+    custom_provider: Option<CustomProvider>,
+) -> anyhow::Result<StoredAccount> {
+    let api_key = api_key.trim();
+    anyhow::ensure!(!api_key.is_empty(), "API key is required");
+    let mut account = StoredAccount::new_api_key(name.trim().to_string(), api_key.to_string());
+    account.custom_provider = custom_provider;
+    account.validate_custom_provider()?;
+    Ok(account)
+}
+
+/// Add an API key directly, optionally with a custom Responses API provider.
+#[tauri::command]
+pub async fn add_account_from_api_key(
+    name: String,
+    api_key: String,
+    custom_provider: Option<CustomProvider>,
+) -> Result<AccountInfo, String> {
+    let account =
+        prepare_api_key_account(name, api_key, custom_provider).map_err(|e| e.to_string())?;
+    let stored = add_account(account).map_err(|e| e.to_string())?;
+    let store = load_accounts().map_err(|e| e.to_string())?;
+    Ok(AccountInfo::from_stored(
+        &stored,
+        store.active_account_id.as_deref(),
+    ))
+}
+
 /// Add an account from an auth.json file
 #[tauri::command]
-pub async fn add_account_from_file(path: String, name: String) -> Result<AccountInfo, String> {
+pub async fn add_account_from_file(
+    path: String,
+    name: String,
+    custom_provider: Option<CustomProvider>,
+) -> Result<AccountInfo, String> {
     // Import from the file
-    let account = import_from_auth_json(&path, name).map_err(|e| e.to_string())?;
+    let mut account = import_from_auth_json(&path, name).map_err(|e| e.to_string())?;
+    account.custom_provider = custom_provider;
+    account
+        .validate_custom_provider()
+        .map_err(|e| e.to_string())?;
 
     // Add to storage
     let stored = add_account(account).map_err(|e| e.to_string())?;
@@ -116,8 +158,13 @@ pub async fn add_account_from_file(path: String, name: String) -> Result<Account
 pub async fn add_account_from_auth_json_text(
     name: String,
     contents: String,
+    custom_provider: Option<CustomProvider>,
 ) -> Result<AccountInfo, String> {
-    let account = import_from_auth_json_contents(&contents, name).map_err(|e| e.to_string())?;
+    let mut account = import_from_auth_json_contents(&contents, name).map_err(|e| e.to_string())?;
+    account.custom_provider = custom_provider;
+    account
+        .validate_custom_provider()
+        .map_err(|e| e.to_string())?;
     let stored = add_account(account).map_err(|e| e.to_string())?;
 
     let store = load_accounts().map_err(|e| e.to_string())?;
@@ -371,12 +418,14 @@ fn encode_slim_payload_from_store(store: &AccountsStore) -> anyhow::Result<Strin
                 auth_type: SLIM_AUTH_API_KEY,
                 api_key: Some(key.clone()),
                 refresh_token: None,
+                custom_provider: account.custom_provider.clone(),
             },
             AuthData::ChatGPT { refresh_token, .. } => SlimAccountPayload {
                 name: account.name.clone(),
                 auth_type: SLIM_AUTH_CHATGPT,
                 api_key: None,
                 refresh_token: Some(refresh_token.clone()),
+                custom_provider: None,
             },
         })
         .collect();
@@ -428,6 +477,12 @@ fn validate_slim_payload(payload: &SlimPayload) -> anyhow::Result<()> {
     let mut names = HashSet::new();
 
     for account in &payload.accounts {
+        if let Some(provider) = &account.custom_provider {
+            provider.validate()?;
+            if account.auth_type != SLIM_AUTH_API_KEY {
+                anyhow::bail!("Custom providers require API key authentication");
+            }
+        }
         if account.name.trim().is_empty() {
             anyhow::bail!("Slim import contains an account with empty name");
         }
@@ -520,7 +575,7 @@ async fn restore_slim_accounts(
     let mut restored = Vec::with_capacity(entries.len());
     let mut tasks = stream::iter(entries.into_iter().map(|entry| async move {
         let account_name = entry.name;
-        let account = match entry.auth_type {
+        let mut account = match entry.auth_type {
             SLIM_AUTH_API_KEY => StoredAccount::new_api_key(
                 account_name.clone(),
                 entry.api_key.context("API key payload is missing")?,
@@ -539,6 +594,8 @@ async fn restore_slim_accounts(
             }
             _ => anyhow::bail!("Unsupported auth type in slim payload"),
         };
+        account.custom_provider = entry.custom_provider;
+        account.validate_custom_provider()?;
         Ok::<StoredAccount, anyhow::Error>(account)
     }))
     .buffered(SLIM_IMPORT_CONCURRENCY);
@@ -676,6 +733,7 @@ fn validate_imported_store(store: &AccountsStore) -> anyhow::Result<()> {
     let mut names = HashSet::new();
 
     for account in &store.accounts {
+        account.validate_custom_provider()?;
         if account.id.trim().is_empty() {
             anyhow::bail!("Import contains an account with empty id");
         }
@@ -704,7 +762,6 @@ fn merge_accounts_store(
     imported: AccountsStore,
 ) -> (AccountsStore, ImportAccountsSummary) {
     let imported_version = imported.version;
-    let imported_active_id = imported.active_account_id;
     let total_in_payload = imported.accounts.len();
     let mut imported_count = 0usize;
     let mut existing_ids: HashSet<String> = current.accounts.iter().map(|a| a.id.clone()).collect();
@@ -728,16 +785,9 @@ fn merge_accounts_store(
         .as_ref()
         .is_some_and(|id| current.accounts.iter().any(|a| &a.id == id));
 
+    // Importing credentials does not apply them to Codex.
     if !current_active_is_valid {
-        if let Some(imported_active) = imported_active_id {
-            if current.accounts.iter().any(|a| a.id == imported_active) {
-                current.active_account_id = Some(imported_active);
-            } else {
-                current.active_account_id = current.accounts.first().map(|a| a.id.clone());
-            }
-        } else {
-            current.active_account_id = current.accounts.first().map(|a| a.id.clone());
-        }
+        current.active_account_id = None;
     }
 
     (
@@ -760,4 +810,117 @@ pub async fn get_masked_account_ids() -> Result<Vec<String>, String> {
 #[tauri::command]
 pub async fn set_masked_account_ids(ids: Vec<String>) -> Result<(), String> {
     crate::auth::storage::set_masked_account_ids(ids).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod provider_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn importing_accounts_never_activates_saved_credentials() {
+        let imported_account = custom_account();
+        let imported = AccountsStore {
+            active_account_id: Some(imported_account.id.clone()),
+            accounts: vec![imported_account],
+            ..Default::default()
+        };
+        let (merged, _) = merge_accounts_store(AccountsStore::default(), imported.clone());
+        assert!(merged.active_account_id.is_none());
+
+        let regular = StoredAccount::new_api_key("Regular".into(), "test-key".into());
+        let current = AccountsStore {
+            active_account_id: Some(regular.id.clone()),
+            accounts: vec![regular.clone()],
+            ..Default::default()
+        };
+        let (merged, _) = merge_accounts_store(current, imported);
+        assert_eq!(merged.active_account_id, Some(regular.id));
+    }
+
+    #[test]
+    fn direct_api_key_requires_nonempty_key_and_allows_optional_overrides() {
+        assert!(prepare_api_key_account("Blank".into(), "  ".into(), None).is_err());
+        let plain = prepare_api_key_account("Regular".into(), " test-key ".into(), None).unwrap();
+        assert!(plain.custom_provider.is_none());
+        assert!(matches!(plain.auth_data, AuthData::ApiKey { key } if key == "test-key"));
+        let custom = prepare_api_key_account(
+            "Gateway".into(),
+            "test-key".into(),
+            custom_account().custom_provider,
+        )
+        .unwrap();
+        assert_eq!(custom.custom_provider.unwrap().model, "custom-model");
+    }
+
+    fn custom_account() -> StoredAccount {
+        let mut value = serde_json::to_value(StoredAccount::new_api_key(
+            "Gateway".into(),
+            "test-key".into(),
+        ))
+        .unwrap();
+        value["custom_provider"] = json!({
+            "name": "Gateway", "base_url": "https://gateway.example/v1", "model": "custom-model"
+        });
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[tokio::test]
+    async fn slim_export_restores_provider_with_credentials() {
+        let store = AccountsStore {
+            accounts: vec![custom_account()],
+            ..Default::default()
+        };
+        let payload =
+            decode_slim_payload(&encode_slim_payload_from_store(&store).unwrap()).unwrap();
+        let restored = build_store_from_slim_payload(payload, &HashSet::new())
+            .await
+            .unwrap();
+        let value = serde_json::to_value(&restored.accounts[0]).unwrap();
+        assert_eq!(
+            value["custom_provider"]["base_url"],
+            "https://gateway.example/v1"
+        );
+        assert_eq!(value["custom_provider"]["model"], "custom-model");
+        assert_eq!(value["auth_data"]["key"], "test-key");
+    }
+
+    #[test]
+    fn full_export_restores_provider_with_credentials() {
+        let store = AccountsStore {
+            accounts: vec![custom_account()],
+            ..Default::default()
+        };
+        let bytes = encode_full_encrypted_store(&store, "test-passphrase").unwrap();
+        let restored = decode_full_encrypted_store(&bytes, "test-passphrase").unwrap();
+        let value = serde_json::to_value(&restored.accounts[0]).unwrap();
+        assert_eq!(value["custom_provider"]["name"], "Gateway");
+    }
+
+    #[tokio::test]
+    async fn custom_provider_warmup_is_rejected_without_network() {
+        let result = crate::api::usage::warmup_account(&custom_account()).await;
+        assert!(result.unwrap_err().to_string().contains("not supported"));
+    }
+
+    #[test]
+    fn full_import_rejects_provider_on_chatgpt_credentials() {
+        let mut value = serde_json::to_value(custom_account()).unwrap();
+        value["auth_mode"] = json!("chat_g_p_t");
+        value["auth_data"] = json!({"type":"chat_g_p_t", "id_token":"test", "access_token":"test", "refresh_token":"test", "account_id":"test"});
+        let store = AccountsStore {
+            accounts: vec![serde_json::from_value(value).unwrap()],
+            ..Default::default()
+        };
+        assert!(validate_imported_store(&store).is_err());
+    }
+
+    #[test]
+    fn old_slim_accounts_remain_importable() {
+        let payload: SlimPayload =
+            serde_json::from_value(json!({"v":1,"c":[{"n":"Regular", "t":0, "k":"test-key"}]}))
+                .unwrap();
+        validate_slim_payload(&payload).unwrap();
+        assert!(payload.accounts[0].custom_provider.is_none());
+    }
 }

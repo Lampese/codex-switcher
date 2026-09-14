@@ -548,9 +548,11 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-process",
  "tauri-plugin-updater",
+ "tempfile",
  "thiserror 2.0.18",
  "tiny_http",
  "tokio",
+ "toml_edit 0.25.4+spec-1.1.0",
  "url",
  "urlencoding",
  "uuid",
@@ -4921,6 +4923,7 @@ dependencies = [
  "indexmap 2.13.0",
  "toml_datetime 1.0.0+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 0.7.15",
 ]
 

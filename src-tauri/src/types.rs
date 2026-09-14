@@ -70,6 +70,37 @@ impl Default for AccountsStore {
     }
 }
 
+/// Optional OpenAI Responses-compatible gateway settings. Credentials remain in AuthData.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomProvider {
+    pub name: String,
+    pub base_url: String,
+    pub model: String,
+}
+
+impl CustomProvider {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.name.trim().is_empty(), "Provider name is required");
+        anyhow::ensure!(!self.model.trim().is_empty(), "Provider model is required");
+        let url = url::Url::parse(&self.base_url)
+            .map_err(|_| anyhow::anyhow!("Invalid provider base URL"))?;
+        let local = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+        anyhow::ensure!(
+            url.host_str().is_some()
+                && (url.scheme() == "https" || (url.scheme() == "http" && local)),
+            "Provider URL must use HTTPS (HTTP is allowed only on localhost)"
+        );
+        anyhow::ensure!(
+            url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none(),
+            "Provider URL must not contain credentials, a query, or a fragment"
+        );
+        Ok(())
+    }
+}
+
 /// A stored account with all its metadata and credentials
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredAccount {
@@ -86,6 +117,8 @@ pub struct StoredAccount {
     pub subscription_expires_at: Option<DateTime<Utc>>,
     /// Authentication mode
     pub auth_mode: AuthMode,
+    #[serde(default)]
+    pub custom_provider: Option<CustomProvider>,
     /// Authentication credentials
     pub auth_data: AuthData,
     /// When the account was added
@@ -95,6 +128,18 @@ pub struct StoredAccount {
 }
 
 impl StoredAccount {
+    pub fn validate_custom_provider(&self) -> anyhow::Result<()> {
+        if let Some(provider) = &self.custom_provider {
+            anyhow::ensure!(
+                self.auth_mode == AuthMode::ApiKey
+                    && matches!(self.auth_data, AuthData::ApiKey { .. }),
+                "Custom providers require API key authentication"
+            );
+            provider.validate()?;
+        }
+        Ok(())
+    }
+
     fn resolved_name(
         name: String,
         email: Option<&String>,
@@ -130,6 +175,7 @@ impl StoredAccount {
             plan_type: None,
             subscription_expires_at: None,
             auth_mode: AuthMode::ApiKey,
+            custom_provider: None,
             auth_data: AuthData::ApiKey { key: api_key },
             created_at: Utc::now(),
             last_used_at: None,
@@ -155,6 +201,7 @@ impl StoredAccount {
             plan_type,
             subscription_expires_at,
             auth_mode: AuthMode::ChatGPT,
+            custom_provider: None,
             auth_data: AuthData::ChatGPT {
                 id_token,
                 access_token,
@@ -353,6 +400,8 @@ pub struct AccountInfo {
     pub plan_type: Option<String>,
     pub subscription_expires_at: Option<DateTime<Utc>>,
     pub auth_mode: AuthMode,
+    #[serde(default)]
+    pub custom_provider: Option<CustomProvider>,
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub last_used_at: Option<DateTime<Utc>>,
@@ -377,6 +426,7 @@ impl AccountInfo {
                 .clone()
                 .or(fallback_subscription_expires_at),
             auth_mode: account.auth_mode,
+            custom_provider: account.custom_provider.clone(),
             is_active: active_id == Some(&account.id),
             created_at: account.created_at,
             last_used_at: account.last_used_at,
@@ -530,5 +580,86 @@ mod tests {
         assert_eq!(settings.tray_display_mode, TrayDisplayMode::ActiveUsageText);
         assert_eq!(settings.dock_display_mode, DockDisplayMode::ShowInDock);
         assert!(settings.close_behavior_prompt_enabled);
+    }
+}
+
+#[cfg(test)]
+mod custom_provider_tests {
+    use super::*;
+    #[test]
+    fn provider_url_validation_and_oauth_rejection() {
+        for base_url in [
+            "https://gateway.example/v1",
+            "http://localhost:8080/v1",
+            "http://127.0.0.1/v1",
+            "http://[::1]:8080/v1",
+        ] {
+            CustomProvider {
+                name: "Gateway".into(),
+                base_url: base_url.into(),
+                model: "model".into(),
+            }
+            .validate()
+            .unwrap();
+        }
+        for base_url in [
+            "http://gateway.example/v1",
+            "https://user:secret@example.com",
+            "https://example.com?key=secret",
+            "https://example.com/#fragment",
+            "file:///tmp/server",
+            "not a URL",
+        ] {
+            assert!(CustomProvider {
+                name: "Gateway".into(),
+                base_url: base_url.into(),
+                model: "model".into()
+            }
+            .validate()
+            .is_err());
+        }
+        let mut account = StoredAccount::new_chatgpt(
+            "ChatGPT".into(),
+            None,
+            None,
+            None,
+            "id".into(),
+            "access".into(),
+            "refresh".into(),
+            None,
+        );
+        account.custom_provider = Some(CustomProvider {
+            name: "Gateway".into(),
+            base_url: "https://gateway.example".into(),
+            model: "model".into(),
+        });
+        assert!(account.validate_custom_provider().is_err());
+    }
+    #[test]
+    fn legacy_account_without_provider_still_deserializes() {
+        let mut value = serde_json::to_value(StoredAccount::new_api_key(
+            "Normal".into(),
+            "test-key".into(),
+        ))
+        .unwrap();
+        value.as_object_mut().unwrap().remove("custom_provider");
+        assert!(serde_json::from_value::<StoredAccount>(value)
+            .unwrap()
+            .custom_provider
+            .is_none());
+    }
+    #[test]
+    fn custom_provider_survives_account_round_trip() {
+        let mut value = serde_json::to_value(StoredAccount::new_api_key(
+            "Gateway".into(),
+            "test-key".into(),
+        ))
+        .unwrap();
+        value["custom_provider"] = serde_json::json!({"name":"Gateway", "base_url":"https://gateway.example/v1", "model":"test-model"});
+        let account: StoredAccount = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(account).unwrap()["custom_provider"],
+            value["custom_provider"]
+        );
     }
 }
