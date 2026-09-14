@@ -1,6 +1,8 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import type { Update } from "@tauri-apps/plugin-updater";
 import { isTauriRuntime } from "../lib/platform";
+
+const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 type UpdateStatus =
   | { kind: "idle" }
@@ -13,10 +15,12 @@ type UpdateStatus =
 export function UpdateChecker() {
   const [status, setStatus] = useState<UpdateStatus>({ kind: "idle" });
   const [dismissed, setDismissed] = useState(false);
+  const checkInFlightRef = useRef(false);
 
   const checkForUpdate = useCallback(async () => {
-    if (!isTauriRuntime()) return;
+    if (!isTauriRuntime() || checkInFlightRef.current) return;
 
+    checkInFlightRef.current = true;
     try {
       setStatus({ kind: "checking" });
       setDismissed(false);
@@ -30,12 +34,21 @@ export function UpdateChecker() {
     } catch (err) {
       console.error("Update check failed:", err);
       setStatus({ kind: "idle" });
+    } finally {
+      checkInFlightRef.current = false;
     }
   }, []);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
+
     void checkForUpdate();
+
+    const interval = window.setInterval(() => {
+      void checkForUpdate();
+    }, UPDATE_CHECK_INTERVAL_MS);
+
+    return () => window.clearInterval(interval);
   }, [checkForUpdate]);
 
   const handleDownloadAndInstall = async () => {
