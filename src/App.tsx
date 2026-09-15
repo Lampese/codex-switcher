@@ -65,7 +65,7 @@ type AutoWarmupLedger = Record<
     lastAutoWindowKind?: AutoWarmupWindowKind;
   }
 >;
-const appWindow = getCurrentWindow();
+const appWindow = isTauriRuntime() ? getCurrentWindow() : null;
 const isMacOs =
   typeof navigator !== "undefined" &&
   /(Mac|iPhone|iPod|iPad)/i.test(navigator.userAgent);
@@ -387,14 +387,14 @@ function App() {
 
   const handleTitlebarDrag = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
-      if (!isTauriRuntime() || event.button !== 0) return;
+      if (!appWindow || event.button !== 0) return;
       void appWindow.startDragging();
     },
     []
   );
 
   const handleTitlebarDoubleClick = useCallback(() => {
-    if (!isTauriRuntime()) return;
+    if (!appWindow) return;
     void appWindow.toggleMaximize();
   }, []);
 
@@ -520,7 +520,7 @@ function App() {
   }, [themeMode]);
 
   useEffect(() => {
-    if (!isTauriRuntime() || isMacOs) return;
+    if (!appWindow || isMacOs) return;
 
     let unlisten: (() => void) | undefined;
 
@@ -1354,7 +1354,7 @@ function App() {
             onDoubleClick={handleTitlebarDoubleClick}
             className={`h-full flex-1 select-none cursor-default ${isMacOs ? "ml-18 mr-2" : "mr-3"}`}
           />
-          {!isMacOs && (
+          {appWindow && !isMacOs && (
             <div className="flex items-center gap-1">
               <button
                 onClick={() => {
