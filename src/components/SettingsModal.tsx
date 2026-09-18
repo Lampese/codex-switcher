@@ -2,13 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { DesktopReopenPreference } from "../lib/desktopReopen";
 import type { CodexClosePreference } from "../lib/codexClosePreference";
 import { invokeBackend, isTauriRuntime } from "../lib/platform";
-import { translate } from "../lib/i18n";
+import { useI18n, type SupportedLanguage } from "../lib/i18n";
 import type { DockDisplayMode } from "../types";
 
 type TrayDisplayMode = "icon_and_session" | "active_usage_text" | "hidden";
 interface DisplaySettings {
   tray_display_mode: TrayDisplayMode;
   dock_display_mode: DockDisplayMode | null;
+  language: SupportedLanguage;
 }
 
 interface SettingsModalProps {
@@ -26,6 +27,7 @@ export function SettingsModal({
   onClosePreferenceChange,
   onClose,
 }: SettingsModalProps) {
+  const { language, setLanguage, t } = useI18n();
   const [displaySettings, setDisplaySettings] = useState<DisplaySettings | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -82,6 +84,16 @@ export function SettingsModal({
     }
   };
 
+  const changeLanguage = async (next: SupportedLanguage) => {
+    setLanguage(next);
+    if (!desktop) return;
+    try {
+      await invokeBackend("set_language", { language: next });
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
   const selectClassName = "w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 disabled:opacity-50";
 
   return (
@@ -89,10 +101,22 @@ export function SettingsModal({
       <div role="dialog" aria-modal="true" aria-labelledby="settings-title" className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-md mx-4 shadow-xl">
         <div className="p-5 border-b border-gray-100 dark:border-gray-800">
           <h2 id="settings-title" className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-            {translate("settingsTitle")}
+            {t("settingsTitle")}
           </h2>
         </div>
         <div className="p-5 space-y-3 max-h-[65vh] overflow-y-auto">
+          <label htmlFor="language" className="block text-sm font-medium text-gray-900 dark:text-gray-100">
+            {t("Language")}
+          </label>
+          <select
+            id="language"
+            value={language}
+            onChange={(event) => void changeLanguage(event.target.value as SupportedLanguage)}
+            className={selectClassName}
+          >
+            <option value="en-US">{t("English")}</option>
+            <option value="zh-CN">{t("Simplified Chinese")}</option>
+          </select>
           {desktop && (
             <>
               {displaySettings ? (
@@ -127,7 +151,7 @@ export function SettingsModal({
                   )}
                 </>
               ) : !error && <p className="text-sm text-gray-500 dark:text-gray-400">Loading display settings...</p>}
-              {error && <p role="alert" className="text-sm text-red-600 dark:text-red-300">Could not update display settings: {error}</p>}
+              {error && <p role="alert" data-i18n-ignore className="text-sm text-red-600 dark:text-red-300">Could not update display settings: {error}</p>}
               <div className="border-t border-gray-100 dark:border-gray-800" />
             </>
           )}

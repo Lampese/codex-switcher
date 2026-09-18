@@ -443,7 +443,7 @@ function TrayMenu() {
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-1.5">
                     <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                      {account.name}
+                      <span data-i18n-ignore>{account.name}</span>
                     </span>
                     {plan && (
                       <span className="shrink-0 rounded bg-gray-200 px-1.5 py-0.5 text-[10px] font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200">
@@ -494,7 +494,7 @@ function TrayMenu() {
                       Usage unavailable
                     </span>
                   ) : account.email ? (
-                    <span className="block truncate text-xs text-gray-500 dark:text-gray-400">
+                    <span data-i18n-ignore className="block truncate text-xs text-gray-500 dark:text-gray-400">
                       {account.email}
                     </span>
                   ) : null}

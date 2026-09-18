@@ -288,6 +288,7 @@ export function AccountCard({
               />
             ) : (
               <h3
+                data-i18n-ignore
                 className="font-semibold text-gray-900 dark:text-gray-100 truncate cursor-pointer hover:text-gray-600 dark:hover:text-gray-300"
                 onClick={() => {
                   if (masked) return;
@@ -301,7 +302,7 @@ export function AccountCard({
             )}
           </div>
           {account.email && (
-            <p className="text-sm text-gray-500 dark:text-gray-400 truncate">
+            <p data-i18n-ignore className="text-sm text-gray-500 dark:text-gray-400 truncate">
               <BlurredText blur={masked}>{account.email}</BlurredText>
             </p>
           )}

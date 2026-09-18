@@ -7,11 +7,11 @@ use std::{
 
 use tauri::{AppHandle, Manager, Runtime};
 
-use crate::auth::load_app_settings;
-#[cfg(target_os = "macos")]
-use crate::auth::mutate_app_settings;
-use crate::types::{
-    DockDisplayMode, TrayDisplayMode, UsageInfo, WarmupPolicy, WarmupPolicyPatch, WarmupState,
+use crate::{
+    auth::{load_app_settings, mutate_app_settings},
+    types::{
+        DockDisplayMode, TrayDisplayMode, UsageInfo, WarmupPolicy, WarmupPolicyPatch, WarmupState,
+    },
 };
 
 /// Label of the borderless tray popup window.
@@ -105,6 +105,7 @@ pub fn quit_app(app: AppHandle) {
 pub struct DisplaySettings {
     tray_display_mode: TrayDisplayMode,
     dock_display_mode: Option<DockDisplayMode>,
+    language: String,
 }
 
 #[tauri::command]
@@ -117,6 +118,7 @@ pub fn get_display_settings() -> Result<DisplaySettings, String> {
         } else {
             None
         },
+        language: settings.language,
     })
 }
 
@@ -135,6 +137,38 @@ pub fn get_warmup_state() -> Result<WarmupState, String> {
 #[tauri::command]
 pub fn set_warmup_policy(patch: WarmupPolicyPatch) -> Result<(), String> {
     crate::warmup_scheduler::set_policy(patch).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn get_language() -> String {
+    crate::auth::load_app_settings()
+        .map(|settings| settings.language)
+        .unwrap_or_else(|_| "en-US".to_string())
+}
+
+#[tauri::command]
+pub fn set_language(app: AppHandle, language: String) -> Result<(), String> {
+    let normalized = if language.eq_ignore_ascii_case("zh-cn") {
+        "zh-CN".to_string()
+    } else if language.eq_ignore_ascii_case("en-us") {
+        "en-US".to_string()
+    } else {
+        return Err(format!("Unsupported language: {language}"));
+    };
+
+    mutate_app_settings(|settings| {
+        settings.language = normalized;
+        Ok(())
+    })
+    .map_err(|error| error.to_string())?;
+    #[cfg(desktop)]
+    {
+        crate::app_menu::refresh(&app).map_err(|error| error.to_string())?;
+        crate::tray::refresh(&app);
+    }
+    #[cfg(not(desktop))]
+    let _ = &app;
+    Ok(())
 }
 
 #[tauri::command]
