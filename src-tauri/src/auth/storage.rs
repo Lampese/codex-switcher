@@ -110,6 +110,12 @@ pub(crate) fn acquire_mutation_lock(lock_name: &str) -> Result<MutationLock> {
     acquire_mutation_lock_at(&config_dir.join(lock_name))
 }
 
+pub(crate) async fn acquire_auth_operation_lock() -> Result<MutationLock> {
+    tokio::task::spawn_blocking(|| acquire_mutation_lock("auth-operation.lock"))
+        .await
+        .context("Auth operation lock task failed")?
+}
+
 fn acquire_mutation_lock_at(path: &Path) -> Result<MutationLock> {
     #[cfg(unix)]
     {

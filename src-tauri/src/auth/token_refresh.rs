@@ -6,9 +6,10 @@ use chrono::Utc;
 use reqwest::StatusCode;
 use tokio::time::{sleep, Duration};
 
+use super::storage::acquire_auth_operation_lock;
 use super::{
     load_accounts, mutate_accounts, read_current_auth, switch_to_account,
-    sync_active_account_tokens, update_account_chatgpt_tokens, AUTH_OPERATION_LOCK,
+    sync_active_account_tokens, update_account_chatgpt_tokens,
 };
 use crate::types::{
     parse_chatgpt_id_token_claims, AccountsStore, AuthData, AuthDotJson, StoredAccount,
@@ -43,11 +44,12 @@ pub async fn ensure_chatgpt_tokens_fresh(account: &StoredAccount) -> Result<Stor
         return Ok(account.clone());
     }
 
-    let _auth_guard = AUTH_OPERATION_LOCK.lock().await;
+    let _auth_guard = acquire_auth_operation_lock().await?;
     ensure_chatgpt_tokens_fresh_locked(account).await
 }
 
-/// Ensure ChatGPT OAuth tokens are fresh while the caller holds AUTH_OPERATION_LOCK.
+/// Ensure ChatGPT OAuth tokens are fresh while the caller holds the
+/// cross-process auth-operation lock.
 pub(crate) async fn ensure_chatgpt_tokens_fresh_locked(
     account: &StoredAccount,
 ) -> Result<StoredAccount> {
@@ -77,7 +79,7 @@ pub async fn refresh_chatgpt_tokens(account: &StoredAccount) -> Result<StoredAcc
         return Ok(account.clone());
     }
 
-    let _auth_guard = AUTH_OPERATION_LOCK.lock().await;
+    let _auth_guard = acquire_auth_operation_lock().await?;
     refresh_chatgpt_tokens_locked(account).await
 }
 
@@ -99,7 +101,7 @@ pub async fn refresh_chatgpt_tokens_after_unauthorized(
         return Ok(account.clone());
     }
 
-    let _auth_guard = AUTH_OPERATION_LOCK.lock().await;
+    let _auth_guard = acquire_auth_operation_lock().await?;
     let (current, _) = load_account_reconciling_live_auth(&account.id)?;
 
     let AuthData::ChatGPT { access_token, .. } = &current.auth_data else {
