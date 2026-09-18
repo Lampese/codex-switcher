@@ -295,6 +295,24 @@ pub fn load_accounts() -> Result<AccountsStore> {
     Ok(store)
 }
 
+fn parse_existing_app_settings(content: &str) -> Result<AppSettings> {
+    let raw: serde_json::Value =
+        serde_json::from_str(content).context("Failed to parse settings JSON")?;
+    let had_language_preference = raw.get("ui_language_preference").is_some()
+        || raw.get("language").is_some();
+
+    let mut settings: AppSettings =
+        serde_json::from_value(raw).context("Failed to decode app settings")?;
+
+    // Existing installations predate localization. Keep their observable
+    // English UI on upgrade instead of silently switching to the OS language.
+    if !had_language_preference {
+        settings.ui_language_preference = crate::types::UiLanguagePreference::English;
+    }
+
+    Ok(settings)
+}
+
 pub fn load_app_settings() -> Result<AppSettings> {
     let path = get_settings_file()?;
 
@@ -304,21 +322,8 @@ pub fn load_app_settings() -> Result<AppSettings> {
 
     let content = fs::read_to_string(&path)
         .with_context(|| format!("Failed to read settings file: {}", path.display()))?;
-    let raw: serde_json::Value = serde_json::from_str(&content)
-        .with_context(|| format!("Failed to parse settings file: {}", path.display()))?;
-    let had_language_preference = raw.get("ui_language_preference").is_some()
-        || raw.get("language").is_some();
-
-    let mut settings: AppSettings = serde_json::from_value(raw)
-        .with_context(|| format!("Failed to parse settings file: {}", path.display()))?;
-
-    // Existing installations predate localization. Keep their observable
-    // English UI on upgrade instead of silently switching to the OS language.
-    if !had_language_preference {
-        settings.ui_language_preference = crate::types::UiLanguagePreference::English;
-    }
-
-    Ok(settings)
+    parse_existing_app_settings(&content)
+        .with_context(|| format!("Failed to parse settings file: {}", path.display()))
 }
 
 pub fn save_app_settings(settings: &AppSettings) -> Result<()> {
@@ -545,11 +550,35 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_mutation_lock_at, sync_active_account_tokens, write_file_atomic,
-        write_file_atomic_with_pre_replace,
+        acquire_mutation_lock_at, parse_existing_app_settings, sync_active_account_tokens,
+        write_file_atomic, write_file_atomic_with_pre_replace,
     };
-    use crate::types::{AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData};
+    use crate::types::{
+        AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData, UiLanguagePreference,
+    };
     use base64::Engine;
+
+    #[test]
+    fn existing_settings_without_language_stay_english() {
+        let settings = parse_existing_app_settings(
+            r#"{"tray_display_mode":"active_usage_text","dock_display_mode":"show_in_dock"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            settings.ui_language_preference,
+            UiLanguagePreference::English
+        );
+    }
+
+    #[test]
+    fn legacy_explicit_language_is_preserved_as_preference() {
+        let settings =
+            parse_existing_app_settings(r#"{"language":"zh-CN"}"#).unwrap();
+        assert_eq!(
+            settings.ui_language_preference,
+            UiLanguagePreference::SimplifiedChinese
+        );
+    }
 
     #[test]
     fn mutation_lock_serializes_competing_writers() {
