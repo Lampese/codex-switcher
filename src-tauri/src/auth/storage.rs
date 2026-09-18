@@ -104,8 +104,10 @@ fn acquire_mutation_lock(lock_name: &str) -> Result<MutationLock> {
     let config_dir = get_config_dir()?;
     fs::create_dir_all(&config_dir)
         .with_context(|| format!("Failed to create config directory: {}", config_dir.display()))?;
-    let path = config_dir.join(lock_name);
+    acquire_mutation_lock_at(&config_dir.join(lock_name))
+}
 
+fn acquire_mutation_lock_at(path: &Path) -> Result<MutationLock> {
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
@@ -116,13 +118,13 @@ fn acquire_mutation_lock(lock_name: &str) -> Result<MutationLock> {
             .read(true)
             .write(true)
             .mode(0o600)
-            .open(&path)
-            .with_context(|| format!("Failed to open account lock: {}", path.display()))?;
+            .open(path)
+            .with_context(|| format!("Failed to open mutation lock: {}", path.display()))?;
 
         let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
         if result != 0 {
             return Err(std::io::Error::last_os_error())
-                .with_context(|| format!("Failed to lock account store: {}", path.display()));
+                .with_context(|| format!("Failed to acquire mutation lock: {}", path.display()));
         }
         return Ok(MutationLock { file });
     }
@@ -138,7 +140,7 @@ fn acquire_mutation_lock(lock_name: &str) -> Result<MutationLock> {
                 .read(true)
                 .write(true)
                 .share_mode(0)
-                .open(&path)
+                .open(path)
             {
                 Ok(file) => return Ok(MutationLock { file }),
                 Err(error) if std::time::Instant::now() < deadline => {
@@ -147,7 +149,7 @@ fn acquire_mutation_lock(lock_name: &str) -> Result<MutationLock> {
                 }
                 Err(error) => {
                     return Err(error).with_context(|| {
-                        format!("Timed out waiting for account store lock: {}", path.display())
+                        format!("Timed out waiting for mutation lock: {}", path.display())
                     });
                 }
             }
@@ -160,13 +162,21 @@ fn acquire_mutation_lock(lock_name: &str) -> Result<MutationLock> {
             .create(true)
             .read(true)
             .write(true)
-            .open(&path)
-            .with_context(|| format!("Failed to open account lock: {}", path.display()))?;
+            .open(path)
+            .with_context(|| format!("Failed to open mutation lock: {}", path.display()))?;
         Ok(MutationLock { file })
     }
 }
 
 pub(crate) fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_file_atomic_with_pre_replace(path, bytes, || Ok(()))
+}
+
+fn write_file_atomic_with_pre_replace(
+    path: &Path,
+    bytes: &[u8],
+    before_replace: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     let parent = path
         .parent()
         .context("Atomic write target has no parent directory")?;
@@ -204,6 +214,7 @@ pub(crate) fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
             .with_context(|| format!("Failed to sync temporary file: {}", temp_path.display()))?;
         drop(file);
 
+        before_replace()?;
         replace_file(&temp_path, path)?;
 
         #[cfg(unix)]
@@ -512,9 +523,66 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{sync_active_account_tokens, write_file_atomic};
+    use super::{
+        acquire_mutation_lock_at, sync_active_account_tokens, write_file_atomic,
+        write_file_atomic_with_pre_replace,
+    };
     use crate::types::{AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData};
     use base64::Engine;
+
+    #[test]
+    fn mutation_lock_serializes_competing_writers() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-switcher-mutation-lock-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.lock");
+
+        let first = acquire_mutation_lock_at(&path).unwrap();
+        let second_path = path.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let second = acquire_mutation_lock_at(&second_path).unwrap();
+            tx.send(()).unwrap();
+            drop(second);
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(rx.try_recv().is_err());
+
+        drop(first);
+        rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn atomic_write_preserves_old_file_when_pre_replace_step_fails() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-switcher-atomic-failure-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        std::fs::write(&path, b"old").unwrap();
+
+        let result = write_file_atomic_with_pre_replace(&path, b"new", || {
+            anyhow::bail!("injected failure before replacement")
+        });
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn atomic_write_replaces_existing_file() {
