@@ -12,7 +12,8 @@ test("backup passphrase collection uses a masked React input instead of a browse
   const appSource = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
   const platformSource = readFileSync(new URL("../src/lib/platform.ts", import.meta.url), "utf8");
   assert.match(appSource, /id="backup-passphrase"[\s\S]*type="password"/);
-  assert.doesNotMatch(platformSource, /window\.prompt/);
+  assert.match(platformSource, /requestPassphrase/);
+  assert.doesNotMatch(appSource, /window\.prompt/);
 });
 
 test("passphrase-required backend errors remain detectable for import retry", () => {
