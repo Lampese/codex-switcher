@@ -161,25 +161,31 @@ pub fn save_accounts(store: &AccountsStore) -> Result<()> {
     Ok(())
 }
 
+/// Apply one logical account-store mutation and persist its resulting snapshot.
+/// This boundary owns the complete read-modify-write transaction.
+pub fn mutate_accounts<T>(mutate: impl FnOnce(&mut AccountsStore) -> Result<T>) -> Result<T> {
+    let mut store = load_accounts()?;
+    let result = mutate(&mut store)?;
+    save_accounts(&store)?;
+    Ok(result)
+}
+
 /// Add a new account to the store
 pub fn add_account(account: StoredAccount) -> Result<StoredAccount> {
-    let mut store = load_accounts()?;
+    mutate_accounts(|store| {
+        if store.accounts.iter().any(|a| a.name == account.name) {
+            anyhow::bail!("An account with name '{}' already exists", account.name);
+        }
 
-    // Check for duplicate names
-    if store.accounts.iter().any(|a| a.name == account.name) {
-        anyhow::bail!("An account with name '{}' already exists", account.name);
-    }
+        let account_clone = account.clone();
+        store.accounts.push(account);
 
-    let account_clone = account.clone();
-    store.accounts.push(account);
+        if store.accounts.len() == 1 {
+            store.active_account_id = Some(account_clone.id.clone());
+        }
 
-    // If this is the first account, make it active
-    if store.accounts.len() == 1 {
-        store.active_account_id = Some(account_clone.id.clone());
-    }
-
-    save_accounts(&store)?;
-    Ok(account_clone)
+        Ok(account_clone)
+    })
 }
 
 /// Remove an account by ID
