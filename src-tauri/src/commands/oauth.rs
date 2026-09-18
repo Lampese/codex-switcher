@@ -7,7 +7,7 @@ use tokio::sync::oneshot;
 use crate::auth::oauth_server::{start_oauth_login, wait_for_oauth_login, OAuthLoginResult};
 use crate::auth::storage::acquire_auth_operation_lock;
 use crate::auth::{
-    add_account, load_accounts, set_active_account, switch_to_account, touch_account,
+    add_account, load_accounts, read_current_auth, reconcile_active_projection, save_accounts,
 };
 use crate::types::{AccountInfo, OAuthLoginInfo};
 
@@ -60,16 +60,15 @@ pub async fn complete_login() -> Result<AccountInfo, String> {
     let _auth_guard = acquire_auth_operation_lock()
         .await
         .map_err(|e| e.to_string())?;
-
-    // Add the account to storage
+    // OAuth completion creates a saved profile only. Activation remains an
+    // explicit switch so it cannot bypass the process guard or activation flow.
     let stored = add_account(account).map_err(|e| e.to_string())?;
 
-    // Make it active and switch to it
-    set_active_account(&stored.id).map_err(|e| e.to_string())?;
-    switch_to_account(&stored).map_err(|e| e.to_string())?;
-    touch_account(&stored.id).map_err(|e| e.to_string())?;
-
-    let store = load_accounts().map_err(|e| e.to_string())?;
+    let mut store = load_accounts().map_err(|e| e.to_string())?;
+    let auth = read_current_auth().map_err(|e| e.to_string())?;
+    if reconcile_active_projection(&mut store, auth.as_ref()) {
+        save_accounts(&store).map_err(|e| e.to_string())?;
+    }
     let active_id = store.active_account_id.as_deref();
 
     Ok(AccountInfo::from_stored(&stored, active_id))
