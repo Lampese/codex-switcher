@@ -64,8 +64,13 @@ pub async fn complete_login() -> Result<AccountInfo, String> {
 
     let store = load_accounts().map_err(|e| e.to_string())?;
     let active_id = store.active_account_id.as_deref();
+    let activated = store
+        .accounts
+        .iter()
+        .find(|account| account.id == stored.id)
+        .ok_or_else(|| "OAuth account disappeared after activation".to_string())?;
 
-    Ok(AccountInfo::from_stored(&stored, active_id))
+    Ok(AccountInfo::from_stored(activated, active_id))
 }
 
 /// Cancel a pending OAuth login
