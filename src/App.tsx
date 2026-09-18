@@ -534,7 +534,7 @@ function App() {
 
     void syncMaximizedState();
 
-    appWindow
+    getAppWindow()
       .onResized(() => {
         void syncMaximizedState();
       })
