@@ -8,7 +8,7 @@ use tauri::{
 #[cfg(target_os = "macos")]
 pub(crate) use crate::types::DockDisplayMode;
 use crate::{
-    auth::{load_app_settings, save_app_settings},
+    auth::{load_app_settings, mutate_app_settings},
     types::{AppSettings, TrayDisplayMode},
 };
 
@@ -77,11 +77,14 @@ pub(crate) fn update_tray_display_mode(app: &AppHandle, mode: TrayDisplayMode) {
 }
 
 pub(crate) fn set_tray_display_mode(app: &AppHandle, mode: TrayDisplayMode) -> anyhow::Result<()> {
-    let mut settings = load_app_settings()?;
-    settings.tray_display_mode = mode;
-    #[cfg(target_os = "macos")]
-    let dock_mode_changed = ensure_dock_entry_for_tray_mode(&mut settings);
-    save_app_settings(&settings)?;
+    let (settings, dock_mode_changed) = mutate_app_settings(|settings| {
+        settings.tray_display_mode = mode;
+        #[cfg(target_os = "macos")]
+        let dock_mode_changed = ensure_dock_entry_for_tray_mode(settings);
+        #[cfg(not(target_os = "macos"))]
+        let dock_mode_changed = false;
+        Ok((settings.clone(), dock_mode_changed))
+    })?;
 
     #[cfg(target_os = "macos")]
     if dock_mode_changed {
@@ -114,43 +117,31 @@ pub(crate) fn set_dock_display_mode<R: Runtime>(
     app: &AppHandle<R>,
     mode: DockDisplayMode,
 ) -> anyhow::Result<AppSettings> {
-    let mut settings = load_app_settings().unwrap_or_default();
-    if settings.dock_display_mode == mode {
-        let changed = ensure_menu_bar_entry_for_dock_mode(&mut settings);
-        if changed {
-            save_app_settings(&settings)?;
-        }
-        apply_dock_display_mode(app, mode);
-        if changed {
-            if let Err(error) = refresh(app) {
-                eprintln!("Failed to refresh app menu: {error}");
-            }
-            crate::tray::refresh(app);
-        }
-        return Ok(settings);
-    }
+    let (settings, changed) = mutate_app_settings(|settings| {
+        let dock_changed = settings.dock_display_mode != mode;
+        settings.dock_display_mode = mode;
+        let tray_changed = ensure_menu_bar_entry_for_dock_mode(settings);
+        Ok((settings.clone(), dock_changed || tray_changed))
+    })?;
 
-    settings.dock_display_mode = mode;
-    ensure_menu_bar_entry_for_dock_mode(&mut settings);
-    save_app_settings(&settings)?;
-    apply_dock_display_mode(app, mode);
+    apply_dock_display_mode(app, settings.dock_display_mode);
 
-    if let Err(error) = refresh(app) {
-        eprintln!("Failed to refresh app menu: {error}");
+    if changed {
+        if let Err(error) = refresh(app) {
+            eprintln!("Failed to refresh app menu: {error}");
+        }
+        crate::tray::refresh(app);
     }
-    crate::tray::refresh(app);
     Ok(settings)
 }
 
 #[cfg(target_os = "macos")]
 fn apply_saved_dock_display_mode<R: Runtime>(app: &AppHandle<R>) {
-    let mut settings = load_app_settings().unwrap_or_default();
-    let changed = ensure_menu_bar_entry_for_dock_mode(&mut settings);
-    if changed {
-        if let Err(error) = save_app_settings(&settings) {
-            eprintln!("Failed to save app settings: {error}");
-        }
-    }
+    let settings = mutate_app_settings(|settings| {
+        ensure_menu_bar_entry_for_dock_mode(settings);
+        Ok(settings.clone())
+    })
+    .unwrap_or_default();
     apply_dock_display_mode(app, settings.dock_display_mode);
 }
 
