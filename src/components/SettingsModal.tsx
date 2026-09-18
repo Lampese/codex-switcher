@@ -2,14 +2,21 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { DesktopReopenPreference } from "../lib/desktopReopen";
 import type { CodexClosePreference } from "../lib/codexClosePreference";
 import { invokeBackend, isTauriRuntime } from "../lib/platform";
-import { useI18n, type SupportedLanguage } from "../lib/i18n";
+import {
+  useI18n,
+  type BrowserLanguagePreference,
+  type SupportedLanguage,
+} from "../lib/i18n";
 import type { DockDisplayMode } from "../types";
 
 type TrayDisplayMode = "icon_and_session" | "active_usage_text" | "hidden";
+type DesktopLanguagePreference = "system" | SupportedLanguage;
+
 interface DisplaySettings {
   tray_display_mode: TrayDisplayMode;
   dock_display_mode: DockDisplayMode | null;
-  language: SupportedLanguage;
+  ui_language_preference: DesktopLanguagePreference;
+  resolved_language: SupportedLanguage;
 }
 
 interface SettingsModalProps {
@@ -27,7 +34,7 @@ export function SettingsModal({
   onClosePreferenceChange,
   onClose,
 }: SettingsModalProps) {
-  const { language, setLanguage, t } = useI18n();
+  const { browserPreference, setBrowserPreference, t } = useI18n();
   const [displaySettings, setDisplaySettings] = useState<DisplaySettings | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -84,15 +91,32 @@ export function SettingsModal({
     }
   };
 
-  const changeLanguage = async (next: SupportedLanguage) => {
-    setLanguage(next);
-    if (!desktop) return;
+  const changeLanguage = async (
+    next: DesktopLanguagePreference | BrowserLanguagePreference
+  ) => {
+    setError(null);
+
+    if (!desktop) {
+      setBrowserPreference(next as BrowserLanguagePreference);
+      return;
+    }
+
+    setSaving(true);
     try {
       await invokeBackend("set_language", { language: next });
+      await loadDisplaySettings();
     } catch (err) {
-      setError(String(err));
+      requestId.current += 1;
+      const message = err instanceof Error ? err.message : String(err);
+      setError(t("settings.language.save_failed", { error: message }));
+    } finally {
+      setSaving(false);
     }
   };
+
+  const languagePreference = desktop
+    ? displaySettings?.ui_language_preference ?? "system"
+    : browserPreference;
 
   const selectClassName = "w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 disabled:opacity-50";
 
@@ -106,17 +130,34 @@ export function SettingsModal({
         </div>
         <div className="p-5 space-y-3 max-h-[65vh] overflow-y-auto">
           <label htmlFor="language" className="block text-sm font-medium text-gray-900 dark:text-gray-100">
-            {t("settings.language")}
+            {t("settings.language.label")}
           </label>
           <select
             id="language"
-            value={language}
-            onChange={(event) => void changeLanguage(event.target.value as SupportedLanguage)}
+            value={languagePreference}
+            disabled={saving}
+            onChange={(event) =>
+              void changeLanguage(
+                event.target.value as DesktopLanguagePreference | BrowserLanguagePreference
+              )
+            }
             className={selectClassName}
           >
-            <option value="en-US">{t("settings.english")}</option>
-            <option value="zh-CN">{t("settings.simplified.chinese")}</option>
+            <option value={desktop ? "system" : "browser"}>
+              {t(
+                desktop
+                  ? "settings.language.system_default"
+                  : "settings.language.browser_default"
+              )}
+            </option>
+            <option value="en-US">English</option>
+            <option value="zh-CN">简体中文</option>
           </select>
+          {!desktop && (
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              {t("settings.language.browser_hint")}
+            </p>
+          )}
           {desktop && (
             <>
               {displaySettings ? (
