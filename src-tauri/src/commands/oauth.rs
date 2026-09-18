@@ -5,11 +5,10 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
 use crate::auth::oauth_server::{start_oauth_login, wait_for_oauth_login, OAuthLoginResult};
-use crate::auth::storage::acquire_auth_operation_lock;
-use crate::auth::{
-    add_account, load_accounts, read_current_auth, reconcile_active_projection, save_accounts,
-};
+use crate::auth::{add_account, load_accounts};
 use crate::types::{AccountInfo, OAuthLoginInfo};
+
+use super::account::switch_account_by_id;
 
 struct PendingOAuth {
     rx: oneshot::Receiver<anyhow::Result<OAuthLoginResult>>,
@@ -57,18 +56,13 @@ pub async fn complete_login() -> Result<AccountInfo, String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    let _auth_guard = acquire_auth_operation_lock()
-        .await
-        .map_err(|e| e.to_string())?;
-    // OAuth completion creates a saved profile only. Activation remains an
-    // explicit switch so it cannot bypass the process guard or activation flow.
+    // Profile creation and activation are separate operations. Preserve the
+    // existing post-login behavior by activating through the same transaction
+    // used by every other switch path.
     let stored = add_account(account).map_err(|e| e.to_string())?;
+    switch_account_by_id(&stored.id).await?;
 
-    let mut store = load_accounts().map_err(|e| e.to_string())?;
-    let auth = read_current_auth().map_err(|e| e.to_string())?;
-    if reconcile_active_projection(&mut store, auth.as_ref()) {
-        save_accounts(&store).map_err(|e| e.to_string())?;
-    }
+    let store = load_accounts().map_err(|e| e.to_string())?;
     let active_id = store.active_account_id.as_deref();
 
     Ok(AccountInfo::from_stored(&stored, active_id))
