@@ -59,12 +59,8 @@ pub(crate) async fn ensure_chatgpt_tokens_fresh_locked(
 
     match &current.auth_data {
         AuthData::ApiKey { .. } => Ok(current.clone()),
-        AuthData::ChatGPT {
-            id_token,
-            access_token,
-            ..
-        } => {
-            if chatgpt_tokens_need_refresh_at(id_token, access_token, Utc::now().timestamp()) {
+        AuthData::ChatGPT { access_token, .. } => {
+            if access_token_needs_refresh_at(access_token, Utc::now().timestamp()) {
                 refresh_chatgpt_tokens_locked(&current).await
             } else {
                 Ok(current)
@@ -210,15 +206,13 @@ pub async fn create_chatgpt_account_from_refresh_token(
 fn chatgpt_tokens_need_refresh(account: &StoredAccount) -> bool {
     match &account.auth_data {
         AuthData::ApiKey { .. } => false,
-        AuthData::ChatGPT {
-            id_token,
-            access_token,
-            ..
-        } => chatgpt_tokens_need_refresh_at(id_token, access_token, Utc::now().timestamp()),
+        AuthData::ChatGPT { access_token, .. } => {
+            access_token_needs_refresh_at(access_token, Utc::now().timestamp())
+        },
     }
 }
 
-fn chatgpt_tokens_need_refresh_at(_id_token: &str, access_token: &str, now: i64) -> bool {
+fn access_token_needs_refresh_at(access_token: &str, now: i64) -> bool {
     token_expired_or_near_expiry_at(access_token, now)
 }
 
@@ -344,7 +338,7 @@ async fn refresh_tokens_with_refresh_token(refresh_token: &str) -> Result<Refres
 #[cfg(test)]
 mod tests {
     use super::{
-        chatgpt_tokens_need_refresh, chatgpt_tokens_need_refresh_at, merge_refresh_response,
+        access_token_needs_refresh_at, chatgpt_tokens_need_refresh, merge_refresh_response,
         reconcile_active_account_from_auth, resolve_refreshed_id_token, RefreshTokenResponse,
     };
     use crate::types::{AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData};
@@ -368,11 +362,7 @@ mod tests {
         let id_token = jwt_with_exp(now - 3_600);
         let access_token = jwt_with_exp(now + 3_600);
 
-        assert!(!chatgpt_tokens_need_refresh_at(
-            &id_token,
-            &access_token,
-            now
-        ));
+        assert!(!access_token_needs_refresh_at(&access_token, now));
     }
 
     #[test]
@@ -381,11 +371,7 @@ mod tests {
         let id_token = jwt_with_exp(now + 3_600);
         let access_token = jwt_with_exp(now + 3_600);
 
-        assert!(!chatgpt_tokens_need_refresh_at(
-            &id_token,
-            &access_token,
-            now
-        ));
+        assert!(!access_token_needs_refresh_at(&access_token, now));
     }
 
     #[test]
@@ -394,11 +380,7 @@ mod tests {
         let id_token = jwt_with_exp(now + 3_600);
         let access_token = jwt_with_exp(now - 3_600);
 
-        assert!(chatgpt_tokens_need_refresh_at(
-            &id_token,
-            &access_token,
-            now
-        ));
+        assert!(access_token_needs_refresh_at(&access_token, now));
     }
 
     #[test]
