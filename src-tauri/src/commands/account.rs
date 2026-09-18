@@ -37,7 +37,8 @@ const SLIM_AUTH_API_KEY: u8 = 0;
 const SLIM_AUTH_CHATGPT: u8 = 1;
 
 const FULL_FILE_MAGIC: &[u8; 4] = b"CSWF";
-const FULL_FILE_VERSION: u8 = 1;
+const FULL_FILE_VERSION_V1: u8 = 1;
+const FULL_FILE_VERSION_V2: u8 = 2;
 const FULL_SALT_LEN: usize = 16;
 const FULL_NONCE_LEN: usize = 24;
 const FULL_KDF_ITERATIONS: u32 = 210_000;
@@ -258,28 +259,37 @@ pub async fn import_accounts_slim_text(payload: String) -> Result<ImportAccounts
 
 /// Export full account config as an encrypted file.
 #[tauri::command]
-pub async fn export_accounts_full_encrypted_file(path: String) -> Result<(), String> {
+pub async fn export_accounts_full_encrypted_file(
+    path: String,
+    passphrase: Option<String>,
+) -> Result<(), String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
-    let encrypted =
-        encode_full_encrypted_store(&store, FULL_PRESET_PASSPHRASE).map_err(|e| e.to_string())?;
+    let passphrase = export_backup_key(passphrase.as_deref())?;
+    let encrypted = encode_full_encrypted_store(&store, passphrase, FULL_FILE_VERSION_V2)
+        .map_err(|e| e.to_string())?;
     write_encrypted_file(&path, &encrypted).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 /// Export full account config as encrypted bytes for browser clients.
-pub async fn export_accounts_full_encrypted_bytes() -> Result<Vec<u8>, String> {
+pub async fn export_accounts_full_encrypted_bytes(
+    passphrase: Option<String>,
+) -> Result<Vec<u8>, String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
-    encode_full_encrypted_store(&store, FULL_PRESET_PASSPHRASE).map_err(|e| e.to_string())
+    let passphrase = export_backup_key(passphrase.as_deref())?;
+    encode_full_encrypted_store(&store, passphrase, FULL_FILE_VERSION_V2).map_err(|e| e.to_string())
 }
 
 /// Import full account config from an encrypted file, skipping existing accounts.
 #[tauri::command]
 pub async fn import_accounts_full_encrypted_file(
     path: String,
+    passphrase: Option<String>,
 ) -> Result<ImportAccountsSummary, String> {
     let encrypted = read_encrypted_file(&path).map_err(|e| e.to_string())?;
-    let imported = decode_full_encrypted_store(&encrypted, FULL_PRESET_PASSPHRASE)
-        .map_err(|e| e.to_string())?;
+    let passphrase = import_backup_key(&encrypted, passphrase.as_deref())?;
+    let imported =
+        decode_full_encrypted_store(&encrypted, passphrase).map_err(|e| e.to_string())?;
     validate_imported_store(&imported).map_err(|e| e.to_string())?;
 
     mutate_accounts(|latest| {
@@ -293,9 +303,10 @@ pub async fn import_accounts_full_encrypted_file(
 /// Import full account config from encrypted bytes uploaded through the browser UI.
 pub async fn import_accounts_full_encrypted_bytes(
     bytes: Vec<u8>,
+    passphrase: Option<String>,
 ) -> Result<ImportAccountsSummary, String> {
-    let imported =
-        decode_full_encrypted_store(&bytes, FULL_PRESET_PASSPHRASE).map_err(|e| e.to_string())?;
+    let passphrase = import_backup_key(&bytes, passphrase.as_deref())?;
+    let imported = decode_full_encrypted_store(&bytes, passphrase).map_err(|e| e.to_string())?;
     validate_imported_store(&imported).map_err(|e| e.to_string())?;
 
     mutate_accounts(|latest| {
@@ -568,7 +579,11 @@ async fn restore_slim_accounts(
     Ok(restored)
 }
 
-fn encode_full_encrypted_store(store: &AccountsStore, passphrase: &str) -> anyhow::Result<Vec<u8>> {
+fn encode_full_encrypted_store(
+    store: &AccountsStore,
+    passphrase: &str,
+    version: u8,
+) -> anyhow::Result<Vec<u8>> {
     let json = serde_json::to_vec(store).context("Failed to serialize account store")?;
     let compressed = compress_bytes(&json).context("Failed to compress account store")?;
 
@@ -586,7 +601,7 @@ fn encode_full_encrypted_store(store: &AccountsStore, passphrase: &str) -> anyho
 
     let mut out = Vec::with_capacity(4 + 1 + FULL_SALT_LEN + FULL_NONCE_LEN + ciphertext.len());
     out.extend_from_slice(FULL_FILE_MAGIC);
-    out.push(FULL_FILE_VERSION);
+    out.push(version);
     out.extend_from_slice(&salt);
     out.extend_from_slice(&nonce);
     out.extend_from_slice(&ciphertext);
@@ -612,7 +627,7 @@ fn decode_full_encrypted_store(
     }
 
     let version = file_bytes[4];
-    if version != FULL_FILE_VERSION {
+    if !matches!(version, FULL_FILE_VERSION_V1 | FULL_FILE_VERSION_V2) {
         anyhow::bail!("Unsupported encrypted file version: {version}");
     }
 
@@ -639,6 +654,31 @@ fn decode_full_encrypted_store(
         serde_json::from_slice(&json).context("Failed to parse decrypted account payload")?;
 
     Ok(store)
+}
+
+fn export_backup_key(passphrase: Option<&str>) -> Result<&str, String> {
+    passphrase
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "A passphrase is required for full backup export".to_string())
+}
+
+fn import_backup_key<'a>(
+    file_bytes: &[u8],
+    passphrase: Option<&'a str>,
+) -> Result<&'a str, String> {
+    let version = file_bytes
+        .get(4)
+        .copied()
+        .ok_or_else(|| "Encrypted file is invalid or truncated".to_string())?;
+    match version {
+        FULL_FILE_VERSION_V1 => Ok(FULL_PRESET_PASSPHRASE),
+        FULL_FILE_VERSION_V2 => passphrase
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "A passphrase is required for this backup".to_string()),
+        _ => Err(format!("Unsupported encrypted file version: {version}")),
+    }
 }
 
 fn derive_encryption_key(passphrase: &str, salt: &[u8]) -> [u8; 32] {
@@ -778,4 +818,66 @@ pub async fn get_masked_account_ids() -> Result<Vec<String>, String> {
 #[tauri::command]
 pub async fn set_masked_account_ids(ids: Vec<String>) -> Result<(), String> {
     crate::auth::storage::set_masked_account_ids(ids).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod full_backup_tests {
+    use super::*;
+
+    fn sample_store() -> AccountsStore {
+        let account = StoredAccount::new_api_key("backup account".into(), "api-key".into());
+        AccountsStore {
+            version: 1,
+            active_account_id: Some(account.id.clone()),
+            accounts: vec![account],
+            masked_account_ids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn v2_round_trip_rejects_wrong_or_corrupted_ciphertext() {
+        let store = sample_store();
+        let first =
+            encode_full_encrypted_store(&store, "correct horse", FULL_FILE_VERSION_V2).unwrap();
+        let second =
+            encode_full_encrypted_store(&store, "correct horse", FULL_FILE_VERSION_V2).unwrap();
+
+        assert_eq!(first[4], FULL_FILE_VERSION_V2);
+        assert_ne!(&first[5..5 + FULL_SALT_LEN], &second[5..5 + FULL_SALT_LEN]);
+        assert_ne!(
+            &first[5 + FULL_SALT_LEN..5 + FULL_SALT_LEN + FULL_NONCE_LEN],
+            &second[5 + FULL_SALT_LEN..5 + FULL_SALT_LEN + FULL_NONCE_LEN]
+        );
+
+        let passphrase = import_backup_key(&first, Some("correct horse")).unwrap();
+        let decoded = decode_full_encrypted_store(&first, passphrase).unwrap();
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap(),
+            serde_json::to_value(&store).unwrap()
+        );
+
+        let wrong = decode_full_encrypted_store(&first, "wrong passphrase").unwrap_err();
+        assert!(wrong.to_string().contains("wrong passphrase"));
+
+        let mut corrupted = first.clone();
+        *corrupted.last_mut().unwrap() ^= 1;
+        assert!(decode_full_encrypted_store(&corrupted, "correct horse").is_err());
+    }
+
+    #[test]
+    fn v1_remains_import_compatible_but_is_not_exportable() {
+        let store = sample_store();
+        assert!(export_backup_key(None).is_err());
+        assert!(export_backup_key(Some("  ")).is_err());
+
+        let legacy =
+            encode_full_encrypted_store(&store, FULL_PRESET_PASSPHRASE, FULL_FILE_VERSION_V1)
+                .unwrap();
+        let passphrase = import_backup_key(&legacy, None).unwrap();
+        let decoded = decode_full_encrypted_store(&legacy, passphrase).unwrap();
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap(),
+            serde_json::to_value(&store).unwrap()
+        );
+    }
 }
