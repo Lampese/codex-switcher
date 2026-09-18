@@ -4,8 +4,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
-use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -86,11 +84,11 @@ pub fn get_settings_file() -> Result<PathBuf> {
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-struct AccountsMutationLock {
+struct MutationLock {
     file: File,
 }
 
-impl Drop for AccountsMutationLock {
+impl Drop for MutationLock {
     fn drop(&mut self) {
         #[cfg(unix)]
         {
@@ -102,11 +100,11 @@ impl Drop for AccountsMutationLock {
     }
 }
 
-fn acquire_accounts_mutation_lock() -> Result<AccountsMutationLock> {
+fn acquire_mutation_lock(lock_name: &str) -> Result<MutationLock> {
     let config_dir = get_config_dir()?;
     fs::create_dir_all(&config_dir)
         .with_context(|| format!("Failed to create config directory: {}", config_dir.display()))?;
-    let path = config_dir.join("accounts.lock");
+    let path = config_dir.join(lock_name);
 
     #[cfg(unix)]
     {
@@ -126,14 +124,14 @@ fn acquire_accounts_mutation_lock() -> Result<AccountsMutationLock> {
             return Err(std::io::Error::last_os_error())
                 .with_context(|| format!("Failed to lock account store: {}", path.display()));
         }
-        return Ok(AccountsMutationLock { file });
+        return Ok(MutationLock { file });
     }
 
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
 
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             match OpenOptions::new()
                 .create(true)
@@ -142,10 +140,10 @@ fn acquire_accounts_mutation_lock() -> Result<AccountsMutationLock> {
                 .share_mode(0)
                 .open(&path)
             {
-                Ok(file) => return Ok(AccountsMutationLock { file }),
-                Err(error) if Instant::now() < deadline => {
+                Ok(file) => return Ok(MutationLock { file }),
+                Err(error) if std::time::Instant::now() < deadline => {
                     let _ = error;
-                    thread::sleep(Duration::from_millis(25));
+                    std::thread::sleep(std::time::Duration::from_millis(25));
                 }
                 Err(error) => {
                     return Err(error).with_context(|| {
@@ -164,7 +162,7 @@ fn acquire_accounts_mutation_lock() -> Result<AccountsMutationLock> {
             .write(true)
             .open(&path)
             .with_context(|| format!("Failed to open account lock: {}", path.display()))?;
-        Ok(AccountsMutationLock { file })
+        Ok(MutationLock { file })
     }
 }
 
@@ -305,6 +303,15 @@ pub fn save_app_settings(settings: &AppSettings) -> Result<()> {
     write_file_atomic(&path, &content)
 }
 
+
+pub fn mutate_app_settings<T>(mutate: impl FnOnce(&mut AppSettings) -> Result<T>) -> Result<T> {
+    let _lock = acquire_mutation_lock("settings.lock")?;
+    let mut settings = load_app_settings()?;
+    let result = mutate(&mut settings)?;
+    save_app_settings(&settings)?;
+    Ok(result)
+}
+
 /// Save the accounts store to disk
 pub fn save_accounts(store: &AccountsStore) -> Result<()> {
     let path = get_accounts_file()?;
@@ -316,7 +323,7 @@ pub fn save_accounts(store: &AccountsStore) -> Result<()> {
 /// Apply one logical account-store mutation and persist its resulting snapshot.
 /// This boundary owns the complete read-modify-write transaction.
 pub fn mutate_accounts<T>(mutate: impl FnOnce(&mut AccountsStore) -> Result<T>) -> Result<T> {
-    let _lock = acquire_accounts_mutation_lock()?;
+    let _lock = acquire_mutation_lock("accounts.lock")?;
     let mut store = load_accounts()?;
     let result = mutate(&mut store)?;
     save_accounts(&store)?;
