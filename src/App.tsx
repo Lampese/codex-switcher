@@ -65,7 +65,7 @@ type AutoWarmupLedger = Record<
     lastAutoWindowKind?: AutoWarmupWindowKind;
   }
 >;
-const appWindow = getCurrentWindow();
+const getAppWindow = () => getCurrentWindow();
 const isMacOs =
   typeof navigator !== "undefined" &&
   /(Mac|iPhone|iPod|iPad)/i.test(navigator.userAgent);
@@ -388,14 +388,14 @@ function App() {
   const handleTitlebarDrag = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
       if (!isTauriRuntime() || event.button !== 0) return;
-      void appWindow.startDragging();
+      void getAppWindow().startDragging();
     },
     []
   );
 
   const handleTitlebarDoubleClick = useCallback(() => {
     if (!isTauriRuntime()) return;
-    void appWindow.toggleMaximize();
+    void getAppWindow().toggleMaximize();
   }, []);
 
   const toggleMask = (accountId: string) => {
@@ -526,7 +526,7 @@ function App() {
 
     const syncMaximizedState = async () => {
       try {
-        setIsWindowMaximized(await appWindow.isMaximized());
+        setIsWindowMaximized(await getAppWindow().isMaximized());
       } catch (err) {
         console.error("Failed to read window state:", err);
       }
@@ -1354,11 +1354,11 @@ function App() {
             onDoubleClick={handleTitlebarDoubleClick}
             className={`h-full flex-1 select-none cursor-default ${isMacOs ? "ml-18 mr-2" : "mr-3"}`}
           />
-          {!isMacOs && (
+          {isTauriRuntime() && !isMacOs && (
             <div className="flex items-center gap-1">
               <button
                 onClick={() => {
-                  void appWindow.minimize();
+                  void getAppWindow().minimize();
                 }}
                 className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
                 title="Minimize"
@@ -1369,7 +1369,7 @@ function App() {
               </button>
               <button
                 onClick={() => {
-                  void appWindow.toggleMaximize();
+                  void getAppWindow().toggleMaximize();
                 }}
                 className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
                 title={isWindowMaximized ? "Restore" : "Maximize"}
@@ -1387,7 +1387,7 @@ function App() {
               </button>
               <button
                 onClick={() => {
-                  void appWindow.close();
+                  void getAppWindow().close();
                 }}
                 className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-red-500 hover:text-white dark:text-gray-400 dark:hover:bg-red-500 dark:hover:text-white"
                 title="Close"
