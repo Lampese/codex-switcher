@@ -93,7 +93,7 @@ impl Drop for MutationLock {
         {
             use std::os::fd::AsRawFd;
             unsafe {
-                libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+                libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
             }
         }
     }
