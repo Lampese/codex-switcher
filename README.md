@@ -104,8 +104,10 @@ Optional environment variables:
 - `CODEX_SWITCHER_WEB_PORT` to override the port
 - `CODEX_SWITCHER_WEB_SECRET` is required when `CODEX_SWITCHER_WEB_HOST` is
   not a loopback address. Browser requests send it as a Bearer token; when it
-  is not provided at build time, the dashboard prompts once and keeps it only
-  for the current browser session.
+  is not already available in the current browser session, the dashboard
+  prompts once and keeps the entered value only for that session. The server
+  reads the secret from its runtime environment; it is never part of the
+  frontend build.
 
 The browser dashboard serves the same UI and backend actions through
 `/api/invoke/*`. The server uses plain HTTP, so remote access must be carried
