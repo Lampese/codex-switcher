@@ -410,9 +410,19 @@ pub fn load_app_settings() -> Result<AppSettings> {
 
     let content = fs::read_to_string(&path)
         .with_context(|| format!("Failed to read settings file: {}", path.display()))?;
-
-    let settings: AppSettings = serde_json::from_str(&content)
+    let raw: serde_json::Value = serde_json::from_str(&content)
         .with_context(|| format!("Failed to parse settings file: {}", path.display()))?;
+    let had_language_preference = raw.get("ui_language_preference").is_some()
+        || raw.get("language").is_some();
+
+    let mut settings: AppSettings = serde_json::from_value(raw)
+        .with_context(|| format!("Failed to parse settings file: {}", path.display()))?;
+
+    // Existing installations predate localization. Keep their observable
+    // English UI on upgrade instead of silently switching to the OS language.
+    if !had_language_preference {
+        settings.ui_language_preference = crate::types::UiLanguagePreference::English;
+    }
 
     Ok(settings)
 }
