@@ -1,10 +1,11 @@
 //! Account management Tauri commands
 
+use crate::auth::storage::acquire_auth_operation_lock;
 use crate::auth::{
     add_account, create_chatgpt_account_from_refresh_token, ensure_chatgpt_tokens_fresh_locked,
-    get_active_account, import_from_auth_json, import_from_auth_json_contents, load_accounts,
-    mutate_accounts, read_current_auth, remove_account, set_active_account, switch_to_account,
-    sync_active_account_tokens, touch_account, AUTH_OPERATION_LOCK,
+    import_from_auth_json, import_from_auth_json_contents, load_accounts, mutate_accounts,
+    read_current_auth, reconcile_active_projection, remove_account, save_accounts,
+    switch_to_account,
 };
 use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
 
@@ -70,10 +71,21 @@ struct SlimAccountPayload {
     refresh_token: Option<String>,
 }
 
+fn load_reconciled_accounts() -> Result<AccountsStore, String> {
+    let mut store = load_accounts().map_err(|e| e.to_string())?;
+    let auth = read_current_auth().map_err(|e| e.to_string())?;
+
+    if reconcile_active_projection(&mut store, auth.as_ref()) {
+        save_accounts(&store).map_err(|e| e.to_string())?;
+    }
+
+    Ok(store)
+}
+
 /// List all accounts with their info
 #[tauri::command]
 pub async fn list_accounts() -> Result<Vec<AccountInfo>, String> {
-    let store = load_accounts().map_err(|e| e.to_string())?;
+    let store = load_reconciled_accounts()?;
     let active_id = store.active_account_id.as_deref();
 
     let accounts: Vec<AccountInfo> = store
@@ -88,14 +100,15 @@ pub async fn list_accounts() -> Result<Vec<AccountInfo>, String> {
 /// Get the currently active account
 #[tauri::command]
 pub async fn get_active_account_info() -> Result<Option<AccountInfo>, String> {
-    let store = load_accounts().map_err(|e| e.to_string())?;
-    let active_id = store.active_account_id.as_deref();
-
-    if let Some(active) = get_active_account().map_err(|e| e.to_string())? {
-        Ok(Some(AccountInfo::from_stored(&active, active_id)))
-    } else {
-        Ok(None)
-    }
+    let store = load_reconciled_accounts()?;
+    let Some(active_id) = store.active_account_id.as_deref() else {
+        return Ok(None);
+    };
+    Ok(store
+        .accounts
+        .iter()
+        .find(|account| account.id == active_id)
+        .map(|account| AccountInfo::from_stored(account, Some(active_id))))
 }
 
 /// Add an account from an auth.json file
@@ -107,7 +120,7 @@ pub async fn add_account_from_file(path: String, name: String) -> Result<Account
     // Add to storage
     let stored = add_account(account).map_err(|e| e.to_string())?;
 
-    let store = load_accounts().map_err(|e| e.to_string())?;
+    let store = load_reconciled_accounts()?;
     let active_id = store.active_account_id.as_deref();
 
     Ok(AccountInfo::from_stored(&stored, active_id))
@@ -121,7 +134,7 @@ pub async fn add_account_from_auth_json_text(
     let account = import_from_auth_json_contents(&contents, name).map_err(|e| e.to_string())?;
     let stored = add_account(account).map_err(|e| e.to_string())?;
 
-    let store = load_accounts().map_err(|e| e.to_string())?;
+    let store = load_reconciled_accounts()?;
     let active_id = store.active_account_id.as_deref();
 
     Ok(AccountInfo::from_stored(&stored, active_id))
@@ -134,13 +147,16 @@ pub async fn switch_account(account_id: String) -> Result<(), String> {
 }
 
 pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
-    let _auth_guard = AUTH_OPERATION_LOCK.lock().await;
-    let mut store = load_accounts().map_err(|e| e.to_string())?;
+    let _auth_guard = acquire_auth_operation_lock()
+        .await
+        .map_err(|e| e.to_string())?;
+    let store = load_reconciled_accounts()?;
 
-    let target_index = store
+    let target = store
         .accounts
         .iter()
-        .position(|account| account.id == account_id)
+        .find(|account| account.id == account_id)
+        .cloned()
         .ok_or_else(|| format!("Account not found: {account_id}"))?;
 
     if store.active_account_id.as_deref() == Some(account_id) {
@@ -149,39 +165,28 @@ pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
 
     ensure_codex_not_running()?;
 
-    // ChatGPT rotates single-use refresh tokens. Preserve the latest token
-    // before replacing auth.json, otherwise switching back restores a stale one.
-    if let Some(auth) = read_current_auth().map_err(|e| e.to_string())? {
-        let auth_for_store = auth.clone();
-        mutate_accounts(|latest| {
-            sync_active_account_tokens(latest, &auth_for_store);
-            Ok(())
-        })
-        .map_err(|e| e.to_string())?;
-        store = load_accounts().map_err(|e| e.to_string())?;
-    }
-
-    let target_index = store
-        .accounts
-        .iter()
-        .position(|account| account.id == account_id)
-        .ok_or_else(|| format!("Account not found: {account_id}"))?;
-
-    let account = ensure_chatgpt_tokens_fresh_locked(&store.accounts[target_index])
+    let account = ensure_chatgpt_tokens_fresh_locked(&target)
         .await
         .map_err(|e| e.to_string())?;
 
-    // Write to ~/.codex/auth.json
+    // Runtime auth is the semantic authority. Only project active state after
+    // the runtime transition succeeds.
     switch_to_account(&account).map_err(|e| e.to_string())?;
 
-    // Update the active account in our store
-    set_active_account(account_id).map_err(|e| e.to_string())?;
+    mutate_accounts(|latest| {
+        let stored = latest
+            .accounts
+            .iter_mut()
+            .find(|stored| stored.id == account_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("Account disappeared during activation: {account_id}")
+            })?;
+        stored.last_used_at = Some(chrono::Utc::now());
+        latest.active_account_id = Some(account_id.to_string());
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
 
-    // Update last_used_at
-    touch_account(account_id).map_err(|e| e.to_string())?;
-
-    // Restart Antigravity background process if it is running
-    // This allows it to pick up the new authorization file seamlessly
     if let Ok(pids) = find_antigravity_processes() {
         for pid in pids {
             #[cfg(unix)]
@@ -206,6 +211,10 @@ pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
 /// Remove an account
 #[tauri::command]
 pub async fn delete_account(account_id: String) -> Result<(), String> {
+    let _auth_guard = acquire_auth_operation_lock()
+        .await
+        .map_err(|e| e.to_string())?;
+    let _ = load_reconciled_accounts()?;
     remove_account(&account_id).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -510,7 +519,7 @@ async fn build_store_from_slim_payload(
     payload: SlimPayload,
     existing_names: &HashSet<String>,
 ) -> anyhow::Result<AccountsStore> {
-    let active_name = payload.active_name;
+    let _active_name = payload.active_name;
     let import_candidates: Vec<SlimAccountPayload> = payload
         .accounts
         .into_iter()
@@ -518,23 +527,11 @@ async fn build_store_from_slim_payload(
         .collect();
 
     let accounts = restore_slim_accounts(import_candidates).await?;
-    let mut active_account_id = None;
-
-    if let Some(active) = active_name {
-        active_account_id = accounts
-            .iter()
-            .find(|account| account.name == active)
-            .map(|account| account.id.clone());
-    }
-
-    if active_account_id.is_none() {
-        active_account_id = accounts.first().map(|a| a.id.clone());
-    }
 
     Ok(AccountsStore {
         version: 1,
         accounts,
-        active_account_id,
+        active_account_id: None,
         masked_account_ids: Vec::new(),
     })
 }
@@ -762,7 +759,6 @@ fn merge_accounts_store(
     imported: AccountsStore,
 ) -> (AccountsStore, ImportAccountsSummary) {
     let imported_version = imported.version;
-    let imported_active_id = imported.active_account_id;
     let total_in_payload = imported.accounts.len();
     let mut imported_count = 0usize;
     let mut existing_ids: HashSet<String> = current.accounts.iter().map(|a| a.id.clone()).collect();
@@ -787,15 +783,7 @@ fn merge_accounts_store(
         .is_some_and(|id| current.accounts.iter().any(|a| &a.id == id));
 
     if !current_active_is_valid {
-        if let Some(imported_active) = imported_active_id {
-            if current.accounts.iter().any(|a| a.id == imported_active) {
-                current.active_account_id = Some(imported_active);
-            } else {
-                current.active_account_id = current.accounts.first().map(|a| a.id.clone());
-            }
-        } else {
-            current.active_account_id = current.accounts.first().map(|a| a.id.clone());
-        }
+        current.active_account_id = None;
     }
 
     (
@@ -879,5 +867,52 @@ mod full_backup_tests {
             serde_json::to_value(&decoded).unwrap(),
             serde_json::to_value(&store).unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod activation_tests {
+    use super::merge_accounts_store;
+    use crate::types::{AccountsStore, StoredAccount};
+
+    #[test]
+    fn import_does_not_replace_runtime_active_projection() {
+        let current_account = StoredAccount::new_api_key("Current".into(), "key-current".into());
+        let current_id = current_account.id.clone();
+        let imported_account = StoredAccount::new_api_key("Imported".into(), "key-imported".into());
+        let imported_id = imported_account.id.clone();
+
+        let current = AccountsStore {
+            accounts: vec![current_account],
+            active_account_id: Some(current_id.clone()),
+            ..AccountsStore::default()
+        };
+        let imported = AccountsStore {
+            accounts: vec![imported_account],
+            active_account_id: Some(imported_id),
+            ..AccountsStore::default()
+        };
+
+        let (merged, _) = merge_accounts_store(current, imported);
+
+        assert_eq!(
+            merged.active_account_id.as_deref(),
+            Some(current_id.as_str())
+        );
+    }
+
+    #[test]
+    fn import_cannot_invent_active_projection_when_current_projection_is_empty() {
+        let imported_account = StoredAccount::new_api_key("Imported".into(), "key-imported".into());
+        let imported_id = imported_account.id.clone();
+        let imported = AccountsStore {
+            accounts: vec![imported_account],
+            active_account_id: Some(imported_id),
+            ..AccountsStore::default()
+        };
+
+        let (merged, _) = merge_accounts_store(AccountsStore::default(), imported);
+
+        assert!(merged.active_account_id.is_none());
     }
 }
