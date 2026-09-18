@@ -192,6 +192,22 @@ pub fn run_lan_server(host: &str, port: u16) -> anyhow::Result<()> {
     println!("Codex Switcher web server listening on http://{address}");
     println!("Serving static files from {}", dist_dir.display());
 
+    let workers = spawn_web_workers(server.clone(), runtime, dist_dir, auth);
+    for worker in workers {
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("Web worker thread panicked"))?;
+    }
+
+    Ok(())
+}
+
+fn spawn_web_workers(
+    server: Arc<Server>,
+    runtime: Arc<Runtime>,
+    dist_dir: PathBuf,
+    auth: Arc<WebAuth>,
+) -> Vec<thread::JoinHandle<()>> {
     let mut workers = Vec::with_capacity(WEB_WORKER_THREADS);
     for _ in 0..WEB_WORKER_THREADS {
         let server = Arc::clone(&server);
@@ -212,14 +228,7 @@ pub fn run_lan_server(host: &str, port: u16) -> anyhow::Result<()> {
             }
         }));
     }
-
-    for worker in workers {
-        worker
-            .join()
-            .map_err(|_| anyhow::anyhow!("Web worker thread panicked"))?;
-    }
-
-    Ok(())
+    workers
 }
 
 fn handle_request(
@@ -405,6 +414,20 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
             to_json(start_login(args.account_name).await?)
         }
         "complete_login" => to_json(complete_login().await?),
+        #[cfg(test)]
+        "__test_slow" => {
+            if let Some(lock) = TEST_SLOW_COMMAND_STARTED.get() {
+                if let Some(sender) = lock.lock().unwrap().take() {
+                    let _ = sender.send(());
+                }
+            }
+            if let Some(lock) = TEST_SLOW_COMMAND_RELEASE.get() {
+                if let Some(receiver) = lock.lock().unwrap().take() {
+                    let _ = receiver.recv();
+                }
+            }
+            Ok(json!({ "ok": true }))
+        }
         "cancel_login" => to_json(cancel_login().await?),
         "export_accounts_slim_text" => to_json(export_accounts_slim_text().await?),
         "import_accounts_slim_text" => {
@@ -581,10 +604,11 @@ fn mime_type_for_path(path: &Path) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, SocketAddr, TcpStream};
+    use std::time::Duration;
+
     use super::*;
-    use std::io::Write;
-    use std::net::TcpStream;
-    use std::thread;
 
     #[test]
     fn loopback_hosts_do_not_require_a_secret() {
@@ -640,7 +664,7 @@ mod tests {
         );
         let mut stream = TcpStream::connect(address).unwrap();
         stream.write_all(request.as_bytes()).unwrap();
-        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        stream.shutdown(Shutdown::Write).unwrap();
 
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
@@ -650,7 +674,7 @@ mod tests {
         assert!(response.contains("Content-Type must be application/json"));
     }
 
-    fn send_http_request<F>(auth: WebAuth, dist_dir: PathBuf, build_request: F) -> String
+    fn send_loopback_http_request<F>(auth: WebAuth, dist_dir: PathBuf, build_request: F) -> String
     where
         F: FnOnce(u16) -> String,
     {
@@ -701,7 +725,7 @@ mod tests {
             ("127.0.0.1", true),
             ("[::1]", true),
         ] {
-            let response = send_http_request(auth.clone(), dist_dir.clone(), |port| {
+            let response = send_loopback_http_request(auth.clone(), dist_dir.clone(), |port| {
                 let host = if include_port {
                     format!("{host}:{port}")
                 } else {
@@ -716,7 +740,7 @@ mod tests {
             assert!(response.contains("loopback content"));
         }
 
-        let wrong_port = send_http_request(auth.clone(), dist_dir.clone(), |port| {
+        let wrong_port = send_loopback_http_request(auth.clone(), dist_dir.clone(), |port| {
             format!(
                 "GET / HTTP/1.1\r\nHost: localhost:{}\r\nConnection: close\r\n\r\n",
                 port.wrapping_add(1)
@@ -733,7 +757,7 @@ mod tests {
         let auth = WebAuth::from_host_and_secret("127.0.0.1", None).unwrap();
 
         for path in ["/api/health", "/"] {
-            let response = send_http_request(auth.clone(), dist_dir.clone(), |_| {
+            let response = send_loopback_http_request(auth.clone(), dist_dir.clone(), |_| {
                 format!(
                     "GET {path} HTTP/1.1\r\nHost: attacker.example\r\nConnection: close\r\n\r\n"
                 )
@@ -751,17 +775,82 @@ mod tests {
         let dist_dir = test_dist_dir();
         let auth = WebAuth::from_host_and_secret("0.0.0.0", Some("test-secret".into())).unwrap();
 
-        let authorized = send_http_request(auth.clone(), dist_dir.clone(), |_| {
+        let authorized = send_loopback_http_request(auth.clone(), dist_dir.clone(), |_| {
             "POST /api/invoke/not-a-command HTTP/1.1\r\nHost: attacker.example\r\nContent-Type: application/json\r\nAuthorization: Bearer test-secret\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_string()
         });
         assert!(authorized.starts_with("HTTP/1.1 400"), "{authorized}");
         assert!(authorized.contains("Unsupported web command"));
 
-        let unauthorized = send_http_request(auth, dist_dir.clone(), |_| {
+        let unauthorized = send_loopback_http_request(auth, dist_dir.clone(), |_| {
             "POST /api/invoke/not-a-command HTTP/1.1\r\nHost: attacker.example\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_string()
         });
         assert!(unauthorized.starts_with("HTTP/1.1 401"), "{unauthorized}");
 
         fs::remove_dir_all(dist_dir).unwrap();
+    }
+
+    #[test]
+    fn slow_request_does_not_block_health_request() {
+        let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
+        let address = server.server_addr().to_ip().unwrap();
+        let runtime = Arc::new(Runtime::new().unwrap());
+        let dist_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("dist");
+        let auth = Arc::new(WebAuth::from_host_and_secret("127.0.0.1", None).unwrap());
+        let workers = spawn_web_workers(server.clone(), runtime, dist_dir, auth);
+
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        *TEST_SLOW_COMMAND_STARTED
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap() = Some(started_sender);
+        *TEST_SLOW_COMMAND_RELEASE
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap() = Some(release_receiver);
+
+        let slow_request = thread::spawn(move || {
+            send_http_request(address, "POST", "/api/invoke/__test_slow", "{}")
+        });
+        started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("slow command should occupy a worker");
+
+        let health_response = send_http_request(address, "GET", "/api/health", "");
+        assert!(
+            health_response.starts_with("HTTP/1.1 200 OK"),
+            "health response: {health_response}"
+        );
+
+        release_sender.send(()).unwrap();
+        let slow_response = slow_request.join().unwrap();
+        assert!(slow_response.starts_with("HTTP/1.1 200 OK"));
+
+        for _ in 0..WEB_WORKER_THREADS {
+            server.unblock();
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    }
+
+    fn send_http_request(address: SocketAddr, method: &str, path: &str, body: &str) -> String {
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        write!(
+            stream,
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        stream.shutdown(Shutdown::Write).unwrap();
+
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+        String::from_utf8(response).unwrap()
     }
 }
