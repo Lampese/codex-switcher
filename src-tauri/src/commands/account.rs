@@ -4,10 +4,11 @@ use crate::auth::storage::acquire_auth_operation_lock;
 use crate::auth::{
     add_account, create_chatgpt_account_from_refresh_token, ensure_chatgpt_tokens_fresh_locked,
     import_from_auth_json, import_from_auth_json_contents, load_accounts, mutate_accounts,
-    read_current_auth, reconcile_active_projection, remove_account, save_accounts,
-    switch_to_account,
+    read_current_auth, reconcile_active_projection, remove_account, switch_to_account,
 };
-use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
+use crate::types::{
+    AccountInfo, AccountsStore, AuthData, AuthDotJson, ImportAccountsSummary, StoredAccount,
+};
 
 use super::process::ensure_codex_not_running;
 
@@ -71,14 +72,17 @@ struct SlimAccountPayload {
 }
 
 fn load_reconciled_accounts() -> Result<AccountsStore, String> {
-    let mut store = load_accounts().map_err(|e| e.to_string())?;
     let auth = read_current_auth().map_err(|e| e.to_string())?;
 
-    if reconcile_active_projection(&mut store, auth.as_ref()) {
-        save_accounts(&store).map_err(|e| e.to_string())?;
-    }
+    load_reconciled_accounts_from_auth(auth.as_ref())
+}
 
-    Ok(store)
+fn load_reconciled_accounts_from_auth(auth: Option<&AuthDotJson>) -> Result<AccountsStore, String> {
+    mutate_accounts(|store| {
+        reconcile_active_projection(store, auth);
+        Ok(store.clone())
+    })
+    .map_err(|e| e.to_string())
 }
 
 /// List all accounts with their info
@@ -779,8 +783,12 @@ pub async fn set_masked_account_ids(ids: Vec<String>) -> Result<(), String> {
 
 #[cfg(test)]
 mod activation_tests {
-    use super::merge_accounts_store;
-    use crate::types::{AccountsStore, StoredAccount};
+    use super::{load_reconciled_accounts_from_auth, merge_accounts_store};
+    use crate::auth::storage::{mutate_accounts, save_accounts, with_test_config_dir};
+    use crate::types::{AccountsStore, AuthDotJson, StoredAccount, TokenData};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn import_does_not_replace_runtime_active_projection() {
@@ -821,5 +829,84 @@ mod activation_tests {
         let (merged, _) = merge_accounts_store(AccountsStore::default(), imported);
 
         assert!(merged.active_account_id.is_none());
+    }
+
+    #[test]
+    fn reconciliation_transaction_preserves_unrelated_latest_state() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "codex-switcher-reconciliation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let current_account = StoredAccount::new_chatgpt(
+            "Current".into(),
+            None,
+            None,
+            None,
+            "id-current".into(),
+            "access-current".into(),
+            "refresh-current".into(),
+            Some("workspace-current".into()),
+        );
+        let current_id = current_account.id.clone();
+        let initial_store = AccountsStore {
+            accounts: vec![current_account],
+            active_account_id: Some(current_id.clone()),
+            ..AccountsStore::default()
+        };
+        let live_auth = AuthDotJson {
+            openai_api_key: None,
+            tokens: Some(TokenData {
+                id_token: "id-live".into(),
+                access_token: "access-live".into(),
+                refresh_token: "refresh-live".into(),
+                account_id: Some("workspace-current".into()),
+            }),
+            last_refresh: None,
+        };
+
+        with_test_config_dir(config_dir.clone(), || {
+            save_accounts(&initial_store).unwrap();
+        });
+
+        let (writer_ready_tx, writer_ready_rx) = mpsc::channel();
+        let (release_writer_tx, release_writer_rx) = mpsc::channel();
+        let writer_config_dir = config_dir.clone();
+        let writer = thread::spawn(move || {
+            with_test_config_dir(writer_config_dir, || {
+                mutate_accounts(|latest| {
+                    writer_ready_tx.send(()).unwrap();
+                    release_writer_rx
+                        .recv_timeout(Duration::from_secs(2))
+                        .unwrap();
+                    latest.masked_account_ids.push("concurrent-state".into());
+                    Ok(())
+                })
+                .unwrap();
+            });
+        });
+        writer_ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+
+        let reconcile_config_dir = config_dir.clone();
+        let reconcile = thread::spawn(move || {
+            with_test_config_dir(reconcile_config_dir, || {
+                load_reconciled_accounts_from_auth(Some(&live_auth))
+            })
+        });
+
+        thread::sleep(Duration::from_millis(100));
+        release_writer_tx.send(()).unwrap();
+
+        let reconciled = reconcile.join().unwrap().unwrap();
+        writer.join().unwrap();
+
+        assert_eq!(
+            reconciled.active_account_id.as_deref(),
+            Some(current_id.as_str())
+        );
+        assert_eq!(reconciled.masked_account_ids, vec!["concurrent-state"]);
+
+        std::fs::remove_dir_all(config_dir).unwrap();
     }
 }

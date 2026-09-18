@@ -10,7 +10,7 @@ use super::storage::acquire_auth_operation_lock;
 #[cfg(test)]
 use super::sync_active_account_tokens;
 use super::{
-    load_accounts, read_current_auth, reconcile_active_projection, save_accounts,
+    load_accounts, mutate_accounts, read_current_auth, reconcile_active_projection,
     switch_to_account, update_account_chatgpt_tokens,
 };
 use crate::types::{parse_chatgpt_id_token_claims, AuthData, StoredAccount};
@@ -193,20 +193,20 @@ fn reconcile_active_account_from_auth(
 }
 
 fn load_account_reconciling_live_auth(account_id: &str) -> Result<(StoredAccount, bool)> {
-    let mut store = load_accounts()?;
     let auth = read_current_auth()?;
 
-    if reconcile_active_projection(&mut store, auth.as_ref()) {
-        save_accounts(&store)?;
-    }
+    mutate_accounts(|store| {
+        reconcile_active_projection(store, auth.as_ref());
 
-    let is_active = store.active_account_id.as_deref() == Some(account_id);
-    let account = store
-        .accounts
-        .into_iter()
-        .find(|stored| stored.id == account_id)
-        .context("Account not found")?;
-    Ok((account, is_active))
+        let is_active = store.active_account_id.as_deref() == Some(account_id);
+        let account = store
+            .accounts
+            .iter()
+            .find(|stored| stored.id == account_id)
+            .cloned()
+            .context("Account not found")?;
+        Ok((account, is_active))
+    })
 }
 
 /// Build a new ChatGPT account from a refresh token.
