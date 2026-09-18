@@ -220,7 +220,9 @@ async fn warmup_with_chatgpt_auth(account: &StoredAccount) -> Result<()> {
             "[Warmup] Unauthorized for account {}, refreshing token and retrying once",
             fresh_account.name
         );
-        let refreshed_account = refresh_chatgpt_tokens(&fresh_account).await?;
+        let refreshed_account =
+            refresh_chatgpt_tokens_after_unauthorized(&fresh_account, &rejected_access_token)
+                .await?;
         let (retry_token, retry_account_id) = extract_chatgpt_auth(&refreshed_account)?;
         response = send_chatgpt_warmup_request(retry_token, retry_account_id, true).await?;
     }
