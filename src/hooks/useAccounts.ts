@@ -382,9 +382,9 @@ export function useAccounts() {
   );
 
   const exportAccountsFullEncryptedFile = useCallback(
-    async (path: string) => {
+    async (path: string, passphrase?: string) => {
       try {
-        await invokeBackend("export_accounts_full_encrypted_file", { path });
+        await invokeBackend("export_accounts_full_encrypted_file", { path, passphrase });
       } catch (err) {
         throw err;
       }
@@ -393,11 +393,11 @@ export function useAccounts() {
   );
 
   const importAccountsFullEncryptedFile = useCallback(
-    async (path: string) => {
+    async (path: string, passphrase?: string) => {
       try {
         const summary = await invokeBackend<ImportAccountsSummary>(
           "import_accounts_full_encrypted_file",
-          { path }
+          { path, passphrase }
         );
         const accountList = await loadAccounts();
         await refreshUsage(accountList);
