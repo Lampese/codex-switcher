@@ -353,14 +353,14 @@ function TrayMenu() {
         <div className="flex h-6 w-6 items-center justify-center rounded-md bg-black text-xs font-bold text-white">
           C
         </div>
-        <span className="text-sm font-semibold">{t("Codex Switcher")}</span>
+        <span className="text-sm font-semibold">{t("common.codex.switcher")}</span>
         <button
           onClick={() => void handleAutoWarmupToggle()}
           disabled={accounts.length === 0}
           title={
             autoWarmupAllEnabled
-              ? t("Disable auto warm-up for all accounts")
-              : t("Enable auto warm-up for all accounts")
+              ? t("tray.disable.auto.warm.up.for.all.accounts")
+              : t("tray.enable.auto.warm.up.for.all.accounts")
           }
           className={`ml-auto rounded-md px-2 py-1 text-[11px] font-semibold transition-colors disabled:opacity-50 ${
             autoWarmupAllEnabled
@@ -368,12 +368,12 @@ function TrayMenu() {
               : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
           }`}
         >
-          {t("Auto")}: {autoWarmupAllEnabled ? t("on") : t("off")}
+          {t("common.auto")}: {autoWarmupAllEnabled ? t("common.on") : t("common.off")}
         </button>
         <button
           onClick={() => void handleRefresh()}
           disabled={refreshing}
-          title={t("Refresh usage")}
+          title={t("common.refresh.usage")}
           className="flex h-6 w-6 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 disabled:opacity-50 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
         >
           <span className={`text-base leading-none ${refreshing ? "inline-block animate-spin" : ""}`}>
@@ -385,11 +385,11 @@ function TrayMenu() {
       <div className="flex-1 overflow-y-auto p-1.5">
         {loading ? (
           <div className="px-2 py-6 text-center text-xs text-gray-500 dark:text-gray-400">
-            {t("Loading...")}
+            {t("tray.loading")}
           </div>
         ) : accounts.length === 0 ? (
           <div className="px-2 py-6 text-center text-xs text-gray-500 dark:text-gray-400">
-            {t("No accounts configured")}
+            {t("tray.no.accounts.configured")}
           </div>
         ) : (
           accounts.map((account) => {
@@ -400,12 +400,12 @@ function TrayMenu() {
               usage && !usage.error
                 ? ([
                     {
-                      label: t("Session"),
+                      label: t("tray.session"),
                       used: usage.primary_used_percent,
                       resetAt: usage.primary_resets_at,
                     },
                     {
-                      label: t("Weekly"),
+                      label: t("tray.weekly"),
                       used: usage.secondary_used_percent,
                       resetAt: usage.secondary_resets_at,
                     },
@@ -482,7 +482,7 @@ function TrayMenu() {
                               </span>
                               {reset && (
                                 <span className="shrink-0 whitespace-nowrap">
-                                  {reset === "now" ? t("Resets now") : t("Resets in {{value}}", { value: reset })}
+                                  {reset === "now" ? t("tray.resets.now") : t("tray.resets.in.value", { value: reset })}
                                   {exactReset && ` • ${exactReset}`}
                                 </span>
                               )}
@@ -493,7 +493,7 @@ function TrayMenu() {
                     </span>
                   ) : usage?.error ? (
                     <span className="block truncate text-xs text-red-500 dark:text-red-400">
-                      {t("Usage unavailable")}
+                      {t("tray.usage.unavailable")}
                     </span>
                   ) : account.email ? (
                     <span className="block truncate text-xs text-gray-500 dark:text-gray-400">
@@ -506,13 +506,13 @@ function TrayMenu() {
                         <span className="block font-medium text-gray-900 dark:text-gray-100">
                           {formatTokens(sumDailyTokens(stats, 1))}
                         </span>
-                        <span>{t("today")}</span>
+                        <span>{t("tray.today")}</span>
                       </span>
                       <span className="rounded-md bg-white px-2 py-1 text-[11px] text-gray-600 shadow-sm dark:bg-gray-950 dark:text-gray-300">
                         <span className="block font-medium text-gray-900 dark:text-gray-100">
                           {formatTokens(sumDailyTokens(stats, 7))}
                         </span>
-                        <span>{t("last 7 days")}</span>
+                        <span>{t("tray.last.7.days")}</span>
                       </span>
                     </span>
                   )}
@@ -535,7 +535,7 @@ function TrayMenu() {
       {dockDisplayMode && (
         <div className="flex items-center gap-1 border-t border-gray-100 px-1.5 py-1.5 dark:border-gray-800">
           <span className="px-1.5 text-[11px] font-medium text-gray-500 dark:text-gray-400">
-            {t("Dock")}
+            {t("tray.dock")}
           </span>
           <button
             onClick={() => void handleDockDisplayMode("show_in_dock")}
@@ -545,7 +545,7 @@ function TrayMenu() {
                 : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
             }`}
           >
-            {t("Show")}
+            {t("tray.show")}
           </button>
           <button
             onClick={() => void handleDockDisplayMode("menu_bar_only")}
@@ -555,7 +555,7 @@ function TrayMenu() {
                 : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
             }`}
           >
-            {t("Menu Bar")}
+            {t("tray.menu.bar")}
           </button>
         </div>
       )}
@@ -565,13 +565,13 @@ function TrayMenu() {
           onClick={() => void invokeBackend("open_main_window")}
           className="flex-1 rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-gray-100 dark:hover:bg-gray-800"
         >
-          {t("Open Codex Switcher")}
+          {t("tray.open.codex.switcher")}
         </button>
         <button
           onClick={() => void invokeBackend("quit_app")}
           className="rounded-lg px-2 py-1.5 text-sm text-gray-500 transition-colors hover:bg-gray-100 hover:text-red-600 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-red-400"
         >
-          {t("Quit")}
+          {t("tray.quit")}
         </button>
       </div>
     </div>
