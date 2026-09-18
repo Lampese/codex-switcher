@@ -16,6 +16,7 @@ use crate::types::{
 
 const DEFAULT_ISSUER: &str = "https://auth.openai.com";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const ID_TOKEN_REFRESH_WINDOW_SECONDS: i64 = 60;
 const ACCESS_TOKEN_REFRESH_WINDOW_SECONDS: i64 = 5 * 60;
 
 #[derive(Debug, serde::Deserialize)]
@@ -79,7 +80,6 @@ pub async fn refresh_chatgpt_tokens(account: &StoredAccount) -> Result<StoredAcc
     let _auth_guard = AUTH_OPERATION_LOCK.lock().await;
     refresh_chatgpt_tokens_locked(account).await
 }
-
 
 /// Retry policy for provider responses. Only 401 proves the access token was
 /// rejected. A 403 may be authorization or edge/CDN behavior and must not
@@ -242,7 +242,7 @@ fn chatgpt_tokens_need_refresh(account: &StoredAccount) -> bool {
         AuthData::ApiKey { .. } => false,
         AuthData::ChatGPT { access_token, .. } => {
             access_token_needs_refresh_at(access_token, Utc::now().timestamp())
-        },
+        }
     }
 }
 
@@ -252,7 +252,7 @@ fn access_token_needs_refresh_at(access_token: &str, now: i64) -> bool {
 
 fn id_token_needs_refresh_at(token: &str, now: i64) -> bool {
     match parse_jwt_exp(token) {
-        Some(expiry) => expiry <= now + ACCESS_TOKEN_REFRESH_WINDOW_SECONDS,
+        Some(expiry) => expiry <= now + ID_TOKEN_REFRESH_WINDOW_SECONDS,
         None => true,
     }
 }
@@ -398,21 +398,30 @@ mod tests {
 
     #[test]
     fn concurrent_unauthorized_retry_reuses_a_replaced_access_token() {
-        assert!(rejected_access_token_is_still_current("old-token", "old-token"));
-        assert!(!rejected_access_token_is_still_current("new-token", "old-token"));
+        assert!(rejected_access_token_is_still_current(
+            "old-token",
+            "old-token"
+        ));
+        assert!(!rejected_access_token_is_still_current(
+            "new-token",
+            "old-token"
+        ));
     }
 
     #[test]
     fn provider_retry_refreshes_only_on_unauthorized() {
-        assert!(should_refresh_after_provider_status(StatusCode::UNAUTHORIZED));
+        assert!(should_refresh_after_provider_status(
+            StatusCode::UNAUTHORIZED
+        ));
         assert!(!should_refresh_after_provider_status(StatusCode::FORBIDDEN));
-        assert!(!should_refresh_after_provider_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(!should_refresh_after_provider_status(
+            StatusCode::TOO_MANY_REQUESTS
+        ));
     }
 
     #[test]
     fn refresh_not_required_when_only_id_token_is_expired() {
         let now = 1_800_000_000;
-        let id_token = jwt_with_exp(now - 3_600);
         let access_token = jwt_with_exp(now + 3_600);
 
         assert!(!access_token_needs_refresh_at(&access_token, now));
@@ -421,7 +430,6 @@ mod tests {
     #[test]
     fn refresh_not_required_when_both_tokens_are_valid() {
         let now = 1_800_000_000;
-        let id_token = jwt_with_exp(now + 3_600);
         let access_token = jwt_with_exp(now + 3_600);
 
         assert!(!access_token_needs_refresh_at(&access_token, now));
@@ -430,14 +438,19 @@ mod tests {
     #[test]
     fn access_token_refresh_window_matches_codex_five_minutes() {
         let now = 1_800_000_000;
-        assert!(access_token_needs_refresh_at(&jwt_with_exp(now + 5 * 60), now));
-        assert!(!access_token_needs_refresh_at(&jwt_with_exp(now + 5 * 60 + 1), now));
+        assert!(access_token_needs_refresh_at(
+            &jwt_with_exp(now + 5 * 60),
+            now
+        ));
+        assert!(!access_token_needs_refresh_at(
+            &jwt_with_exp(now + 5 * 60 + 1),
+            now
+        ));
     }
 
     #[test]
     fn refresh_required_when_access_token_expired() {
         let now = 1_800_000_000;
-        let id_token = jwt_with_exp(now + 3_600);
         let access_token = jwt_with_exp(now - 3_600);
 
         assert!(access_token_needs_refresh_at(&access_token, now));
@@ -463,6 +476,18 @@ mod tests {
         let resolved = resolve_refreshed_id_token(current_id_token.clone(), None, now).unwrap();
 
         assert_eq!(resolved, current_id_token);
+    }
+
+    #[test]
+    fn refreshed_id_token_uses_its_own_short_validation_window() {
+        let now = 1_800_000_000;
+        let refreshed_id_token = jwt_with_exp(now + 2 * 60);
+
+        assert_eq!(
+            resolve_refreshed_id_token(String::new(), Some(refreshed_id_token.clone()), now)
+                .unwrap(),
+            refreshed_id_token
+        );
     }
 
     #[test]

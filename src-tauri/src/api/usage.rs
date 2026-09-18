@@ -101,6 +101,7 @@ pub async fn fetch_chatgpt_account_metadata(
 ) -> Result<ChatGptAccountMetadata> {
     let fresh_account = ensure_chatgpt_tokens_fresh(account).await?;
     let (access_token, chatgpt_account_id) = extract_chatgpt_auth(&fresh_account)?;
+    let mut selected_account_id = chatgpt_account_id.map(str::to_owned);
     let rejected_access_token = access_token.to_string();
     let mut response =
         send_chatgpt_get_request(CHATGPT_ACCOUNTS_CHECK_API, access_token, chatgpt_account_id)
@@ -111,6 +112,7 @@ pub async fn fetch_chatgpt_account_metadata(
             refresh_chatgpt_tokens_after_unauthorized(&fresh_account, &rejected_access_token)
                 .await?;
         let (retry_token, retry_account_id) = extract_chatgpt_auth(&refreshed_account)?;
+        selected_account_id = retry_account_id.map(str::to_owned);
         response =
             send_chatgpt_get_request(CHATGPT_ACCOUNTS_CHECK_API, retry_token, retry_account_id)
                 .await?;
@@ -134,7 +136,8 @@ pub async fn fetch_chatgpt_account_metadata(
         .await
         .context("Failed to parse accounts check response")?;
 
-    let selected_entry = chatgpt_account_id
+    let selected_entry = selected_account_id
+        .as_deref()
         .and_then(|account_id| payload.accounts.get(account_id))
         .or_else(|| payload.accounts.get("default"))
         .or_else(|| payload.accounts.values().next())
