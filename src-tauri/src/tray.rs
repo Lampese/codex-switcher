@@ -460,8 +460,9 @@ fn refresh_menu_on_main_thread<R: Runtime>(app: &AppHandle<R>) {
                 store.active_account_id.as_deref(),
                 settings.tray_display_mode,
             );
-            let menu =
-                build_menu(app, &store, &settings.language).map_err(|error| error.to_string())?;
+            let language =
+                crate::types::resolve_desktop_language(settings.ui_language_preference);
+            let menu = build_menu(app, &store, language).map_err(|error| error.to_string())?;
             Ok((menu, title, settings.tray_display_mode))
         }) {
         Ok((menu, title, mode)) => {
