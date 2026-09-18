@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { DesktopReopenPreference } from "../lib/desktopReopen";
 import type { CodexClosePreference } from "../lib/codexClosePreference";
 import { invokeBackend, isTauriRuntime } from "../lib/platform";
+import { translate } from "../lib/i18n";
 import type { DockDisplayMode } from "../types";
 
 type TrayDisplayMode = "icon_and_session" | "active_usage_text" | "hidden";
@@ -87,7 +88,9 @@ export function SettingsModal({
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
       <div role="dialog" aria-modal="true" aria-labelledby="settings-title" className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-md mx-4 shadow-xl">
         <div className="p-5 border-b border-gray-100 dark:border-gray-800">
-          <h2 id="settings-title" className="text-lg font-semibold text-gray-900 dark:text-gray-100">Settings</h2>
+          <h2 id="settings-title" className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+            {translate("settingsTitle")}
+          </h2>
         </div>
         <div className="p-5 space-y-3 max-h-[65vh] overflow-y-auto">
           {desktop && (
