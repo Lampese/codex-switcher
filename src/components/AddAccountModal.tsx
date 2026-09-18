@@ -86,7 +86,7 @@ export function AddAccountModal({
 
   const handleImportFile = async () => {
     if (!fileSource) {
-      setError("Please select an auth.json file");
+      setError(t("Please select an auth.json file"));
       return;
     }
 
@@ -185,7 +185,7 @@ export function AddAccountModal({
                             setTimeout(() => setCopied(false), 2000);
                           })
                           .catch(() => {
-                            setError("Clipboard unavailable. Copy the link manually.");
+                            setError(t("Clipboard unavailable. Copy the link manually."));
                           });
                       }}
                       className={`px-3 py-1.5 border rounded text-xs font-medium transition-colors shrink-0 
@@ -207,8 +207,7 @@ export function AddAccountModal({
                   </div>
                   {!tauriRuntime && (
                     <p className="text-xs text-amber-600">
-                      OAuth login must finish on the same host machine because the callback
-                      redirects to `localhost`.
+                      {t("OAuth login must finish on the same host machine because the callback redirects to `localhost`.")}
                     </p>
                   )}
                 </div>
