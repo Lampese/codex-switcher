@@ -136,15 +136,6 @@ pub fn set_warmup_policy(policy: WarmupPolicy) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn record_warmup_success(account_id: String, timestamp_ms: Option<i64>) -> Result<(), String> {
-    crate::warmup_scheduler::record_manual_success(
-        &account_id,
-        timestamp_ms.unwrap_or_else(|| chrono::Utc::now().timestamp_millis()),
-    )
-    .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
 pub fn set_tray_display_mode(app: AppHandle, mode: TrayDisplayMode) -> Result<(), String> {
     #[cfg(desktop)]
     {
