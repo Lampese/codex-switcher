@@ -6,8 +6,8 @@ use chrono::Utc;
 use tokio::time::{sleep, Duration};
 
 use super::{
-    load_accounts, mutate_accounts, read_current_auth, switch_to_account, sync_active_account_tokens,
-    update_account_chatgpt_tokens, AUTH_OPERATION_LOCK,
+    load_accounts, mutate_accounts, read_current_auth, switch_to_account,
+    sync_active_account_tokens, update_account_chatgpt_tokens, AUTH_OPERATION_LOCK,
 };
 use crate::types::{
     parse_chatgpt_id_token_claims, AccountsStore, AuthData, AuthDotJson, StoredAccount,
