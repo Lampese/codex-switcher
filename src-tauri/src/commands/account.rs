@@ -264,8 +264,8 @@ pub async fn export_accounts_full_encrypted_file(
     passphrase: Option<String>,
 ) -> Result<(), String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
-    let (version, passphrase) = export_backup_key(passphrase.as_deref());
-    let encrypted = encode_full_encrypted_store(&store, passphrase, version)
+    let passphrase = export_backup_key(passphrase.as_deref())?;
+    let encrypted = encode_full_encrypted_store(&store, passphrase, FULL_FILE_VERSION_V2)
         .map_err(|e| e.to_string())?;
     write_encrypted_file(&path, &encrypted).map_err(|e| e.to_string())?;
     Ok(())
@@ -276,8 +276,8 @@ pub async fn export_accounts_full_encrypted_bytes(
     passphrase: Option<String>,
 ) -> Result<Vec<u8>, String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
-    let (version, passphrase) = export_backup_key(passphrase.as_deref());
-    encode_full_encrypted_store(&store, passphrase, version).map_err(|e| e.to_string())
+    let passphrase = export_backup_key(passphrase.as_deref())?;
+    encode_full_encrypted_store(&store, passphrase, FULL_FILE_VERSION_V2).map_err(|e| e.to_string())
 }
 
 /// Import full account config from an encrypted file, skipping existing accounts.
@@ -288,7 +288,8 @@ pub async fn import_accounts_full_encrypted_file(
 ) -> Result<ImportAccountsSummary, String> {
     let encrypted = read_encrypted_file(&path).map_err(|e| e.to_string())?;
     let passphrase = import_backup_key(&encrypted, passphrase.as_deref())?;
-    let imported = decode_full_encrypted_store(&encrypted, passphrase).map_err(|e| e.to_string())?;
+    let imported =
+        decode_full_encrypted_store(&encrypted, passphrase).map_err(|e| e.to_string())?;
     validate_imported_store(&imported).map_err(|e| e.to_string())?;
 
     mutate_accounts(|latest| {
@@ -655,14 +656,17 @@ fn decode_full_encrypted_store(
     Ok(store)
 }
 
-fn export_backup_key(passphrase: Option<&str>) -> (u8, &str) {
-    match passphrase.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(passphrase) => (FULL_FILE_VERSION_V2, passphrase),
-        None => (FULL_FILE_VERSION_V1, FULL_PRESET_PASSPHRASE),
-    }
+fn export_backup_key(passphrase: Option<&str>) -> Result<&str, String> {
+    passphrase
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "A passphrase is required for full backup export".to_string())
 }
 
-fn import_backup_key<'a>(file_bytes: &[u8], passphrase: Option<&'a str>) -> Result<&'a str, String> {
+fn import_backup_key<'a>(
+    file_bytes: &[u8],
+    passphrase: Option<&'a str>,
+) -> Result<&'a str, String> {
     let version = file_bytes
         .get(4)
         .copied()
@@ -814,4 +818,66 @@ pub async fn get_masked_account_ids() -> Result<Vec<String>, String> {
 #[tauri::command]
 pub async fn set_masked_account_ids(ids: Vec<String>) -> Result<(), String> {
     crate::auth::storage::set_masked_account_ids(ids).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod full_backup_tests {
+    use super::*;
+
+    fn sample_store() -> AccountsStore {
+        let account = StoredAccount::new_api_key("backup account".into(), "api-key".into());
+        AccountsStore {
+            version: 1,
+            active_account_id: Some(account.id.clone()),
+            accounts: vec![account],
+            masked_account_ids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn v2_round_trip_rejects_wrong_or_corrupted_ciphertext() {
+        let store = sample_store();
+        let first =
+            encode_full_encrypted_store(&store, "correct horse", FULL_FILE_VERSION_V2).unwrap();
+        let second =
+            encode_full_encrypted_store(&store, "correct horse", FULL_FILE_VERSION_V2).unwrap();
+
+        assert_eq!(first[4], FULL_FILE_VERSION_V2);
+        assert_ne!(&first[5..5 + FULL_SALT_LEN], &second[5..5 + FULL_SALT_LEN]);
+        assert_ne!(
+            &first[5 + FULL_SALT_LEN..5 + FULL_SALT_LEN + FULL_NONCE_LEN],
+            &second[5 + FULL_SALT_LEN..5 + FULL_SALT_LEN + FULL_NONCE_LEN]
+        );
+
+        let passphrase = import_backup_key(&first, Some("correct horse")).unwrap();
+        let decoded = decode_full_encrypted_store(&first, passphrase).unwrap();
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap(),
+            serde_json::to_value(&store).unwrap()
+        );
+
+        let wrong = decode_full_encrypted_store(&first, "wrong passphrase").unwrap_err();
+        assert!(wrong.to_string().contains("wrong passphrase"));
+
+        let mut corrupted = first.clone();
+        *corrupted.last_mut().unwrap() ^= 1;
+        assert!(decode_full_encrypted_store(&corrupted, "correct horse").is_err());
+    }
+
+    #[test]
+    fn v1_remains_import_compatible_but_is_not_exportable() {
+        let store = sample_store();
+        assert!(export_backup_key(None).is_err());
+        assert!(export_backup_key(Some("  ")).is_err());
+
+        let legacy =
+            encode_full_encrypted_store(&store, FULL_PRESET_PASSPHRASE, FULL_FILE_VERSION_V1)
+                .unwrap();
+        let passphrase = import_backup_key(&legacy, None).unwrap();
+        let decoded = decode_full_encrypted_store(&legacy, passphrase).unwrap();
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap(),
+            serde_json::to_value(&store).unwrap()
+        );
+    }
 }

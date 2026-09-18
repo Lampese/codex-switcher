@@ -107,6 +107,11 @@ export async function pickAuthJsonFile(): Promise<FileSource | null> {
 }
 
 export async function exportFullBackupFile(): Promise<boolean> {
+  const passphrase = requestBackupPassphrase(
+    "Create a passphrase for this full encrypted backup"
+  );
+  if (!passphrase) return false;
+
   if (isTauriRuntime()) {
     const { save } = await import("@tauri-apps/plugin-dialog");
     const selected = await save({
@@ -116,11 +121,17 @@ export async function exportFullBackupFile(): Promise<boolean> {
     });
 
     if (!selected) return false;
-    await invokeBackend("export_accounts_full_encrypted_file", { path: selected });
+    await invokeBackend("export_accounts_full_encrypted_file", {
+      path: selected,
+      passphrase,
+    });
     return true;
   }
 
-  const contentsBase64 = await invokeBackend<string>("export_accounts_full_encrypted_bytes");
+  const contentsBase64 = await invokeBackend<string>(
+    "export_accounts_full_encrypted_bytes",
+    { passphrase }
+  );
   downloadBase64File(
     contentsBase64,
     "codex-switcher-full.cswf",
@@ -139,18 +150,42 @@ export async function importFullBackupFile(): Promise<ImportAccountsSummary | nu
     });
 
     if (!selected || Array.isArray(selected)) return null;
-    return invokeBackend<ImportAccountsSummary>("import_accounts_full_encrypted_file", {
-      path: selected,
-    });
+    return importFullBackupSource({ path: selected });
   }
 
   const selected = await pickBrowserFile(".cswf,application/octet-stream");
   if (!selected) return null;
 
   const contentsBase64 = await fileToBase64(selected);
-  return invokeBackend<ImportAccountsSummary>("import_accounts_full_encrypted_bytes", {
-    contentsBase64,
-  });
+  return importFullBackupSource({ contentsBase64 });
+}
+
+async function importFullBackupSource(
+  source: { path: string } | { contentsBase64: string }
+): Promise<ImportAccountsSummary | null> {
+  const command = "path" in source
+    ? "import_accounts_full_encrypted_file"
+    : "import_accounts_full_encrypted_bytes";
+
+  try {
+    return await invokeBackend<ImportAccountsSummary>(command, source);
+  } catch (error) {
+    if (!isPassphraseRequiredError(error)) throw error;
+  }
+
+  const passphrase = requestBackupPassphrase("Enter the backup passphrase");
+  if (!passphrase) return null;
+  return invokeBackend<ImportAccountsSummary>(command, { ...source, passphrase });
+}
+
+function requestBackupPassphrase(message: string): string | null {
+  const entered = window.prompt(message);
+  return entered?.trim() || null;
+}
+
+function isPassphraseRequiredError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /passphrase is required/i.test(message);
 }
 
 export function describeFileSource(source: FileSource | null): string {
