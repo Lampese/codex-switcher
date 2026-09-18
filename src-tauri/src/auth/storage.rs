@@ -439,20 +439,19 @@ pub fn mutate_accounts<T>(mutate: impl FnOnce(&mut AccountsStore) -> Result<T>) 
 
 /// Add a new account to the store
 pub fn add_account(account: StoredAccount) -> Result<StoredAccount> {
-    mutate_accounts(|store| {
-        if store.accounts.iter().any(|a| a.name == account.name) {
-            anyhow::bail!("An account with name '{}' already exists", account.name);
-        }
+    mutate_accounts(|store| add_account_to_store(store, account))
+}
 
-        let account_clone = account.clone();
-        store.accounts.push(account);
+fn add_account_to_store(
+    store: &mut AccountsStore,
+    account: StoredAccount,
+) -> Result<StoredAccount> {
+    if store.accounts.iter().any(|a| a.name == account.name) {
+        anyhow::bail!("An account with name '{}' already exists", account.name);
+    }
 
-        if store.accounts.len() == 1 {
-            store.active_account_id = Some(account_clone.id.clone());
-        }
-
-        Ok(account_clone)
-    })
+    store.accounts.push(account.clone());
+    Ok(account)
 }
 
 /// Remove an account by ID
@@ -648,8 +647,8 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_mutation_lock_at, reconcile_active_projection, sync_active_account_tokens,
-        update_account_chatgpt_tokens_in_store, write_file_atomic,
+        acquire_mutation_lock_at, add_account_to_store, reconcile_active_projection,
+        sync_active_account_tokens, update_account_chatgpt_tokens_in_store, write_file_atomic,
         write_file_atomic_with_pre_replace,
     };
     use crate::types::{AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData};
@@ -708,6 +707,22 @@ mod tests {
         assert!(leftovers.is_empty());
 
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn adding_first_account_does_not_claim_runtime_activation() {
+        let mut store = AccountsStore::default();
+        let profile = account("A", "workspace-a", "a1");
+        let profile_id = profile.id.clone();
+
+        let added = add_account_to_store(&mut store, profile).unwrap();
+
+        assert_eq!(added.id, profile_id);
+        assert!(store
+            .accounts
+            .iter()
+            .any(|account| account.id == profile_id));
+        assert_eq!(store.active_account_id, None);
     }
 
     #[test]
