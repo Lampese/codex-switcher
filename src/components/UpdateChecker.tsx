@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import type { Update } from "@tauri-apps/plugin-updater";
 import { isTauriRuntime } from "../lib/platform";
+import { useI18n } from "../lib/i18n";
 
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
@@ -13,6 +14,7 @@ type UpdateStatus =
   | { kind: "error"; message: string };
 
 export function UpdateChecker() {
+  const { t } = useI18n();
   const [status, setStatus] = useState<UpdateStatus>({ kind: "idle" });
   const [dismissed, setDismissed] = useState(false);
   const checkInFlightRef = useRef(false);
@@ -115,7 +117,7 @@ export function UpdateChecker() {
           <div className="flex items-start gap-3">
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
-                Update available: v{status.update.version}
+                {t("Update available: v{{version}}", { version: status.update.version })}
               </p>
               {status.update.body && (
                 <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5 truncate">
@@ -128,13 +130,13 @@ export function UpdateChecker() {
                 onClick={() => setDismissed(true)}
                 className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 transition-colors"
               >
-                Later
+                {t("Later")}
               </button>
               <button
                 onClick={handleDownloadAndInstall}
                 className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors"
               >
-                Update
+                {t("Update")}
               </button>
             </div>
           </div>
@@ -143,7 +145,7 @@ export function UpdateChecker() {
         {status.kind === "downloading" && (
           <div>
             <div className="flex items-center justify-between mb-2">
-              <p className="text-sm font-medium text-gray-900 dark:text-gray-100">Downloading update...</p>
+              <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{t("Downloading update...")}</p>
               <p className="text-xs text-gray-500 dark:text-gray-400">
                 {formatBytes(status.downloaded)}
                 {status.total ? ` / ${formatBytes(status.total)}` : ""}
@@ -166,20 +168,20 @@ export function UpdateChecker() {
         {status.kind === "ready" && (
           <div className="flex items-center justify-between">
             <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
-              Update ready. Restart to apply.
+              {t("Update ready. Restart to apply.")}
             </p>
             <div className="flex items-center gap-2 shrink-0">
               <button
                 onClick={() => setDismissed(true)}
                 className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 transition-colors"
               >
-                Later
+                {t("Later")}
               </button>
               <button
                 onClick={handleRelaunch}
                 className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors"
               >
-                Restart
+                {t("Restart")}
               </button>
             </div>
           </div>
@@ -188,13 +190,13 @@ export function UpdateChecker() {
         {status.kind === "error" && (
           <div className="flex items-center justify-between">
             <p className="text-sm text-red-600 dark:text-red-300">
-              Update failed: {status.message}
+              {t("Update failed")}: {status.message}
             </p>
             <button
               onClick={() => setDismissed(true)}
               className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 transition-colors shrink-0 ml-2"
             >
-              Dismiss
+              {t("Dismiss")}
             </button>
           </div>
         )}
