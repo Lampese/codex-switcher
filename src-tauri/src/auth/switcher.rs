@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use chrono::Utc;
 
-use crate::auth::storage::write_file_atomic;
+use crate::auth::storage::{acquire_mutation_lock, write_file_atomic};
 use crate::types::{
     parse_chatgpt_id_token_claims, AuthData, AuthDotJson, StoredAccount, TokenData,
 };
@@ -29,6 +29,7 @@ pub fn get_codex_auth_file() -> Result<PathBuf> {
 
 /// Switch to a specific account by writing its credentials to ~/.codex/auth.json
 pub fn switch_to_account(account: &StoredAccount) -> Result<()> {
+    let _lock = acquire_mutation_lock("auth.lock")?;
     let codex_home = get_codex_home()?;
 
     // Ensure the codex home directory exists
