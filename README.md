@@ -94,7 +94,7 @@ The built application will be in `src-tauri/target/release/bundle/`.
 You can also serve the built dashboard over HTTP instead of opening the Tauri shell.
 
 ```bash
-# Build the frontend and start the web server on 0.0.0.0:3210
+# Build the frontend and start the local-only web server on 127.0.0.1:3210
 pnpm lan
 ```
 
@@ -102,8 +102,24 @@ Optional environment variables:
 
 - `CODEX_SWITCHER_WEB_HOST` to override the bind host
 - `CODEX_SWITCHER_WEB_PORT` to override the port
+- `CODEX_SWITCHER_WEB_SECRET` is required when `CODEX_SWITCHER_WEB_HOST` is
+  not a loopback address. Browser requests send it as a Bearer token; when it
+  is not provided at build time, the dashboard prompts once and keeps it only
+  for the current browser session.
 
-The browser dashboard serves the same UI and backend actions through `/api/invoke/*`, which makes it usable over LAN, Tailscale, or a remote host tunnel when you expose the chosen port safely.
+The browser dashboard serves the same UI and backend actions through
+`/api/invoke/*`. The server uses plain HTTP, so remote access must be carried
+through an encrypted tunnel or TLS-terminating proxy. Never put the secret in a
+URL or log it. For example:
+
+```bash
+CODEX_SWITCHER_WEB_HOST=0.0.0.0 \
+CODEX_SWITCHER_WEB_SECRET='replace-with-a-random-secret' \
+pnpm lan
+```
+
+Only expose that listener behind an encrypted tunnel or TLS; the secret alone
+does not encrypt the connection.
 
 ## Usage and Reset Credits
 
