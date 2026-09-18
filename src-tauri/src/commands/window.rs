@@ -8,8 +8,8 @@ use std::{
 use tauri::{AppHandle, Manager, Runtime};
 
 use crate::{
-    auth::{load_app_settings, mutate_app_settings},
-    types::{DockDisplayMode, TrayDisplayMode, UsageInfo, WarmupPolicy},
+    auth::load_app_settings,
+    types::{DockDisplayMode, TrayDisplayMode, UsageInfo, WarmupPolicy, WarmupState},
 };
 
 /// Label of the borderless tray popup window.
@@ -126,11 +126,21 @@ pub fn get_warmup_policy() -> Result<WarmupPolicy, String> {
 }
 
 #[tauri::command]
+pub fn get_warmup_state() -> Result<WarmupState, String> {
+    crate::warmup_scheduler::get_state().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn set_warmup_policy(policy: WarmupPolicy) -> Result<(), String> {
-    mutate_app_settings(|settings| {
-        settings.warmup_policy = policy;
-        Ok(())
-    })
+    crate::warmup_scheduler::set_policy(policy).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn record_warmup_success(account_id: String, timestamp_ms: Option<i64>) -> Result<(), String> {
+    crate::warmup_scheduler::record_manual_success(
+        &account_id,
+        timestamp_ms.unwrap_or_else(|| chrono::Utc::now().timestamp_millis()),
+    )
     .map_err(|error| error.to_string())
 }
 
