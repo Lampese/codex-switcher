@@ -1,4 +1,6 @@
 use std::fs;
+use std::io::Read;
+use std::net::IpAddr;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::Context;
@@ -18,6 +20,44 @@ use crate::commands::{
     rename_account, set_masked_account_ids, start_login, switch_account, warmup_account,
     warmup_all_accounts,
 };
+
+const MAX_REQUEST_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(Debug, Clone)]
+struct WebAuth {
+    secret: Option<String>,
+}
+
+impl WebAuth {
+    fn from_host(host: &str) -> anyhow::Result<Self> {
+        let secret = std::env::var("CODEX_SWITCHER_WEB_SECRET")
+            .ok()
+            .filter(|value| !value.is_empty());
+        Self::from_host_and_secret(host, secret)
+    }
+
+    fn from_host_and_secret(host: &str, secret: Option<String>) -> anyhow::Result<Self> {
+        if !is_loopback_host(host) && secret.is_none() {
+            anyhow::bail!(
+                "Non-loopback web binding requires CODEX_SWITCHER_WEB_SECRET; use an encrypted tunnel or TLS for remote access"
+            );
+        }
+        Ok(Self { secret })
+    }
+
+    fn requires_auth(&self) -> bool {
+        self.secret.is_some()
+    }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let normalized = host.trim().trim_start_matches('[').trim_end_matches(']');
+    normalized.eq_ignore_ascii_case("localhost")
+        || normalized
+            .parse::<IpAddr>()
+            .map(|address| address.is_loopback())
+            .unwrap_or(false)
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,6 +120,7 @@ struct FileImportArgs {
 
 pub fn run_lan_server(host: &str, port: u16) -> anyhow::Result<()> {
     let address = format!("{host}:{port}");
+    let auth = WebAuth::from_host(host)?;
     let server = Server::http(&address)
         .map_err(|err| anyhow::anyhow!("Failed to bind HTTP server on {address}: {err}"))?;
     let runtime = Runtime::new().context("Failed to start async runtime")?;
@@ -91,7 +132,7 @@ pub fn run_lan_server(host: &str, port: u16) -> anyhow::Result<()> {
     println!("Serving static files from {}", dist_dir.display());
 
     for request in server.incoming_requests() {
-        if let Err(error) = handle_request(request, &runtime, &dist_dir) {
+        if let Err(error) = handle_request(request, &runtime, &dist_dir, &auth) {
             eprintln!("[web] request failed: {error:#}");
         }
     }
@@ -99,7 +140,12 @@ pub fn run_lan_server(host: &str, port: u16) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn handle_request(mut request: Request, runtime: &Runtime, dist_dir: &Path) -> anyhow::Result<()> {
+fn handle_request(
+    mut request: Request,
+    runtime: &Runtime,
+    dist_dir: &Path,
+    auth: &WebAuth,
+) -> anyhow::Result<()> {
     let method = request.method().clone();
     let url = request.url().to_string();
 
@@ -109,8 +155,23 @@ fn handle_request(mut request: Request, runtime: &Runtime, dist_dir: &Path) -> a
     }
 
     if method == Method::Post && url.starts_with("/api/invoke/") {
+        if !is_authorized(&request, auth) {
+            respond_unauthorized(request)?;
+            return Ok(());
+        }
         let command = url.trim_start_matches("/api/invoke/");
-        let payload = parse_request_json(&mut request)?;
+        let payload = match parse_request_json(&mut request) {
+            Ok(payload) => payload,
+            Err(error) => {
+                let status = if matches!(error, RequestBodyError::TooLarge) {
+                    StatusCode(413)
+                } else {
+                    StatusCode(400)
+                };
+                respond_json(request, status, &json!({ "error": error.to_string() }))?;
+                return Ok(());
+            }
+        };
         let result = runtime.block_on(invoke_web_command(command, payload));
         match result {
             Ok(value) => respond_json(request, StatusCode(200), &value)?,
@@ -131,6 +192,51 @@ fn handle_request(mut request: Request, runtime: &Runtime, dist_dir: &Path) -> a
         "text/plain; charset=utf-8",
     )?;
     Ok(())
+}
+
+fn is_authorized(request: &Request, auth: &WebAuth) -> bool {
+    let Some(expected) = auth.secret.as_deref() else {
+        return !auth.requires_auth();
+    };
+    let provided = request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv("Authorization"))
+        .and_then(|header| header.value.as_str().strip_prefix("Bearer "))
+        .map(str::trim)
+        .unwrap_or_default();
+    constant_time_eq(expected.as_bytes(), provided.as_bytes())
+}
+
+fn constant_time_eq(expected: &[u8], provided: &[u8]) -> bool {
+    let mut difference = expected.len() ^ provided.len();
+    for index in 0..expected.len().max(provided.len()) {
+        let left = expected.get(index).copied().unwrap_or_default();
+        let right = provided.get(index).copied().unwrap_or_default();
+        difference |= usize::from(left ^ right);
+    }
+    difference == 0
+}
+
+fn respond_unauthorized(request: Request) -> anyhow::Result<()> {
+    let response = Response::from_string(r#"{"error":"Unauthorized"}"#)
+        .with_status_code(StatusCode(401))
+        .with_header(header("Content-Type", "application/json; charset=utf-8")?)
+        .with_header(header("WWW-Authenticate", "Bearer")?);
+    request.respond(response)?;
+    Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+enum RequestBodyError {
+    #[error("Request body exceeds the 2097152-byte limit")]
+    TooLarge,
+    #[error("Failed to read request body: {0}")]
+    Read(#[from] std::io::Error),
+    #[error("Request body is not valid UTF-8: {0}")]
+    Utf8(#[from] std::string::FromUtf8Error),
+    #[error("Failed to parse request JSON: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, String> {
@@ -211,18 +317,34 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
     }
 }
 
-fn parse_request_json(request: &mut Request) -> anyhow::Result<Value> {
-    let mut body = String::new();
-    request
-        .as_reader()
-        .read_to_string(&mut body)
-        .context("Failed to read request body")?;
-
-    if body.trim().is_empty() {
-        return Ok(json!({}));
+fn parse_request_json(request: &mut Request) -> Result<Value, RequestBodyError> {
+    if request
+        .body_length()
+        .is_some_and(|length| length > MAX_REQUEST_BODY_BYTES)
+    {
+        return Err(RequestBodyError::TooLarge);
     }
 
-    serde_json::from_str(&body).context("Failed to parse request JSON")
+    let mut bytes = Vec::new();
+    request
+        .as_reader()
+        .take((MAX_REQUEST_BODY_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_REQUEST_BODY_BYTES {
+        return Err(RequestBodyError::TooLarge);
+    }
+    parse_request_bytes(&bytes)
+}
+
+fn parse_request_bytes(bytes: &[u8]) -> Result<Value, RequestBodyError> {
+    if bytes.len() > MAX_REQUEST_BODY_BYTES {
+        return Err(RequestBodyError::TooLarge);
+    }
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(json!({}));
+    }
+    let body = String::from_utf8(bytes.to_vec())?;
+    Ok(serde_json::from_str(&body)?)
 }
 
 fn parse_args<T>(value: Value) -> Result<T, String>
@@ -335,5 +457,41 @@ fn mime_type_for_path(path: &Path) -> &'static str {
         "txt" => "text/plain; charset=utf-8",
         "webp" => "image/webp",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_hosts_do_not_require_a_secret() {
+        assert!(WebAuth::from_host_and_secret("127.0.0.1", None).is_ok());
+        assert!(WebAuth::from_host_and_secret("::1", None).is_ok());
+        assert!(WebAuth::from_host_and_secret("localhost", None).is_ok());
+    }
+
+    #[test]
+    fn non_loopback_hosts_fail_closed_without_a_secret() {
+        let error = WebAuth::from_host_and_secret("0.0.0.0", None).unwrap_err();
+        assert!(error.to_string().contains("CODEX_SWITCHER_WEB_SECRET"));
+        assert!(WebAuth::from_host_and_secret("0.0.0.0", Some("secret".into())).is_ok());
+    }
+
+    #[test]
+    fn bearer_auth_uses_constant_time_value_comparison() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"wrong"));
+        assert!(!constant_time_eq(b"secret", b"secret-longer"));
+    }
+
+    #[test]
+    fn request_body_parser_rejects_oversized_payloads_before_json_parsing() {
+        let oversized = vec![b' '; MAX_REQUEST_BODY_BYTES + 1];
+        assert!(matches!(
+            parse_request_bytes(&oversized),
+            Err(RequestBodyError::TooLarge)
+        ));
+        assert_eq!(parse_request_bytes(b"{}\n").unwrap(), json!({}));
     }
 }
