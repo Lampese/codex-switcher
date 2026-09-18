@@ -83,8 +83,8 @@ pub fn get_settings_file() -> Result<PathBuf> {
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-struct MutationLock {
-    file: File,
+pub(crate) struct MutationLock {
+    _file: File,
 }
 
 impl Drop for MutationLock {
@@ -99,7 +99,7 @@ impl Drop for MutationLock {
     }
 }
 
-fn acquire_mutation_lock(lock_name: &str) -> Result<MutationLock> {
+pub(crate) fn acquire_mutation_lock(lock_name: &str) -> Result<MutationLock> {
     let config_dir = get_config_dir()?;
     fs::create_dir_all(&config_dir).with_context(|| {
         format!(
@@ -129,7 +129,7 @@ fn acquire_mutation_lock_at(path: &Path) -> Result<MutationLock> {
             return Err(std::io::Error::last_os_error())
                 .with_context(|| format!("Failed to acquire mutation lock: {}", path.display()));
         }
-        return Ok(MutationLock { file });
+        return Ok(MutationLock { _file: file });
     }
 
     #[cfg(windows)]
@@ -145,7 +145,7 @@ fn acquire_mutation_lock_at(path: &Path) -> Result<MutationLock> {
                 .share_mode(0)
                 .open(path)
             {
-                Ok(file) => return Ok(MutationLock { file }),
+                Ok(file) => return Ok(MutationLock { _file: file }),
                 Err(error) if std::time::Instant::now() < deadline => {
                     let _ = error;
                     std::thread::sleep(std::time::Duration::from_millis(25));
@@ -167,7 +167,7 @@ fn acquire_mutation_lock_at(path: &Path) -> Result<MutationLock> {
             .write(true)
             .open(path)
             .with_context(|| format!("Failed to open mutation lock: {}", path.display()))?;
-        Ok(MutationLock { file })
+        Ok(MutationLock { _file: file })
     }
 }
 
@@ -312,6 +312,11 @@ pub fn load_app_settings() -> Result<AppSettings> {
 }
 
 pub fn save_app_settings(settings: &AppSettings) -> Result<()> {
+    let _lock = acquire_mutation_lock("settings.lock")?;
+    save_app_settings_unlocked(settings)
+}
+
+fn save_app_settings_unlocked(settings: &AppSettings) -> Result<()> {
     let path = get_settings_file()?;
     let content = serde_json::to_vec_pretty(settings).context("Failed to serialize settings")?;
     write_file_atomic(&path, &content)
@@ -321,12 +326,17 @@ pub fn mutate_app_settings<T>(mutate: impl FnOnce(&mut AppSettings) -> Result<T>
     let _lock = acquire_mutation_lock("settings.lock")?;
     let mut settings = load_app_settings()?;
     let result = mutate(&mut settings)?;
-    save_app_settings(&settings)?;
+    save_app_settings_unlocked(&settings)?;
     Ok(result)
 }
 
 /// Save the accounts store to disk
 pub fn save_accounts(store: &AccountsStore) -> Result<()> {
+    let _lock = acquire_mutation_lock("accounts.lock")?;
+    save_accounts_unlocked(store)
+}
+
+fn save_accounts_unlocked(store: &AccountsStore) -> Result<()> {
     let path = get_accounts_file()?;
     let content = serde_json::to_vec_pretty(store).context("Failed to serialize accounts store")?;
     write_file_atomic(&path, &content)
@@ -338,7 +348,7 @@ pub fn mutate_accounts<T>(mutate: impl FnOnce(&mut AccountsStore) -> Result<T>) 
     let _lock = acquire_mutation_lock("accounts.lock")?;
     let mut store = load_accounts()?;
     let result = mutate(&mut store)?;
-    save_accounts(&store)?;
+    save_accounts_unlocked(&store)?;
     Ok(result)
 }
 
@@ -604,6 +614,26 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_secret_write_has_restrictive_permissions_from_creation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "codex-switcher-atomic-permissions-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("auth.json");
+
+        write_file_atomic(&path, br#"{"tokens":{}}"#).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
 
         std::fs::remove_dir_all(dir).unwrap();
     }
