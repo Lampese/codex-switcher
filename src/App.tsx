@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAccounts } from "./hooks/useAccounts";
 import { useDesktopReopen } from "./hooks/useDesktopReopen";
 import { useCodexClosePreference } from "./hooks/useCodexClosePreference";
@@ -42,6 +41,7 @@ import {
   type AutoWarmupWindow,
   type AutoWarmupWindowKind,
 } from "./lib/autoWarmupPolicy";
+import { getTauriWindow } from "./lib/tauriWindow";
 import "./App.css";
 
 const AUTO_WARMUP_CHECK_INTERVAL_MS = 30 * 1000;
@@ -65,7 +65,6 @@ type AutoWarmupLedger = Record<
     lastAutoWindowKind?: AutoWarmupWindowKind;
   }
 >;
-const getAppWindow = () => getCurrentWindow();
 const isMacOs =
   typeof navigator !== "undefined" &&
   /(Mac|iPhone|iPod|iPad)/i.test(navigator.userAgent);
@@ -388,14 +387,14 @@ function App() {
   const handleTitlebarDrag = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
       if (!isTauriRuntime() || event.button !== 0) return;
-      void getAppWindow().startDragging();
+      void getTauriWindow()?.startDragging();
     },
     []
   );
 
   const handleTitlebarDoubleClick = useCallback(() => {
     if (!isTauriRuntime()) return;
-    void getAppWindow().toggleMaximize();
+    void getTauriWindow()?.toggleMaximize();
   }, []);
 
   const toggleMask = (accountId: string) => {
@@ -522,11 +521,14 @@ function App() {
   useEffect(() => {
     if (!isTauriRuntime() || isMacOs) return;
 
+    const appWindow = getTauriWindow();
+    if (!appWindow) return;
+
     let unlisten: (() => void) | undefined;
 
     const syncMaximizedState = async () => {
       try {
-        setIsWindowMaximized(await getAppWindow().isMaximized());
+        setIsWindowMaximized(await appWindow.isMaximized());
       } catch (err) {
         console.error("Failed to read window state:", err);
       }
@@ -534,7 +536,7 @@ function App() {
 
     void syncMaximizedState();
 
-    getAppWindow()
+    appWindow
       .onResized(() => {
         void syncMaximizedState();
       })
@@ -1358,7 +1360,7 @@ function App() {
             <div className="flex items-center gap-1">
               <button
                 onClick={() => {
-                  void getAppWindow().minimize();
+                  void getTauriWindow()?.minimize();
                 }}
                 className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
                 title="Minimize"
@@ -1369,7 +1371,7 @@ function App() {
               </button>
               <button
                 onClick={() => {
-                  void getAppWindow().toggleMaximize();
+                  void getTauriWindow()?.toggleMaximize();
                 }}
                 className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
                 title={isWindowMaximized ? "Restore" : "Maximize"}
@@ -1387,7 +1389,7 @@ function App() {
               </button>
               <button
                 onClick={() => {
-                  void getAppWindow().close();
+                  void getTauriWindow()?.close();
                 }}
                 className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-red-500 hover:text-white dark:text-gray-400 dark:hover:bg-red-500 dark:hover:text-white"
                 title="Close"
