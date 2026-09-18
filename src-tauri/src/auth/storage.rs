@@ -85,6 +85,60 @@ fn runtime_snapshot_is_older_than_stored_credentials(
     }
 }
 
+pub fn reconcile_active_projection(
+    store: &mut AccountsStore,
+    auth: Option<&AuthDotJson>,
+) -> bool {
+    let previous_active = store.active_account_id.clone();
+
+    let matching_id = auth.and_then(|auth| {
+        if let Some(api_key) = auth.openai_api_key.as_ref() {
+            return store.accounts.iter().find_map(|account| match &account.auth_data {
+                AuthData::ApiKey { key } if key == api_key => Some(account.id.clone()),
+                _ => None,
+            });
+        }
+
+        let tokens = auth.tokens.as_ref()?;
+        let runtime_account_id = parse_chatgpt_id_token_claims(&tokens.id_token)
+            .account_id
+            .or_else(|| tokens.account_id.clone())?;
+
+        store.accounts.iter().find_map(|account| match &account.auth_data {
+            AuthData::ChatGPT {
+                id_token,
+                account_id,
+                ..
+            } => {
+                let stored_account_id = parse_chatgpt_id_token_claims(id_token)
+                    .account_id
+                    .or_else(|| account_id.clone());
+                (stored_account_id.as_deref() == Some(runtime_account_id.as_str()))
+                    .then(|| account.id.clone())
+            }
+            _ => None,
+        })
+    });
+
+    store.active_account_id = matching_id;
+
+    let mut changed = store.active_account_id != previous_active;
+    if let (Some(auth), Some(active_id)) = (auth, store.active_account_id.clone()) {
+        let before = store
+            .accounts
+            .iter()
+            .find(|account| account.id == active_id)
+            .cloned();
+        if sync_active_account_tokens(store, auth) {
+            changed = true;
+        } else if before.is_none() {
+            changed = true;
+        }
+    }
+
+    changed
+}
+
 /// Get the path to the codex-switcher config directory
 pub fn get_config_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("Could not find home directory")?;
@@ -398,17 +452,16 @@ pub fn add_account(account: StoredAccount) -> Result<StoredAccount> {
 /// Remove an account by ID
 pub fn remove_account(account_id: &str) -> Result<()> {
     mutate_accounts(|store| {
+        if store.active_account_id.as_deref() == Some(account_id) {
+            anyhow::bail!("Cannot delete the active account; switch to another account first");
+        }
+
         let initial_len = store.accounts.len();
         store.accounts.retain(|a| a.id != account_id);
 
         if store.accounts.len() == initial_len {
             anyhow::bail!("Account not found: {account_id}");
         }
-
-        if store.active_account_id.as_deref() == Some(account_id) {
-            store.active_account_id = store.accounts.first().map(|account| account.id.clone());
-        }
-
         Ok(())
     })
 }
@@ -589,7 +642,7 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_mutation_lock_at, sync_active_account_tokens,
+        acquire_mutation_lock_at, reconcile_active_projection, sync_active_account_tokens,
         update_account_chatgpt_tokens_in_store, write_file_atomic,
         write_file_atomic_with_pre_replace,
     };
@@ -742,6 +795,49 @@ mod tests {
             format!(r#"{{"https://api.openai.com/auth":{{"chatgpt_account_id":"{account_id}"}}}}"#);
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
         format!("header.{encoded}.{suffix}")
+    }
+
+
+    #[test]
+    fn projection_follows_matching_runtime_chatgpt_account_and_tokens() {
+        let mut account_a = account("A", "workspace-a", "a1");
+        let account_a_id = account_a.id.clone();
+        let account_b = account("B", "workspace-b", "b1");
+        let account_b_id = account_b.id.clone();
+        let mut store = AccountsStore {
+            accounts: vec![account_a.clone(), account_b],
+            active_account_id: Some(account_b_id),
+            ..AccountsStore::default()
+        };
+
+        let live = auth("workspace-a", "a2");
+        assert!(reconcile_active_projection(&mut store, Some(&live)));
+        assert_eq!(store.active_account_id.as_deref(), Some(account_a_id.as_str()));
+        let AuthData::ChatGPT { refresh_token, .. } = &store.accounts[0].auth_data else {
+            panic!("expected ChatGPT account");
+        };
+        assert_eq!(refresh_token, "refresh-a2");
+
+        account_a = store.accounts.remove(0);
+        assert_eq!(refresh_token(&account_a), "refresh-a2");
+    }
+
+    #[test]
+    fn projection_clears_when_runtime_is_logged_out_or_unknown() {
+        let account_a = account("A", "workspace-a", "a1");
+        let account_a_id = account_a.id.clone();
+        let mut store = AccountsStore {
+            accounts: vec![account_a],
+            active_account_id: Some(account_a_id),
+            ..AccountsStore::default()
+        };
+
+        assert!(reconcile_active_projection(&mut store, None));
+        assert!(store.active_account_id.is_none());
+
+        let unknown = auth("workspace-unknown", "x");
+        assert!(!reconcile_active_projection(&mut store, Some(&unknown)));
+        assert!(store.active_account_id.is_none());
     }
 
     #[test]
