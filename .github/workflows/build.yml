@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (e.g., v1.0.0)'
+        description: 'Existing immutable version tag (e.g., v1.0.0)'
         required: true
         type: string
       release_note:
@@ -84,19 +84,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          checked_out_commit="$(git rev-parse HEAD)"
-          release_commit="$(git rev-list -n 1 "refs/tags/$RELEASE_TAG")"
-          if [ "$checked_out_commit" != "$release_commit" ]; then
-            echo "Checked-out source does not match release tag $RELEASE_TAG" >&2
-            exit 1
-          fi
-
-          embedded_version="$(node -p "require('./package.json').version")"
-          expected_version="${RELEASE_TAG#v}"
-          if [ "$embedded_version" != "$expected_version" ]; then
-            echo "package.json version $embedded_version does not match $RELEASE_TAG" >&2
-            exit 1
-          fi
+          node scripts/verify-release-source.mjs "$RELEASE_TAG"
 
       - name: Determine release note
         id: release_note
