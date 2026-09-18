@@ -218,8 +218,8 @@ fn chatgpt_tokens_need_refresh(account: &StoredAccount) -> bool {
     }
 }
 
-fn chatgpt_tokens_need_refresh_at(id_token: &str, access_token: &str, now: i64) -> bool {
-    id_token_needs_refresh_at(id_token, now) || token_expired_or_near_expiry_at(access_token, now)
+fn chatgpt_tokens_need_refresh_at(_id_token: &str, access_token: &str, now: i64) -> bool {
+    token_expired_or_near_expiry_at(access_token, now)
 }
 
 fn id_token_needs_refresh_at(token: &str, now: i64) -> bool {
@@ -363,12 +363,12 @@ mod tests {
     }
 
     #[test]
-    fn refresh_required_when_id_token_expired_but_access_token_valid() {
+    fn refresh_not_required_when_only_id_token_is_expired() {
         let now = 1_800_000_000;
         let id_token = jwt_with_exp(now - 3_600);
         let access_token = jwt_with_exp(now + 3_600);
 
-        assert!(chatgpt_tokens_need_refresh_at(
+        assert!(!chatgpt_tokens_need_refresh_at(
             &id_token,
             &access_token,
             now
