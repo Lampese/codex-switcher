@@ -15,9 +15,8 @@ use crate::commands::{
     export_accounts_slim_text, fetch_usage, get_account_usage_stats, get_active_account_info,
     get_masked_account_ids, get_warmup_policy, import_accounts_full_encrypted_bytes,
     import_accounts_slim_text, kill_codex_processes, list_accounts, refresh_account_metadata,
-    refresh_all_accounts_usage,
-    rename_account, set_masked_account_ids, set_warmup_policy, start_login, switch_account,
-    warmup_account, warmup_all_accounts,
+    refresh_all_accounts_usage, rename_account, set_masked_account_ids, set_warmup_policy,
+    start_login, switch_account, warmup_account, warmup_all_accounts,
 };
 use crate::types::WarmupPolicy;
 
@@ -80,11 +79,21 @@ struct FileImportArgs {
     name: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordWarmupArgs {
+    #[serde(alias = "account_id")]
+    account_id: String,
+    #[serde(alias = "timestamp_ms")]
+    timestamp_ms: Option<i64>,
+}
+
 pub fn run_lan_server(host: &str, port: u16) -> anyhow::Result<()> {
     let address = format!("{host}:{port}");
     let server = Server::http(&address)
         .map_err(|err| anyhow::anyhow!("Failed to bind HTTP server on {address}: {err}"))?;
     let runtime = Runtime::new().context("Failed to start async runtime")?;
+    runtime.spawn(crate::warmup_scheduler::run());
     let dist_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("dist");
@@ -185,9 +194,17 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
         "cancel_login" => to_json(cancel_login().await?),
         "export_accounts_slim_text" => to_json(export_accounts_slim_text().await?),
         "get_warmup_policy" => to_json(get_warmup_policy()?),
+        "get_warmup_state" => to_json(crate::commands::get_warmup_state()?),
         "set_warmup_policy" => {
             let policy: WarmupPolicy = parse_args(payload)?;
             to_json(set_warmup_policy(policy)?)
+        }
+        "record_warmup_success" => {
+            let args: RecordWarmupArgs = parse_args(payload)?;
+            to_json(crate::commands::record_warmup_success(
+                args.account_id,
+                args.timestamp_ms,
+            )?)
         }
         "import_accounts_slim_text" => {
             let args: ImportSlimArgs = parse_args(payload)?;
