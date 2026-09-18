@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use base64::Engine;
 use chrono::Utc;
+use reqwest::StatusCode;
 use tokio::time::{sleep, Duration};
 
 use super::{
@@ -77,6 +78,39 @@ pub async fn refresh_chatgpt_tokens(account: &StoredAccount) -> Result<StoredAcc
 
     let _auth_guard = AUTH_OPERATION_LOCK.lock().await;
     refresh_chatgpt_tokens_locked(account).await
+}
+
+
+/// Retry policy for provider responses. Only 401 proves the access token was
+/// rejected. A 403 may be authorization or edge/CDN behavior and must not
+/// consume a rotating refresh token.
+pub fn should_refresh_after_provider_status(status: StatusCode) -> bool {
+    status == StatusCode::UNAUTHORIZED
+}
+
+/// Refresh after a provider 401 only if the rejected access token is still the
+/// current token after acquiring the auth-operation lock. Concurrent callers
+/// that observed the same old token therefore share one refresh result.
+pub async fn refresh_chatgpt_tokens_after_unauthorized(
+    account: &StoredAccount,
+    rejected_access_token: &str,
+) -> Result<StoredAccount> {
+    if matches!(account.auth_data, AuthData::ApiKey { .. }) {
+        return Ok(account.clone());
+    }
+
+    let _auth_guard = AUTH_OPERATION_LOCK.lock().await;
+    let (current, _) = load_account_reconciling_live_auth(&account.id)?;
+
+    let AuthData::ChatGPT { access_token, .. } = &current.auth_data else {
+        return Ok(current);
+    };
+
+    if access_token != rejected_access_token {
+        return Ok(current);
+    }
+
+    refresh_chatgpt_tokens_locked(&current).await
 }
 
 async fn refresh_chatgpt_tokens_locked(account: &StoredAccount) -> Result<StoredAccount> {
@@ -339,10 +373,12 @@ async fn refresh_tokens_with_refresh_token(refresh_token: &str) -> Result<Refres
 mod tests {
     use super::{
         access_token_needs_refresh_at, chatgpt_tokens_need_refresh, merge_refresh_response,
-        reconcile_active_account_from_auth, resolve_refreshed_id_token, RefreshTokenResponse,
+        reconcile_active_account_from_auth, resolve_refreshed_id_token,
+        should_refresh_after_provider_status, RefreshTokenResponse,
     };
     use crate::types::{AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData};
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use reqwest::StatusCode;
 
     fn jwt_with_exp(exp: i64) -> String {
         let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{exp}}}"#));
@@ -354,6 +390,13 @@ mod tests {
             r#"{{"exp":{exp},"https://api.openai.com/auth":{{"chatgpt_account_id":"{account_id}"}}}}"#
         ));
         format!("header.{payload}.{signature}")
+    }
+
+    #[test]
+    fn provider_retry_refreshes_only_on_unauthorized() {
+        assert!(should_refresh_after_provider_status(StatusCode::UNAUTHORIZED));
+        assert!(!should_refresh_after_provider_status(StatusCode::FORBIDDEN));
+        assert!(!should_refresh_after_provider_status(StatusCode::TOO_MANY_REQUESTS));
     }
 
     #[test]
