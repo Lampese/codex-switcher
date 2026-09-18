@@ -135,7 +135,7 @@ export function SettingsModal({
           <select
             id="language"
             value={languagePreference}
-            disabled={saving}
+            disabled={saving || (desktop && !displaySettings)}
             onChange={(event) =>
               void changeLanguage(
                 event.target.value as DesktopLanguagePreference | BrowserLanguagePreference
