@@ -71,6 +71,10 @@ pub struct WarmupState {
     pub ledger: WarmupLedger,
 }
 
+fn default_language() -> String {
+    "en-US".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
@@ -80,6 +84,8 @@ pub struct AppSettings {
     pub close_behavior_prompt_enabled: bool,
     pub warmup_policy: WarmupPolicy,
     pub warmup_ledger: WarmupLedger,
+    #[serde(default = "default_language")]
+    pub language: String,
 }
 
 impl Default for AppSettings {
@@ -90,6 +96,7 @@ impl Default for AppSettings {
             close_behavior_prompt_enabled: true,
             warmup_policy: WarmupPolicy::default(),
             warmup_ledger: WarmupLedger::default(),
+            language: default_language(),
         }
     }
 }
