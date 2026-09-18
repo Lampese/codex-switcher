@@ -442,7 +442,7 @@ function App() {
         setPendingSwitchAccountId(accountId);
         setForceCloseConfirmOpen(true);
       } else {
-        showWarmupToast(`Switch failed: ${formatWarmupError(err)}`, true);
+        showWarmupToast(t("Switch failed: {{error}}", { error: formatWarmupError(err) }), true);
       }
     } finally {
       setSwitchingId(null);
@@ -483,15 +483,15 @@ function App() {
   }, []);
 
   const formatWarmupError = useCallback((err: unknown) => {
-    if (!err) return "Unknown error";
+    if (!err) return t("Unknown error");
     if (err instanceof Error && err.message) return err.message;
     if (typeof err === "string") return err;
     try {
       return JSON.stringify(err);
     } catch {
-      return "Unknown error";
+      return t("Unknown error");
     }
-  }, []);
+  }, [t]);
 
   const refreshWarmupProjection = useCallback(async () => {
     const state = await invokeBackend<WarmupState>("get_warmup_state");
@@ -516,14 +516,14 @@ function App() {
     try {
       desktopReopen.savePreference(value);
     } catch (err) {
-      showWarmupToast(`Could not save preference: ${formatWarmupError(err)}`, true);
+      showWarmupToast(t("Could not save preference: {{error}}", { error: formatWarmupError(err) }), true);
     }
   };
   const saveCodexClosePreference = (value: CodexClosePreference) => {
     try {
       codexClose.savePreference(value);
     } catch (err) {
-      showWarmupToast(`Could not save close preference: ${formatWarmupError(err)}`, true);
+      showWarmupToast(t("Could not save close preference: {{error}}", { error: formatWarmupError(err) }), true);
     }
   };
 
@@ -556,7 +556,7 @@ function App() {
               showWarmupToast(t("Switched account from tray."));
             } catch (err) {
               console.error("Failed to retry tray account switch:", err);
-              showWarmupToast(`Switch failed: ${formatWarmupError(err)}`, true);
+              showWarmupToast(t("Switch failed: {{error}}", { error: formatWarmupError(err) }), true);
             } finally {
               setSwitchingId(null);
             }
@@ -599,7 +599,7 @@ function App() {
         setCloseBehaviorPromptOpen(false);
       } catch (err) {
         console.error("Failed to complete close behavior:", err);
-        showWarmupToast(`Close failed: ${formatWarmupError(err)}`, true);
+        showWarmupToast(t("Close failed: {{error}}", { error: formatWarmupError(err) }), true);
       } finally {
         setIsCompletingCloseBehavior(false);
       }
@@ -617,12 +617,12 @@ function App() {
       try {
         desktopReopen.rememberSelection();
       } catch (err) {
-        showWarmupToast(`Could not save preference: ${formatWarmupError(err)}`, true);
+        showWarmupToast(t("Could not save preference: {{error}}", { error: formatWarmupError(err) }), true);
       }
       try {
         codexClose.rememberSelection();
       } catch (err) {
-        showWarmupToast(`Could not save close preference: ${formatWarmupError(err)}`, true);
+        showWarmupToast(t("Could not save close preference: {{error}}", { error: formatWarmupError(err) }), true);
       }
       const result = await closeCodexProcesses(shouldReopen, codexClose.forceClose);
       if (!result?.processInfo?.can_switch) return;
@@ -632,23 +632,30 @@ function App() {
         accountId ? async () => {
           setSwitchingId(accountId);
           await switchAccount(accountId);
-          showWarmupToast(`Switched account after ${codexClose.forceClose ? "force closing" : "closing"} Codex.`);
+          showWarmupToast(t("Switched account after {{action}} Codex.", {
+            action: codexClose.forceClose ? t("force close") : t("close gracefully"),
+          }));
         } : null,
         async (token) => {
           try {
             await invokeBackend("reopen_closed_codex_desktop", { token });
-            showWarmupToast(accountId ? "Account switched. Codex desktop reopened." : "Codex desktop reopened.");
+            showWarmupToast(accountId ? t("Account switched. Codex desktop reopened.") : t("Codex desktop reopened."));
           } catch (err) {
-            showWarmupToast(`Codex closed${accountId ? " and account switched" : ""}, but reopening failed: ${formatWarmupError(err)}`, true);
+            showWarmupToast(
+              accountId
+                ? t("Codex closed and account switched, but reopening failed: {{error}}", { error: formatWarmupError(err) })
+                : t("Codex closed, but reopening failed: {{error}}", { error: formatWarmupError(err) }),
+              true,
+            );
           }
         },
       );
       if (shouldReopen && !result.reopenToken) {
-        showWarmupToast("No closed desktop app could be identified for reopening. Open Codex manually.", true);
+        showWarmupToast(t("No closed desktop app could be identified for reopening. Open Codex manually."), true);
       }
     } catch (err) {
       console.error("Failed to switch account after closing Codex:", err);
-      showWarmupToast(`Switch failed after closing Codex: ${formatWarmupError(err)}`, true);
+      showWarmupToast(t("Switch failed after closing Codex: {{error}}", { error: formatWarmupError(err) }), true);
     } finally {
       setPendingSwitchAccountId(null);
       setSwitchingId(null);
@@ -816,7 +823,7 @@ function App() {
     }
     const normalized = normalizeBackupPassphrase(value);
     if (!normalized) {
-      setBackupPassphraseError("A passphrase is required.");
+      setBackupPassphraseError(t("A passphrase is required."));
       return;
     }
     setBackupPassphraseRequest(null);
@@ -867,9 +874,11 @@ function App() {
       const summary = await importAccountsSlimText(configPayload);
       setMaskedAccounts(new Set());
       setIsConfigModalOpen(false);
-      showWarmupToast(
-        `Imported ${summary.imported_count}, skipped ${summary.skipped_count} (total ${summary.total_in_payload})`
-      );
+      showWarmupToast(t("Imported {{imported}}, skipped {{skipped}} (total {{total}})", {
+        imported: summary.imported_count,
+        skipped: summary.skipped_count,
+        total: summary.total_in_payload,
+      }));
     } catch (err) {
       console.error("Failed to import slim text:", err);
       const message = err instanceof Error ? err.message : String(err);
@@ -884,7 +893,7 @@ function App() {
     try {
       setIsExportingFull(true);
       const exported = await exportFullBackupFile(() =>
-        requestBackupPassphrase("Create a passphrase for this full encrypted backup")
+        requestBackupPassphrase(t("Create a passphrase for this full encrypted backup"))
       );
       if (!exported) return;
       showWarmupToast(t("Full encrypted file exported."));
@@ -900,16 +909,18 @@ function App() {
     try {
       setIsImportingFull(true);
       const summary = await importFullBackupFile(() =>
-        requestBackupPassphrase("Enter the backup passphrase")
+        requestBackupPassphrase(t("Enter the backup passphrase"))
       );
       if (!summary) return;
       const accountList = await loadAccounts();
       await refreshUsage(accountList);
       const maskedIds = await loadMaskedAccountIds();
       setMaskedAccounts(new Set(maskedIds));
-      showWarmupToast(
-        `Imported ${summary.imported_count}, skipped ${summary.skipped_count} (total ${summary.total_in_payload})`
-      );
+      showWarmupToast(t("Imported {{imported}}, skipped {{skipped}} (total {{total}})", {
+        imported: summary.imported_count,
+        skipped: summary.skipped_count,
+        total: summary.total_in_payload,
+      }));
     } catch (err) {
       console.error("Failed to import full encrypted file:", err);
       showWarmupToast(t("Full import failed"), true);
@@ -928,7 +939,7 @@ function App() {
       }, 1500);
     } catch (err) {
       console.error("Failed to open Codex app:", err);
-      showWarmupToast(`Open Codex failed: ${formatWarmupError(err)}`, true);
+      showWarmupToast(t("Open Codex failed: {{error}}", { error: formatWarmupError(err) }), true);
     } finally {
       setIsOpeningCodex(false);
     }
@@ -1871,7 +1882,7 @@ function App() {
             </div>
             <div className="p-5 space-y-3">
               <label htmlFor="backup-passphrase" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                Passphrase
+                {t("Passphrase")}
               </label>
               <input
                 id="backup-passphrase"
@@ -1891,7 +1902,7 @@ function App() {
                 </p>
               )}
               <p className="text-xs text-gray-500 dark:text-gray-400">
-                The passphrase is used only for this backup operation and is never saved.
+                {t("The passphrase is used only for this backup operation and is never saved.")}
               </p>
             </div>
             <div className="flex justify-end gap-3 p-5 border-t border-gray-100 dark:border-gray-800">
@@ -1900,13 +1911,13 @@ function App() {
                 onClick={() => resolveBackupPassphrase(null)}
                 className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors"
               >
-                Cancel
+                {t("Cancel")}
               </button>
               <button
                 type="submit"
                 className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors"
               >
-                Continue
+                {t("Continue")}
               </button>
             </div>
           </form>
@@ -1983,7 +1994,7 @@ function App() {
                       setConfigCopied(true);
                       setTimeout(() => setConfigCopied(false), 1500);
                     } catch {
-                      setConfigModalError("Clipboard unavailable. Please copy manually.");
+                      setConfigModalError(t("Clipboard unavailable. Please copy manually."));
                     }
                   }}
                   disabled={!configPayload || isExportingSlim}
