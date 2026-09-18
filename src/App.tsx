@@ -13,6 +13,7 @@ import type {
   CodexProcessInfo,
   DockDisplayMode,
   UsageInfo,
+  WarmupPolicy,
   WarmupState,
 } from "./types";
 import {
@@ -134,7 +135,6 @@ function App() {
   const [autoWarmupRunningIds] = useState<Set<string>>(new Set());
   const [timedWarmupEnabled, setTimedWarmupEnabled] = useState(false);
   const [timedWarmupTimes, setTimedWarmupTimes] = useState<string[]>([]);
-  const [warmupStateLoaded, setWarmupStateLoaded] = useState(false);
   const [isTimedWarmupOpen, setIsTimedWarmupOpen] = useState(false);
   const [timedWarmupDraft, setTimedWarmupDraft] = useState("");
   const [maskedAccounts, setMaskedAccounts] = useState<Set<string>>(new Set());
@@ -217,7 +217,6 @@ function App() {
         setTimedWarmupEnabled(state.policy.timed_warmup_enabled);
         setTimedWarmupTimes(state.policy.timed_warmup_times);
         setAutoWarmupLedger(state.ledger.accounts);
-        setWarmupStateLoaded(true);
       } catch (err) {
         console.error("Failed to load host warm-up state:", err);
       }
@@ -231,20 +230,19 @@ function App() {
     };
   }, []);
 
-  useEffect(() => {
-    if (!warmupStateLoaded) return;
-    void invokeBackend("set_warmup_policy", {
+  const persistWarmupPolicy = useCallback((overrides: Partial<WarmupPolicy>) => {
+    return invokeBackend("set_warmup_policy", {
       auto_warmup_all_enabled: autoWarmupAllEnabled,
       auto_warmup_account_ids: Array.from(autoWarmupAccountIds),
       timed_warmup_enabled: timedWarmupEnabled,
       timed_warmup_times: timedWarmupTimes,
+      ...overrides,
     }).catch((err) => console.error("Failed to persist host warm-up policy:", err));
   }, [
     autoWarmupAccountIds,
     autoWarmupAllEnabled,
     timedWarmupEnabled,
     timedWarmupTimes,
-    warmupStateLoaded,
   ]);
 
   const handleTitlebarDrag = useCallback(
@@ -707,15 +705,14 @@ function App() {
   };
 
   const toggleAutoWarmupAccount = (accountId: string) => {
-    setAutoWarmupAccountIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(accountId)) {
-        next.delete(accountId);
-      } else {
-        next.add(accountId);
-      }
-      return next;
-    });
+    const next = new Set(autoWarmupAccountIds);
+    if (next.has(accountId)) {
+      next.delete(accountId);
+    } else {
+      next.add(accountId);
+    }
+    setAutoWarmupAccountIds(next);
+    void persistWarmupPolicy({ auto_warmup_account_ids: Array.from(next) });
   };
 
   const formatWindowDuration = (minutes: number | null | undefined): string => {
@@ -763,15 +760,20 @@ function App() {
   const handleAddTimedWarmupTime = useCallback(() => {
     const normalized = normalizeTimedWarmupTimes([timedWarmupDraft]);
     if (normalized.length === 0) return;
-    setTimedWarmupTimes((prev) =>
-      normalizeTimedWarmupTimes([...prev, normalized[0]])
-    );
+    const next = normalizeTimedWarmupTimes([...timedWarmupTimes, normalized[0]]);
+    setTimedWarmupTimes(next);
+    void persistWarmupPolicy({ timed_warmup_times: next });
     setTimedWarmupDraft("");
-  }, [timedWarmupDraft]);
+  }, [persistWarmupPolicy, timedWarmupDraft, timedWarmupTimes]);
 
-  const handleRemoveTimedWarmupTime = useCallback((time: string) => {
-    setTimedWarmupTimes((prev) => prev.filter((entry) => entry !== time));
-  }, []);
+  const handleRemoveTimedWarmupTime = useCallback(
+    (time: string) => {
+      const next = timedWarmupTimes.filter((entry) => entry !== time);
+      setTimedWarmupTimes(next);
+      void persistWarmupPolicy({ timed_warmup_times: next });
+    },
+    [persistWarmupPolicy, timedWarmupTimes]
+  );
 
   const timedWarmupLabel = useMemo(() => {
     if (!timedWarmupEnabled || timedWarmupTimes.length === 0) return "Timed: off";
@@ -1210,7 +1212,9 @@ function App() {
                     <button
                       onClick={() => {
                         setIsNavMenuOpen(false);
-                        setAutoWarmupAllEnabled((prev) => !prev);
+                        const next = !autoWarmupAllEnabled;
+                        setAutoWarmupAllEnabled(next);
+                        void persistWarmupPolicy({ auto_warmup_all_enabled: next });
                       }}
                       disabled={accounts.length === 0}
                       className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 disabled:opacity-50 dark:text-white dark:hover:bg-neutral-900"
@@ -1265,7 +1269,11 @@ function App() {
                       <input
                         type="checkbox"
                         checked={timedWarmupEnabled}
-                        onChange={(e) => setTimedWarmupEnabled(e.target.checked)}
+                        onChange={(e) => {
+                          const next = e.target.checked;
+                          setTimedWarmupEnabled(next);
+                          void persistWarmupPolicy({ timed_warmup_enabled: next });
+                        }}
                         className="h-4 w-4 accent-emerald-600"
                       />
                     </label>
