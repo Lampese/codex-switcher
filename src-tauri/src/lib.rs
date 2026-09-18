@@ -17,7 +17,7 @@ use commands::{
     export_accounts_slim_text, get_account_usage_stats, get_active_account_info,
     get_dock_display_mode, get_masked_account_ids, get_usage, get_warmup_state, hide_tray_window,
     import_accounts_full_encrypted_file, import_accounts_slim_text, kill_codex_processes,
-    list_accounts, open_main_window, quit_app, record_warmup_success, refresh_account_metadata,
+    list_accounts, open_main_window, quit_app, refresh_account_metadata,
     refresh_all_accounts_usage, rename_account, report_usage, set_dock_display_mode,
     set_masked_account_ids, start_login, switch_account, warmup_account, warmup_all_accounts,
 };
@@ -66,7 +66,6 @@ pub fn run() {
             commands::get_warmup_policy,
             get_warmup_state,
             commands::set_warmup_policy,
-            record_warmup_success,
             commands::set_tray_display_mode,
             commands::open_codex_app,
             commands::get_codex_reopen_info,

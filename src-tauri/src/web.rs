@@ -79,15 +79,6 @@ struct FileImportArgs {
     name: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RecordWarmupArgs {
-    #[serde(alias = "account_id")]
-    account_id: String,
-    #[serde(alias = "timestamp_ms")]
-    timestamp_ms: Option<i64>,
-}
-
 pub fn run_lan_server(host: &str, port: u16) -> anyhow::Result<()> {
     let address = format!("{host}:{port}");
     let server = Server::http(&address)
@@ -198,13 +189,6 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
         "set_warmup_policy" => {
             let policy: WarmupPolicy = parse_args(payload)?;
             to_json(set_warmup_policy(policy)?)
-        }
-        "record_warmup_success" => {
-            let args: RecordWarmupArgs = parse_args(payload)?;
-            to_json(crate::commands::record_warmup_success(
-                args.account_id,
-                args.timestamp_ms,
-            )?)
         }
         "import_accounts_slim_text" => {
             let args: ImportSlimArgs = parse_args(payload)?;

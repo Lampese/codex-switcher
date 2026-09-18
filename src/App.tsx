@@ -485,21 +485,10 @@ function App() {
     }
   }, []);
 
-  const markSuccessfulWarmup = useCallback(
-    (accountId: string, timestamp = Date.now()) => {
-      setAutoWarmupLedger((prev) => ({
-        ...prev,
-        [accountId]: {
-          last_successful_warmup_at: timestamp,
-        },
-      }));
-      void invokeBackend("record_warmup_success", {
-        accountId,
-        timestampMs: timestamp,
-      }).catch((err) => console.error("Failed to persist warm-up completion:", err));
-    },
-    []
-  );
+  const refreshWarmupProjection = useCallback(async () => {
+    const state = await invokeBackend<WarmupState>("get_warmup_state");
+    setAutoWarmupLedger(state.ledger.accounts);
+  }, []);
 
   const {
     forceCloseConfirmOpen,
@@ -665,7 +654,11 @@ function App() {
     try {
       setWarmingUpId(accountId);
       await warmupAccount(accountId);
-      markSuccessfulWarmup(accountId);
+      try {
+        await refreshWarmupProjection();
+      } catch (err) {
+        console.error("Failed to refresh warm-up projection:", err);
+      }
       showWarmupToast(`Warm-up sent for ${accountName}`);
     } catch (err) {
       console.error("Failed to warm up account:", err);
@@ -687,13 +680,11 @@ function App() {
         return;
       }
 
-      const warmedAt = Date.now();
-      const failedAccountIds = new Set(summary.failed_account_ids);
-      accounts.forEach((account) => {
-        if (!failedAccountIds.has(account.id)) {
-          markSuccessfulWarmup(account.id, warmedAt);
-        }
-      });
+      try {
+        await refreshWarmupProjection();
+      } catch (err) {
+        console.error("Failed to refresh warm-up projection:", err);
+      }
 
       if (summary.failed_account_ids.length === 0) {
         showWarmupToast(

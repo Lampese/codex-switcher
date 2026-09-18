@@ -10,10 +10,13 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, Utc};
 
-use crate::api::usage::{get_account_usage, warmup_account};
+use futures::{stream, StreamExt};
+
+use crate::api::usage::{get_account_usage, warmup_account as send_warmup};
 use crate::auth::{acquire_mutation_lock, load_accounts, load_app_settings, mutate_app_settings};
 use crate::types::{
     StoredAccount, UsageInfo, WarmupAccountLedger, WarmupLedger, WarmupPolicy, WarmupState,
+    WarmupSummary,
 };
 
 const SCHEDULER_INTERVAL: Duration = Duration::from_secs(30);
@@ -85,14 +88,9 @@ pub fn set_policy(policy: WarmupPolicy) -> Result<()> {
 
 /// Record a manually-triggered successful warm-up in the host ledger. This
 /// keeps manual actions from immediately re-triggering automatic warm-up.
-pub fn record_manual_success(account_id: &str, timestamp_ms: i64) -> Result<()> {
+fn record_manual_success(account_id: &str, timestamp_ms: i64) -> Result<()> {
     mutate_app_settings(|settings| {
-        let entry = settings
-            .warmup_ledger
-            .accounts
-            .entry(account_id.to_string())
-            .or_default();
-        entry.last_successful_warmup_at = Some(timestamp_ms);
+        update_manual_ledger(&mut settings.warmup_ledger, account_id, timestamp_ms);
         Ok(())
     })
 }
@@ -101,9 +99,7 @@ async fn run_cycle() -> Result<()> {
     // The lock is held through the complete decision/request/ledger sequence.
     // A second desktop or codex-web host can therefore never execute the same
     // scheduled slot concurrently.
-    let _owner = tokio::task::spawn_blocking(|| acquire_mutation_lock("warmup-scheduler.lock"))
-        .await
-        .context("scheduler owner task failed")??;
+    let _owner = acquire_scheduler_owner().await?;
 
     let settings = load_app_settings()?;
     let policy = normalize_policy(settings.warmup_policy);
@@ -153,7 +149,7 @@ async fn run_auto_for_account(
         return;
     };
 
-    if let Err(error) = warmup_account(account).await {
+    if let Err(error) = send_warmup(account).await {
         eprintln!(
             "[Warmup] automatic warm-up failed for {}: {error:#}",
             account.id
@@ -212,7 +208,7 @@ async fn run_timed_for_current_slot(
             continue;
         }
 
-        if let Err(error) = warmup_account(account).await {
+        if let Err(error) = send_warmup(account).await {
             eprintln!(
                 "[Warmup] timed warm-up failed for {}: {error:#}",
                 account.id
@@ -240,6 +236,55 @@ async fn run_timed_for_current_slot(
             );
         }
     }
+}
+
+async fn acquire_scheduler_owner() -> Result<crate::auth::MutationLock> {
+    tokio::task::spawn_blocking(|| acquire_mutation_lock("warmup-scheduler.lock"))
+        .await
+        .context("scheduler owner task failed")?
+}
+
+/// Run one manual warm-up under the same host-owned scheduler boundary used
+/// by automatic and timed warm-up, then persist completion from the host.
+pub async fn run_manual_account(account: &StoredAccount) -> Result<()> {
+    let _owner = acquire_scheduler_owner().await?;
+    send_warmup(account).await?;
+    record_manual_success(&account.id, Utc::now().timestamp_millis())
+}
+
+/// Run manual warm-up for every account under one scheduler owner and persist
+/// successful completions without asking the UI to report them.
+pub async fn run_manual_all(accounts: Vec<StoredAccount>) -> Result<WarmupSummary> {
+    let _owner = acquire_scheduler_owner().await?;
+    let total_accounts = accounts.len();
+    let concurrency = total_accounts.min(10).max(1);
+    let results: Vec<(String, bool)> = stream::iter(accounts.into_iter())
+        .map(|account| async move {
+            let account_id = account.id.clone();
+            let succeeded = send_warmup(&account).await.is_ok();
+            (account_id, succeeded)
+        })
+        .buffer_unordered(concurrency)
+        .collect()
+        .await;
+
+    let timestamp_ms = Utc::now().timestamp_millis();
+    for (account_id, succeeded) in &results {
+        if *succeeded {
+            record_manual_success(account_id, timestamp_ms)?;
+        }
+    }
+
+    let failed_account_ids = results
+        .into_iter()
+        .filter_map(|(account_id, succeeded)| (!succeeded).then_some(account_id))
+        .collect::<Vec<_>>();
+    let warmed_accounts = total_accounts.saturating_sub(failed_account_ids.len());
+    Ok(WarmupSummary {
+        total_accounts,
+        warmed_accounts,
+        failed_account_ids,
+    })
 }
 
 fn record_auto_success(account_id: &str, timestamp_ms: i64, window: AutoWindow) -> Result<()> {
@@ -280,6 +325,14 @@ fn update_auto_ledger(
     entry.last_successful_warmup_at = Some(timestamp_ms);
     entry.last_auto_window_key = Some(window_key(window));
     entry.last_auto_window_kind = Some(window.kind.as_str().to_string());
+}
+
+fn update_manual_ledger(ledger: &mut WarmupLedger, account_id: &str, timestamp_ms: i64) {
+    ledger
+        .accounts
+        .entry(account_id.to_string())
+        .or_default()
+        .last_successful_warmup_at = Some(timestamp_ms);
 }
 
 fn due_auto_window(
@@ -428,5 +481,19 @@ mod tests {
         let mut full = usage();
         full.secondary_used_percent = Some(100.0);
         assert!(due_auto_window(&full, None, 1_000).is_none());
+    }
+
+    #[test]
+    fn manual_completion_updates_host_ledger_projection() {
+        let mut ledger = WarmupLedger::default();
+        update_manual_ledger(&mut ledger, "account", 42);
+
+        assert_eq!(
+            ledger
+                .accounts
+                .get("account")
+                .and_then(|entry| entry.last_successful_warmup_at),
+            Some(42)
+        );
     }
 }
