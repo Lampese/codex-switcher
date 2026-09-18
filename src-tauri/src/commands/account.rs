@@ -5,7 +5,7 @@ use crate::auth::{
     add_account, create_chatgpt_account_from_refresh_token, ensure_chatgpt_tokens_fresh_locked,
     import_from_auth_json, import_from_auth_json_contents, load_accounts, mutate_accounts,
     read_current_auth, reconcile_active_projection, remove_account, save_accounts,
-    switch_to_account, sync_active_account_tokens,
+    switch_to_account,
 };
 use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
 
