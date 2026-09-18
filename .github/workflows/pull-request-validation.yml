@@ -3,11 +3,16 @@ name: Pull Request Validation
 on:
   pull_request:
 
+concurrency:
+  group: pr-validation-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   frontend:
+    name: Frontend
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -29,8 +34,45 @@ jobs:
       - name: Build frontend
         run: pnpm build
 
-      - name: Run focused frontend tests
+      - name: Run frontend tests
+        run: pnpm test
+
+  rust:
+    name: Rust tests and format
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
         run: |
-          pnpm test:desktop-reopen
-          pnpm test:close-preference
-          pnpm test:reset-credits
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  platform-check:
+    name: Platform compile (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Compile platform-specific Rust
+        run: cargo check --manifest-path src-tauri/Cargo.toml
