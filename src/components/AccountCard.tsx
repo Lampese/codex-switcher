@@ -31,13 +31,13 @@ interface AccountCardProps {
 type Translator = (key: string, variables?: Record<string, string | number>) => string;
 
 function formatLastRefresh(date: Date | null, t: Translator): string {
-  if (!date) return t("Never");
+  if (!date) return t("accounts.never");
   const now = new Date();
   const diff = Math.floor((now.getTime() - date.getTime()) / 1000);
-  if (diff < 5) return t("Just now");
-  if (diff < 60) return t("{{count}}s ago", { count: diff });
-  if (diff < 3600) return t("{{count}}m ago", { count: Math.floor(diff / 60) });
-  if (diff < 86400) return t("{{count}}h ago", { count: Math.floor(diff / 3600) });
+  if (diff < 5) return t("accounts.just.now");
+  if (diff < 60) return t("accounts.count.s.ago", { count: diff });
+  if (diff < 3600) return t("accounts.count.m.ago", { count: Math.floor(diff / 60) });
+  if (diff < 86400) return t("accounts.count.h.ago", { count: Math.floor(diff / 3600) });
   return date.toLocaleDateString();
 }
 
@@ -47,7 +47,7 @@ function getSubscriptionStatus(timestamp: string | null | undefined, t: Translat
 } {
   if (!timestamp) {
     return {
-      label: t("Expiry unavailable"),
+      label: t("accounts.expiry.unavailable"),
       className: "text-gray-400 dark:text-gray-500",
     };
   }
@@ -62,27 +62,27 @@ function getSubscriptionStatus(timestamp: string | null | undefined, t: Translat
   const remainingMs = expiryDate.getTime() - Date.now();
   if (remainingMs <= 0) {
     return {
-      label: t("Expired {{date}}", { date: formattedDate }),
+      label: t("accounts.expired.date", { date: formattedDate }),
       className: "text-red-500 dark:text-red-400",
     };
   }
 
   if (remainingMs <= 3 * 24 * 60 * 60 * 1000) {
     return {
-      label: t("Until {{date}}", { date: formattedDate }),
+      label: t("accounts.until.date", { date: formattedDate }),
       className: "text-red-500 dark:text-red-400",
     };
   }
 
   if (remainingMs <= 7 * 24 * 60 * 60 * 1000) {
     return {
-      label: t("Until {{date}}", { date: formattedDate }),
+      label: t("accounts.until.date", { date: formattedDate }),
       className: "text-amber-500 dark:text-amber-400",
     };
   }
 
   return {
-    label: t("Until {{date}}", { date: formattedDate }),
+    label: t("accounts.until.date", { date: formattedDate }),
     className: "text-gray-400 dark:text-gray-500",
   };
 }
@@ -202,8 +202,8 @@ export function AccountCard({
   const planDisplay = account.plan_type
     ? account.plan_type.charAt(0).toUpperCase() + account.plan_type.slice(1)
     : account.auth_mode === "api_key"
-      ? t("API Key")
-      : t("Unknown");
+      ? t("accounts.api.key")
+      : t("accounts.unknown");
 
   const planColors: Record<string, string> = {
     pro: "bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-700",
@@ -298,7 +298,7 @@ export function AccountCard({
                   setEditName(account.name);
                   setIsEditing(true);
                 }}
-                title={masked ? undefined : t("Click to rename")}
+                title={masked ? undefined : t("accounts.click.to.rename")}
               >
                 <BlurredText blur={masked}>{account.name}</BlurredText>
               </h3>
@@ -317,7 +317,7 @@ export function AccountCard({
             onClick={handleRefresh}
             disabled={isRefreshing}
             className="p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition-colors disabled:opacity-50"
-            title={t("Refresh usage")}
+            title={t("common.refresh.usage")}
           >
             <span className={`inline-block h-4 w-4 text-base leading-none ${isRefreshing ? "animate-spin" : ""}`}>↻</span>
           </button>
@@ -326,7 +326,7 @@ export function AccountCard({
             <button
               onClick={onToggleMask}
               className="p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
-              title={masked ? t("Show info") : t("Hide info")}
+              title={masked ? t("accounts.show.info") : t("accounts.hide.info")}
             >
               {masked ? (
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -361,7 +361,7 @@ export function AccountCard({
       {/* Last refresh time */}
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs mb-3">
           <div className="text-gray-400 dark:text-gray-500">
-          {t("Last updated: {{value}}", { value: formatLastRefresh(lastRefresh, t) })}
+          {t("accounts.last.updated.value", { value: formatLastRefresh(lastRefresh, t) })}
         </div>
         {showSubscriptionStatus && (
           <div className={`text-right ${subscriptionStatus.className}`}>
@@ -377,7 +377,7 @@ export function AccountCard({
             disabled
             className="flex-1 px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700 cursor-default"
             >
-            ✓ {t("Active")}
+            ✓ {t("accounts.active")}
           </button>
         ) : (
           <button
@@ -388,14 +388,14 @@ export function AccountCard({
                 ? "bg-blue-100 hover:bg-blue-200 dark:bg-blue-900/30 dark:hover:bg-blue-900/50 text-blue-800 dark:text-blue-300"
                 : "bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900"
             }`}
-            title={codexRunning ? t("Close running Codex processes and switch account") : undefined}
+            title={codexRunning ? t("accounts.close.running.codex.processes.and.switch.account") : undefined}
           >
             {codexRunning && !switching && (
               <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M10.3 3.9 1.8 18.1A2 2 0 003.5 21h17a2 2 0 001.7-2.9L13.7 3.9a2 2 0 00-3.4 0Z" />
               </svg>
             )}
-            {switching ? t("Switching...") : t("Switch")}
+            {switching ? t("accounts.switching") : t("accounts.switch")}
           </button>
         )}
         <button
@@ -408,7 +408,7 @@ export function AccountCard({
               ? "bg-amber-100 dark:bg-amber-900/30 text-amber-500 dark:text-amber-300"
               : "bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-100 dark:hover:bg-amber-900/40 text-amber-700 dark:text-amber-300"
           }`}
-          title={warmingUp ? t("Sending warm-up request...") : t("Send minimal warm-up request")}
+          title={warmingUp ? t("accounts.sending.warm.up.request") : t("accounts.send.minimal.warm.up.request")}
         >
           ⚡
         </button>
@@ -423,15 +423,15 @@ export function AccountCard({
             } disabled:opacity-60`}
             title={
               autoWarmupManagedByAll
-                ? t("Auto warm-up is enabled for all accounts")
+                ? t("accounts.auto.warm.up.is.enabled.for.all.accounts")
                 : autoWarmupEnabled
-                ? t("Disable auto warm-up for this account")
-                : t("Enable auto warm-up for this account")
+                ? t("accounts.disable.auto.warm.up.for.this.account")
+                : t("accounts.enable.auto.warm.up.for.this.account")
             }
           >
             <span className="flex items-center gap-1">
               <span>♻</span>
-              <span>{autoWarmupLabel ?? (autoWarmupEnabled ? t("on") : t("off"))}</span>
+              <span>{autoWarmupLabel ?? (autoWarmupEnabled ? t("common.on") : t("common.off"))}</span>
             </span>
           </button>
         )}
@@ -442,7 +442,7 @@ export function AccountCard({
               ? "bg-indigo-50 dark:bg-indigo-900/20 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 text-indigo-600 dark:text-indigo-300"
               : "bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300"
           }`}
-          title={statsOpen ? t("Hide usage statistics") : t("Show usage statistics")}
+          title={statsOpen ? t("accounts.hide.usage.statistics") : t("accounts.show.usage.statistics")}
         >
           <svg
             className="h-4 w-4"
@@ -459,7 +459,7 @@ export function AccountCard({
         <button
           onClick={onDelete}
           className="px-3 py-2 text-sm rounded-lg bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-300 transition-colors"
-          title={t("Remove account")}
+          title={t("accounts.remove.account")}
         >
           ✕
         </button>
