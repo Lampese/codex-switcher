@@ -10,6 +10,7 @@
     "test:desktop-reopen": "node --experimental-strip-types --test tests/desktopReopen.test.ts",
     "test:close-preference": "node --experimental-strip-types --test tests/codexClosePreference.test.ts",
     "test:reset-credits": "node --experimental-strip-types --test tests/resetCredits.test.ts",
+    "test:warmup-policy": "node --experimental-strip-types --test tests/warmupPolicy.test.ts",
     "preview": "vite preview",
     "tauri": "sh ./scripts/tauri.sh",
     "tauri:win": "tauri",
