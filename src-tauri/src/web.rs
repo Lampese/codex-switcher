@@ -1,5 +1,7 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::thread;
 
 use anyhow::Context;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -18,6 +20,8 @@ use crate::commands::{
     rename_account, set_masked_account_ids, start_login, switch_account, warmup_account,
     warmup_all_accounts,
 };
+
+const WEB_WORKER_THREADS: usize = 4;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,9 +84,11 @@ struct FileImportArgs {
 
 pub fn run_lan_server(host: &str, port: u16) -> anyhow::Result<()> {
     let address = format!("{host}:{port}");
-    let server = Server::http(&address)
-        .map_err(|err| anyhow::anyhow!("Failed to bind HTTP server on {address}: {err}"))?;
-    let runtime = Runtime::new().context("Failed to start async runtime")?;
+    let server = Arc::new(
+        Server::http(&address)
+            .map_err(|err| anyhow::anyhow!("Failed to bind HTTP server on {address}: {err}"))?,
+    );
+    let runtime = Arc::new(Runtime::new().context("Failed to start async runtime")?);
     let dist_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("dist");
@@ -90,10 +96,30 @@ pub fn run_lan_server(host: &str, port: u16) -> anyhow::Result<()> {
     println!("Codex Switcher web server listening on http://{address}");
     println!("Serving static files from {}", dist_dir.display());
 
-    for request in server.incoming_requests() {
-        if let Err(error) = handle_request(request, &runtime, &dist_dir) {
-            eprintln!("[web] request failed: {error:#}");
-        }
+    let mut workers = Vec::with_capacity(WEB_WORKER_THREADS);
+    for _ in 0..WEB_WORKER_THREADS {
+        let server = Arc::clone(&server);
+        let runtime = Arc::clone(&runtime);
+        let dist_dir = dist_dir.clone();
+        workers.push(thread::spawn(move || loop {
+            match server.recv() {
+                Ok(request) => {
+                    if let Err(error) = handle_request(request, &runtime, &dist_dir) {
+                        eprintln!("[web] request failed: {error:#}");
+                    }
+                }
+                Err(error) => {
+                    eprintln!("[web] request receive failed: {error}");
+                    break;
+                }
+            }
+        }));
+    }
+
+    for worker in workers {
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("Web worker thread panicked"))?;
     }
 
     Ok(())
