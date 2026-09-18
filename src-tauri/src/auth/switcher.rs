@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use chrono::Utc;
 
+use crate::auth::storage::write_file_atomic;
 use crate::types::{
     parse_chatgpt_id_token_claims, AuthData, AuthDotJson, StoredAccount, TokenData,
 };
@@ -40,18 +41,8 @@ pub fn switch_to_account(account: &StoredAccount) -> Result<()> {
     let content =
         serde_json::to_string_pretty(&auth_json).context("Failed to serialize auth.json")?;
 
-    fs::write(&auth_path, content)
-        .with_context(|| format!("Failed to write auth.json: {}", auth_path.display()))?;
-
-    // Set restrictive permissions on Unix
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(&auth_path, perms)?;
-    }
-
-    Ok(())
+    write_file_atomic(&auth_path, content.as_bytes())
+        .with_context(|| format!("Failed to write auth.json: {}", auth_path.display()))
 }
 
 /// Create an AuthDotJson structure from a StoredAccount
