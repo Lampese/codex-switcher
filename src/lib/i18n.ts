@@ -38,7 +38,7 @@ const LanguageContext = createContext<LanguageContextValue | null>(null);
 
 export function resolveSupportedLocale(locale?: string): SupportedLanguage | null {
   if (!locale) return null;
-  const normalized = locale.replaceAll("_", "-").toLowerCase();
+  const normalized = locale.replace(/_/g, "-").toLowerCase();
 
   if (
     normalized === "zh-cn" ||
