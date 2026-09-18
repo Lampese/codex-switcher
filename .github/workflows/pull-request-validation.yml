@@ -2,12 +2,9 @@ name: Pull Request Validation
 
 on:
   pull_request:
-  push:
-    branches:
-      - ci/pull-request-validation
 
 concurrency:
-  group: pr-validation-${{ github.event.pull_request.number || github.ref }}
+  group: pr-validation-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 permissions:
