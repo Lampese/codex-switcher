@@ -1,6 +1,8 @@
 export function normalizeBackupPassphrase(value: string | null | undefined): string | null {
-  const normalized = value?.trim() ?? "";
-  return normalized || null;
+  if (value === null || value === undefined || value.trim().length === 0) {
+    return null;
+  }
+  return value;
 }
 
 export function isPassphraseRequiredError(error: unknown): boolean {

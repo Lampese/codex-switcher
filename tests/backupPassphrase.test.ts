@@ -5,7 +5,7 @@ import { normalizeBackupPassphrase, isPassphraseRequiredError } from "../src/lib
 
 test("backup passphrases reject blank input and preserve meaningful input", () => {
   assert.equal(normalizeBackupPassphrase("   "), null);
-  assert.equal(normalizeBackupPassphrase("  correct horse  "), "correct horse");
+  assert.equal(normalizeBackupPassphrase("  correct horse  "), "  correct horse  ");
 });
 
 test("backup passphrase collection uses a masked React input instead of a browser prompt", () => {
