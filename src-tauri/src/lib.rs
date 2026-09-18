@@ -61,6 +61,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_display_settings,
+            commands::get_warmup_policy,
+            commands::set_warmup_policy,
             commands::set_tray_display_mode,
             commands::open_codex_app,
             commands::get_codex_reopen_info,

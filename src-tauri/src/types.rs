@@ -40,6 +40,15 @@ fn default_close_behavior_prompt_enabled() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WarmupPolicy {
+    pub auto_warmup_all_enabled: bool,
+    pub auto_warmup_account_ids: Vec<String>,
+    pub timed_warmup_enabled: bool,
+    pub timed_warmup_times: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
@@ -47,6 +56,7 @@ pub struct AppSettings {
     pub dock_display_mode: DockDisplayMode,
     #[serde(default = "default_close_behavior_prompt_enabled")]
     pub close_behavior_prompt_enabled: bool,
+    pub warmup_policy: WarmupPolicy,
 }
 
 impl Default for AppSettings {
@@ -55,6 +65,7 @@ impl Default for AppSettings {
             tray_display_mode: TrayDisplayMode::default(),
             dock_display_mode: DockDisplayMode::default(),
             close_behavior_prompt_enabled: true,
+            warmup_policy: WarmupPolicy::default(),
         }
     }
 }
