@@ -1,10 +1,7 @@
 //! Account-scoped usage statistics from the Codex profile endpoint.
 
 use chrono::{DateTime, Utc};
-use reqwest::{
-    header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT},
-    StatusCode,
-};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{
@@ -266,8 +263,7 @@ async fn parse_profile_usage_response(
 async fn fetch_reset_credits(account: &StoredAccount) -> anyhow::Result<AccountResetCredits> {
     let (access_token, chatgpt_account_id) = extract_chatgpt_auth(account)?;
     let rejected_access_token = access_token.to_string();
-    let mut response =
-        send_reset_credits_request(access_token, chatgpt_account_id).await?;
+    let mut response = send_reset_credits_request(access_token, chatgpt_account_id).await?;
 
     if should_refresh_after_provider_status(response.status()) {
         let refreshed =
