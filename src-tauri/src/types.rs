@@ -3,6 +3,7 @@
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 /// The main storage structure for all accounts
@@ -49,6 +50,27 @@ pub struct WarmupPolicy {
     pub timed_warmup_times: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WarmupAccountLedger {
+    pub last_successful_warmup_at: Option<i64>,
+    pub last_auto_window_key: Option<String>,
+    pub last_auto_window_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WarmupLedger {
+    pub accounts: HashMap<String, WarmupAccountLedger>,
+    pub timed_successes: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WarmupState {
+    pub policy: WarmupPolicy,
+    pub ledger: WarmupLedger,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
@@ -57,6 +79,7 @@ pub struct AppSettings {
     #[serde(default = "default_close_behavior_prompt_enabled")]
     pub close_behavior_prompt_enabled: bool,
     pub warmup_policy: WarmupPolicy,
+    pub warmup_ledger: WarmupLedger,
 }
 
 impl Default for AppSettings {
@@ -66,6 +89,7 @@ impl Default for AppSettings {
             dock_display_mode: DockDisplayMode::default(),
             close_behavior_prompt_enabled: true,
             warmup_policy: WarmupPolicy::default(),
+            warmup_ledger: WarmupLedger::default(),
         }
     }
 }
