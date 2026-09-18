@@ -4,6 +4,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::{cell::RefCell, thread_local};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -11,6 +13,11 @@ use chrono::{DateTime, Utc};
 use crate::types::{
     parse_chatgpt_id_token_claims, AccountsStore, AppSettings, AuthData, AuthDotJson, StoredAccount,
 };
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CONFIG_DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
 
 pub fn sync_active_account_tokens(store: &mut AccountsStore, auth: &AuthDotJson) -> bool {
     let Some(active_id) = store.active_account_id.as_deref() else {
@@ -147,8 +154,23 @@ pub fn reconcile_active_projection(
 
 /// Get the path to the codex-switcher config directory
 pub fn get_config_dir() -> Result<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = TEST_CONFIG_DIR.with(|dir| dir.borrow().clone()) {
+        return Ok(path);
+    }
+
     let home = dirs::home_dir().context("Could not find home directory")?;
     Ok(home.join(".codex-switcher"))
+}
+
+#[cfg(test)]
+pub(crate) fn with_test_config_dir<T>(path: PathBuf, operation: impl FnOnce() -> T) -> T {
+    TEST_CONFIG_DIR.with(|dir| {
+        let previous = dir.replace(Some(path));
+        let result = operation();
+        dir.replace(previous);
+        result
+    })
 }
 
 /// Get the path to accounts.json
