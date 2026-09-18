@@ -9,7 +9,7 @@ use tauri::{AppHandle, Manager, Runtime};
 
 use crate::{
     auth::{load_app_settings, mutate_app_settings},
-    types::{DockDisplayMode, TrayDisplayMode, UsageInfo},
+    types::{DockDisplayMode, TrayDisplayMode, UsageInfo, WarmupPolicy},
 };
 
 /// Label of the borderless tray popup window.
@@ -116,6 +116,22 @@ pub fn get_display_settings() -> Result<DisplaySettings, String> {
             None
         },
     })
+}
+
+#[tauri::command]
+pub fn get_warmup_policy() -> Result<WarmupPolicy, String> {
+    Ok(load_app_settings()
+        .map_err(|error| error.to_string())?
+        .warmup_policy)
+}
+
+#[tauri::command]
+pub fn set_warmup_policy(policy: WarmupPolicy) -> Result<(), String> {
+    mutate_app_settings(|settings| {
+        settings.warmup_policy = policy;
+        Ok(())
+    })
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
