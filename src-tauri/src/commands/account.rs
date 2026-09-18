@@ -181,15 +181,19 @@ pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
     // the runtime transition succeeds.
     switch_to_account(&account).map_err(|e| e.to_string())?;
 
-    let mut latest = load_accounts().map_err(|e| e.to_string())?;
-    let stored = latest
-        .accounts
-        .iter_mut()
-        .find(|stored| stored.id == account_id)
-        .ok_or_else(|| format!("Account disappeared during activation: {account_id}"))?;
-    stored.last_used_at = Some(chrono::Utc::now());
-    latest.active_account_id = Some(account_id.to_string());
-    save_accounts(&latest).map_err(|e| e.to_string())?;
+    mutate_accounts(|latest| {
+        let stored = latest
+            .accounts
+            .iter_mut()
+            .find(|stored| stored.id == account_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("Account disappeared during activation: {account_id}")
+            })?;
+        stored.last_used_at = Some(chrono::Utc::now());
+        latest.active_account_id = Some(account_id.to_string());
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
 
     if let Ok(pids) = find_antigravity_processes() {
         for pid in pids {
@@ -773,7 +777,6 @@ pub async fn set_masked_account_ids(ids: Vec<String>) -> Result<(), String> {
     crate::auth::storage::set_masked_account_ids(ids).map_err(|e| e.to_string())
 }
 
-
 #[cfg(test)]
 mod activation_tests {
     use super::merge_accounts_store;
@@ -799,7 +802,10 @@ mod activation_tests {
 
         let (merged, _) = merge_accounts_store(current, imported);
 
-        assert_eq!(merged.active_account_id.as_deref(), Some(current_id.as_str()));
+        assert_eq!(
+            merged.active_account_id.as_deref(),
+            Some(current_id.as_str())
+        );
     }
 
     #[test]
