@@ -4,9 +4,7 @@ use crate::api::usage::{
     fetch_chatgpt_account_metadata, get_account_usage, refresh_all_usage,
     warmup_account as send_warmup, ChatGptAccountMetadata,
 };
-use crate::auth::{
-    ensure_chatgpt_tokens_fresh, get_account, load_accounts, update_account_metadata,
-};
+use crate::auth::{get_account, load_accounts, update_account_metadata};
 use crate::types::{AccountInfo, AuthData, UsageInfo, WarmupSummary};
 use futures::{stream, StreamExt};
 use std::{
@@ -66,10 +64,7 @@ pub async fn refresh_account_metadata(account_id: String) -> Result<AccountInfo,
     let (updated, live_metadata) = match &account.auth_data {
         AuthData::ApiKey { .. } => (account, None),
         AuthData::ChatGPT { .. } => {
-            let refreshed = ensure_chatgpt_tokens_fresh(&account)
-                .await
-                .map_err(|e| e.to_string())?;
-            let live_metadata = fetch_chatgpt_account_metadata(&refreshed)
+            let live_metadata = fetch_chatgpt_account_metadata(&account)
                 .await
                 .map_err(|e| e.to_string())?;
 
