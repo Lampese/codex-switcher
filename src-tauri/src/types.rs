@@ -116,6 +116,12 @@ pub fn is_simplified_chinese_locale(locale: Option<&str>) -> bool {
         || normalized.starts_with("zh-hans-")
 }
 
+
+pub fn resolve_desktop_language(preference: UiLanguagePreference) -> &'static str {
+    let system_locale = sys_locale::get_locale();
+    preference.resolved(system_locale.as_deref())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
