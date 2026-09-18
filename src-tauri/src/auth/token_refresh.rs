@@ -14,6 +14,8 @@ use super::{
 use crate::types::{
     parse_chatgpt_id_token_claims, AccountsStore, AuthData, AuthDotJson, StoredAccount,
 };
+#[cfg(test)]
+use crate::types::{AccountsStore, AuthDotJson};
 
 const DEFAULT_ISSUER: &str = "https://auth.openai.com";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -176,6 +178,7 @@ async fn refresh_chatgpt_tokens_locked(account: &StoredAccount) -> Result<Stored
     Ok(updated)
 }
 
+#[cfg(test)]
 fn reconcile_active_account_from_auth(
     store: &mut AccountsStore,
     account_id: &str,

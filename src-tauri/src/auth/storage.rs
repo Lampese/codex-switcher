@@ -66,18 +66,18 @@ pub fn sync_active_account_tokens(store: &mut AccountsStore, auth: &AuthDotJson)
     true
 }
 
-pub fn reconcile_active_projection(
-    store: &mut AccountsStore,
-    auth: Option<&AuthDotJson>,
-) -> bool {
+pub fn reconcile_active_projection(store: &mut AccountsStore, auth: Option<&AuthDotJson>) -> bool {
     let previous_active = store.active_account_id.clone();
 
     let matching_id = auth.and_then(|auth| {
         if let Some(api_key) = auth.openai_api_key.as_ref() {
-            return store.accounts.iter().find_map(|account| match &account.auth_data {
-                AuthData::ApiKey { key } if key == api_key => Some(account.id.clone()),
-                _ => None,
-            });
+            return store
+                .accounts
+                .iter()
+                .find_map(|account| match &account.auth_data {
+                    AuthData::ApiKey { key } if key == api_key => Some(account.id.clone()),
+                    _ => None,
+                });
         }
 
         let tokens = auth.tokens.as_ref()?;
@@ -85,20 +85,23 @@ pub fn reconcile_active_projection(
             .account_id
             .or_else(|| tokens.account_id.clone())?;
 
-        store.accounts.iter().find_map(|account| match &account.auth_data {
-            AuthData::ChatGPT {
-                id_token,
-                account_id,
-                ..
-            } => {
-                let stored_account_id = parse_chatgpt_id_token_claims(id_token)
-                    .account_id
-                    .or_else(|| account_id.clone());
-                (stored_account_id.as_deref() == Some(runtime_account_id.as_str()))
-                    .then(|| account.id.clone())
-            }
-            _ => None,
-        })
+        store
+            .accounts
+            .iter()
+            .find_map(|account| match &account.auth_data {
+                AuthData::ChatGPT {
+                    id_token,
+                    account_id,
+                    ..
+                } => {
+                    let stored_account_id = parse_chatgpt_id_token_claims(id_token)
+                        .account_id
+                        .or_else(|| account_id.clone());
+                    (stored_account_id.as_deref() == Some(runtime_account_id.as_str()))
+                        .then(|| account.id.clone())
+                }
+                _ => None,
+            })
     });
 
     store.active_account_id = matching_id;
@@ -119,7 +122,6 @@ pub fn reconcile_active_projection(
 
     changed
 }
-
 
 /// Get the path to the codex-switcher config directory
 pub fn get_config_dir() -> Result<PathBuf> {
@@ -596,8 +598,7 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
 mod tests {
     use super::{
         acquire_mutation_lock_at, reconcile_active_projection, sync_active_account_tokens,
-        write_file_atomic,
-        write_file_atomic_with_pre_replace,
+        write_file_atomic, write_file_atomic_with_pre_replace,
     };
     use crate::types::{AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData};
     use base64::Engine;
@@ -739,7 +740,6 @@ mod tests {
         format!("header.{encoded}.{suffix}")
     }
 
-
     #[test]
     fn projection_follows_matching_runtime_chatgpt_account_and_tokens() {
         let mut account_a = account("A", "workspace-a", "a1");
@@ -754,11 +754,18 @@ mod tests {
 
         let live = auth("workspace-a", "a2");
         assert!(reconcile_active_projection(&mut store, Some(&live)));
-        assert_eq!(store.active_account_id.as_deref(), Some(account_a_id.as_str()));
-        let AuthData::ChatGPT { refresh_token, .. } = &store.accounts[0].auth_data else {
+        assert_eq!(
+            store.active_account_id.as_deref(),
+            Some(account_a_id.as_str())
+        );
+        let AuthData::ChatGPT {
+            refresh_token: stored_refresh_token,
+            ..
+        } = &store.accounts[0].auth_data
+        else {
             panic!("expected ChatGPT account");
         };
-        assert_eq!(refresh_token, "refresh-a2");
+        assert_eq!(stored_refresh_token, "refresh-a2");
 
         account_a = store.accounts.remove(0);
         assert_eq!(refresh_token(&account_a), "refresh-a2");
