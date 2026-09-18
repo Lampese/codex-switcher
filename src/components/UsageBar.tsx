@@ -67,10 +67,10 @@ function RateLimitBar({
   return (
     <div className="space-y-1">
       <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400">
-        <span>{windowLabel ? `${windowLabel} ${t("limit")}` : label}</span>
+        <span>{windowLabel ? `${windowLabel} ${t("usage.limit")}` : label}</span>
         <span>
-          {remainingPercent.toFixed(0)}% {t("left")}
-          {resetLabel && ` • ${t("resets {{value}}", { value: resetLabel })}`}
+          {remainingPercent.toFixed(0)}% {t("usage.left")}
+          {resetLabel && ` • ${t("usage.resets.value", { value: resetLabel })}`}
           {resetLabel && exactResetLabel && ` (${exactResetLabel})`}
         </span>
       </div>
@@ -90,7 +90,7 @@ export function UsageBar({ usage, loading }: UsageBarProps) {
     return (
       <div className="space-y-2">
         <div className="text-xs text-gray-400 dark:text-gray-500 italic animate-pulse">
-          {t("Fetching usage...")}
+          {t("usage.fetching.usage")}
         </div>
         <div className="h-1.5 bg-gray-100 dark:bg-gray-800 rounded-full overflow-hidden animate-pulse">
           <div className="h-full w-2/3 bg-gray-200 dark:bg-gray-700"></div>
@@ -102,7 +102,7 @@ export function UsageBar({ usage, loading }: UsageBarProps) {
   if (!usage) {
     return (
       <div className="text-xs text-gray-400 dark:text-gray-500 italic py-1 animate-pulse">
-        {t("Fetching usage...")}
+        {t("usage.fetching.usage")}
       </div>
     );
   }
@@ -121,7 +121,7 @@ export function UsageBar({ usage, loading }: UsageBarProps) {
   if (!hasPrimary && !hasSecondary) {
     return (
       <div className="text-xs text-gray-400 dark:text-gray-500 italic py-1">
-        {t("No rate limit data")}
+        {t("usage.no.rate.limit.data")}
       </div>
     );
   }
@@ -130,7 +130,7 @@ export function UsageBar({ usage, loading }: UsageBarProps) {
     <div className="space-y-2">
       {hasPrimary && (
         <RateLimitBar
-          label={t("5h Limit")}
+          label={t("usage.5h.limit")}
           usedPercent={usage.primary_used_percent!}
           windowMinutes={usage.primary_window_minutes}
           resetsAt={usage.primary_resets_at}
@@ -138,7 +138,7 @@ export function UsageBar({ usage, loading }: UsageBarProps) {
       )}
       {hasSecondary && (
         <RateLimitBar
-          label={t("Weekly Limit")}
+          label={t("usage.weekly.limit")}
           usedPercent={usage.secondary_used_percent!}
           windowMinutes={usage.secondary_window_minutes}
           resetsAt={usage.secondary_resets_at}
@@ -146,7 +146,7 @@ export function UsageBar({ usage, loading }: UsageBarProps) {
       )}
       {usage.credits_balance && (
         <div className="text-xs text-gray-500 dark:text-gray-400">
-          {t("Credits: {{value}}", { value: usage.credits_balance })}
+          {t("usage.credits.value", { value: usage.credits_balance })}
         </div>
       )}
     </div>
