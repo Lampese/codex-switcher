@@ -81,7 +81,6 @@ pub fn get_settings_file() -> Result<PathBuf> {
     Ok(get_config_dir()?.join("settings.json"))
 }
 
-
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct MutationLock {
@@ -102,8 +101,12 @@ impl Drop for MutationLock {
 
 fn acquire_mutation_lock(lock_name: &str) -> Result<MutationLock> {
     let config_dir = get_config_dir()?;
-    fs::create_dir_all(&config_dir)
-        .with_context(|| format!("Failed to create config directory: {}", config_dir.display()))?;
+    fs::create_dir_all(&config_dir).with_context(|| {
+        format!(
+            "Failed to create config directory: {}",
+            config_dir.display()
+        )
+    })?;
     acquire_mutation_lock_at(&config_dir.join(lock_name))
 }
 
@@ -314,7 +317,6 @@ pub fn save_app_settings(settings: &AppSettings) -> Result<()> {
     write_file_atomic(&path, &content)
 }
 
-
 pub fn mutate_app_settings<T>(mutate: impl FnOnce(&mut AppSettings) -> Result<T>) -> Result<T> {
     let _lock = acquire_mutation_lock("settings.lock")?;
     let mut settings = load_app_settings()?;
@@ -326,8 +328,7 @@ pub fn mutate_app_settings<T>(mutate: impl FnOnce(&mut AppSettings) -> Result<T>
 /// Save the accounts store to disk
 pub fn save_accounts(store: &AccountsStore) -> Result<()> {
     let path = get_accounts_file()?;
-    let content =
-        serde_json::to_vec_pretty(store).context("Failed to serialize accounts store")?;
+    let content = serde_json::to_vec_pretty(store).context("Failed to serialize accounts store")?;
     write_file_atomic(&path, &content)
 }
 
