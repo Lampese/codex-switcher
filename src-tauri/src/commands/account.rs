@@ -3,7 +3,7 @@
 use crate::auth::{
     add_account, create_chatgpt_account_from_refresh_token, ensure_chatgpt_tokens_fresh_locked,
     get_active_account, import_from_auth_json, import_from_auth_json_contents, load_accounts,
-    read_current_auth, remove_account, save_accounts, set_active_account, switch_to_account,
+    mutate_accounts, read_current_auth, remove_account, set_active_account, switch_to_account,
     sync_active_account_tokens, touch_account, AUTH_OPERATION_LOCK,
 };
 use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
@@ -151,10 +151,20 @@ pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
     // ChatGPT rotates single-use refresh tokens. Preserve the latest token
     // before replacing auth.json, otherwise switching back restores a stale one.
     if let Some(auth) = read_current_auth().map_err(|e| e.to_string())? {
-        if sync_active_account_tokens(&mut store, &auth) {
-            save_accounts(&store).map_err(|e| e.to_string())?;
-        }
+        let auth_for_store = auth.clone();
+        mutate_accounts(|latest| {
+            sync_active_account_tokens(latest, &auth_for_store);
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
+        store = load_accounts().map_err(|e| e.to_string())?;
     }
+
+    let target_index = store
+        .accounts
+        .iter()
+        .position(|account| account.id == account_id)
+        .ok_or_else(|| format!("Account not found: {account_id}"))?;
 
     let account = ensure_chatgpt_tokens_fresh_locked(&store.accounts[target_index])
         .await
@@ -233,8 +243,12 @@ pub async fn import_accounts_slim_text(payload: String) -> Result<ImportAccounts
         })?;
     validate_imported_store(&imported).map_err(|e| format!("{e:#}"))?;
 
-    let (merged, summary) = merge_accounts_store(current, imported);
-    save_accounts(&merged).map_err(|e| e.to_string())?;
+    let summary = mutate_accounts(|latest| {
+        let (merged, summary) = merge_accounts_store(latest.clone(), imported);
+        *latest = merged;
+        Ok(summary)
+    })
+    .map_err(|e| e.to_string())?;
     Ok(ImportAccountsSummary {
         total_in_payload,
         imported_count: summary.imported_count,
@@ -268,10 +282,12 @@ pub async fn import_accounts_full_encrypted_file(
         .map_err(|e| e.to_string())?;
     validate_imported_store(&imported).map_err(|e| e.to_string())?;
 
-    let current = load_accounts().map_err(|e| e.to_string())?;
-    let (merged, summary) = merge_accounts_store(current, imported);
-    save_accounts(&merged).map_err(|e| e.to_string())?;
-    Ok(summary)
+    mutate_accounts(|latest| {
+        let (merged, summary) = merge_accounts_store(latest.clone(), imported);
+        *latest = merged;
+        Ok(summary)
+    })
+    .map_err(|e| e.to_string())
 }
 
 /// Import full account config from encrypted bytes uploaded through the browser UI.
@@ -282,10 +298,12 @@ pub async fn import_accounts_full_encrypted_bytes(
         decode_full_encrypted_store(&bytes, FULL_PRESET_PASSPHRASE).map_err(|e| e.to_string())?;
     validate_imported_store(&imported).map_err(|e| e.to_string())?;
 
-    let current = load_accounts().map_err(|e| e.to_string())?;
-    let (merged, summary) = merge_accounts_store(current, imported);
-    save_accounts(&merged).map_err(|e| e.to_string())?;
-    Ok(summary)
+    mutate_accounts(|latest| {
+        let (merged, summary) = merge_accounts_store(latest.clone(), imported);
+        *latest = merged;
+        Ok(summary)
+    })
+    .map_err(|e| e.to_string())
 }
 
 /// Find all running Antigravity codex assistant processes
