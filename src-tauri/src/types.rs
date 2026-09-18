@@ -71,8 +71,49 @@ pub struct WarmupState {
     pub ledger: WarmupLedger,
 }
 
-fn default_language() -> String {
-    "en-US".to_string()
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiLanguagePreference {
+    #[default]
+    #[serde(rename = "system")]
+    System,
+    #[serde(rename = "en-US", alias = "en-us")]
+    English,
+    #[serde(
+        rename = "zh-CN",
+        alias = "zh-cn",
+        alias = "zh-Hans",
+        alias = "zh-hans",
+        alias = "zh-SG",
+        alias = "zh-sg"
+    )]
+    SimplifiedChinese,
+}
+
+impl UiLanguagePreference {
+    pub fn resolved(self, system_locale: Option<&str>) -> &'static str {
+        match self {
+            Self::English => "en-US",
+            Self::SimplifiedChinese => "zh-CN",
+            Self::System => {
+                if is_simplified_chinese_locale(system_locale) {
+                    "zh-CN"
+                } else {
+                    "en-US"
+                }
+            }
+        }
+    }
+}
+
+pub fn is_simplified_chinese_locale(locale: Option<&str>) -> bool {
+    let Some(locale) = locale else {
+        return false;
+    };
+    let normalized = locale.replace('_', "-").to_ascii_lowercase();
+    normalized == "zh-cn"
+        || normalized == "zh-sg"
+        || normalized == "zh-hans"
+        || normalized.starts_with("zh-hans-")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,8 +125,8 @@ pub struct AppSettings {
     pub close_behavior_prompt_enabled: bool,
     pub warmup_policy: WarmupPolicy,
     pub warmup_ledger: WarmupLedger,
-    #[serde(default = "default_language")]
-    pub language: String,
+    #[serde(default, alias = "language")]
+    pub ui_language_preference: UiLanguagePreference,
 }
 
 impl Default for AppSettings {
@@ -96,7 +137,7 @@ impl Default for AppSettings {
             close_behavior_prompt_enabled: true,
             warmup_policy: WarmupPolicy::default(),
             warmup_ledger: WarmupLedger::default(),
-            language: default_language(),
+            ui_language_preference: UiLanguagePreference::System,
         }
     }
 }
@@ -542,7 +583,10 @@ pub struct CreditStatusDetails {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_chatgpt_id_token_claims, AppSettings, DockDisplayMode, TrayDisplayMode};
+    use super::{
+        is_simplified_chinese_locale, parse_chatgpt_id_token_claims, AppSettings,
+        DockDisplayMode, TrayDisplayMode, UiLanguagePreference,
+    };
     use base64::Engine;
 
     #[test]
@@ -561,6 +605,35 @@ mod tests {
                 .subscription_expires_at
                 .map(|value| value.to_rfc3339()),
             Some("2026-04-23T05:03:38+00:00".to_string())
+        );
+    }
+
+    #[test]
+    fn simplified_chinese_locale_resolution_excludes_traditional_chinese() {
+        assert!(is_simplified_chinese_locale(Some("zh-CN")));
+        assert!(is_simplified_chinese_locale(Some("zh_Hans_CN")));
+        assert!(is_simplified_chinese_locale(Some("zh-SG")));
+        assert!(!is_simplified_chinese_locale(Some("zh-TW")));
+        assert!(!is_simplified_chinese_locale(Some("zh-HK")));
+        assert!(!is_simplified_chinese_locale(Some("zh-Hant")));
+        assert!(!is_simplified_chinese_locale(Some("fr-FR")));
+    }
+
+    #[test]
+    fn system_language_preference_resolves_with_english_fallback() {
+        assert_eq!(
+            UiLanguagePreference::System.resolved(Some("zh-CN")),
+            "zh-CN"
+        );
+        assert_eq!(
+            UiLanguagePreference::System.resolved(Some("zh-TW")),
+            "en-US"
+        );
+        assert_eq!(UiLanguagePreference::System.resolved(None), "en-US");
+        assert_eq!(UiLanguagePreference::English.resolved(Some("zh-CN")), "en-US");
+        assert_eq!(
+            UiLanguagePreference::SimplifiedChinese.resolved(Some("en-US")),
+            "zh-CN"
         );
     }
 
