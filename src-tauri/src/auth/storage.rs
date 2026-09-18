@@ -103,7 +103,7 @@ pub fn get_settings_file() -> Result<PathBuf> {
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) struct MutationLock {
-    file: File,
+    _file: File,
 }
 
 impl Drop for MutationLock {
@@ -112,7 +112,7 @@ impl Drop for MutationLock {
         {
             use std::os::fd::AsRawFd;
             unsafe {
-                libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+                libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
             }
         }
     }
@@ -154,7 +154,7 @@ fn acquire_mutation_lock_at(path: &Path) -> Result<MutationLock> {
             return Err(std::io::Error::last_os_error())
                 .with_context(|| format!("Failed to acquire mutation lock: {}", path.display()));
         }
-        return Ok(MutationLock { file });
+        return Ok(MutationLock { _file: file });
     }
 
     #[cfg(windows)]
@@ -170,7 +170,7 @@ fn acquire_mutation_lock_at(path: &Path) -> Result<MutationLock> {
                 .share_mode(0)
                 .open(path)
             {
-                Ok(file) => return Ok(MutationLock { file }),
+                Ok(file) => return Ok(MutationLock { _file: file }),
                 Err(error) if std::time::Instant::now() < deadline => {
                     let _ = error;
                     std::thread::sleep(std::time::Duration::from_millis(25));
@@ -192,7 +192,7 @@ fn acquire_mutation_lock_at(path: &Path) -> Result<MutationLock> {
             .write(true)
             .open(path)
             .with_context(|| format!("Failed to open mutation lock: {}", path.display()))?;
-        Ok(MutationLock { file })
+        Ok(MutationLock { _file: file })
     }
 }
 
