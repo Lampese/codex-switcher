@@ -772,3 +772,48 @@ pub async fn get_masked_account_ids() -> Result<Vec<String>, String> {
 pub async fn set_masked_account_ids(ids: Vec<String>) -> Result<(), String> {
     crate::auth::storage::set_masked_account_ids(ids).map_err(|e| e.to_string())
 }
+
+
+#[cfg(test)]
+mod activation_tests {
+    use super::merge_accounts_store;
+    use crate::types::{AccountsStore, StoredAccount};
+
+    #[test]
+    fn import_does_not_replace_runtime_active_projection() {
+        let current_account = StoredAccount::new_api_key("Current".into(), "key-current".into());
+        let current_id = current_account.id.clone();
+        let imported_account = StoredAccount::new_api_key("Imported".into(), "key-imported".into());
+        let imported_id = imported_account.id.clone();
+
+        let current = AccountsStore {
+            accounts: vec![current_account],
+            active_account_id: Some(current_id.clone()),
+            ..AccountsStore::default()
+        };
+        let imported = AccountsStore {
+            accounts: vec![imported_account],
+            active_account_id: Some(imported_id),
+            ..AccountsStore::default()
+        };
+
+        let (merged, _) = merge_accounts_store(current, imported);
+
+        assert_eq!(merged.active_account_id.as_deref(), Some(current_id.as_str()));
+    }
+
+    #[test]
+    fn import_cannot_invent_active_projection_when_current_projection_is_empty() {
+        let imported_account = StoredAccount::new_api_key("Imported".into(), "key-imported".into());
+        let imported_id = imported_account.id.clone();
+        let imported = AccountsStore {
+            accounts: vec![imported_account],
+            active_account_id: Some(imported_id),
+            ..AccountsStore::default()
+        };
+
+        let (merged, _) = merge_accounts_store(AccountsStore::default(), imported);
+
+        assert!(merged.active_account_id.is_none());
+    }
+}
