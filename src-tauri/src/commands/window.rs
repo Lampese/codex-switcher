@@ -10,7 +10,8 @@ use tauri::{AppHandle, Manager, Runtime};
 use crate::{
     auth::{load_app_settings, mutate_app_settings},
     types::{
-        DockDisplayMode, TrayDisplayMode, UsageInfo, WarmupPolicy, WarmupPolicyPatch, WarmupState,
+        resolve_desktop_language, DockDisplayMode, TrayDisplayMode, UiLanguagePreference,
+        UsageInfo, WarmupPolicy, WarmupPolicyPatch, WarmupState,
     },
 };
 
@@ -105,7 +106,8 @@ pub fn quit_app(app: AppHandle) {
 pub struct DisplaySettings {
     tray_display_mode: TrayDisplayMode,
     dock_display_mode: Option<DockDisplayMode>,
-    language: String,
+    ui_language_preference: UiLanguagePreference,
+    resolved_language: String,
 }
 
 #[tauri::command]
@@ -118,7 +120,8 @@ pub fn get_display_settings() -> Result<DisplaySettings, String> {
         } else {
             None
         },
-        language: settings.language,
+        ui_language_preference: settings.ui_language_preference,
+        resolved_language: resolve_desktop_language(settings.ui_language_preference).to_string(),
     })
 }
 
@@ -142,22 +145,21 @@ pub fn set_warmup_policy(patch: WarmupPolicyPatch) -> Result<(), String> {
 #[tauri::command]
 pub fn get_language() -> String {
     crate::auth::load_app_settings()
-        .map(|settings| settings.language)
+        .map(|settings| resolve_desktop_language(settings.ui_language_preference).to_string())
         .unwrap_or_else(|_| "en-US".to_string())
 }
 
 #[tauri::command]
 pub fn set_language(app: AppHandle, language: String) -> Result<(), String> {
-    let normalized = if language.eq_ignore_ascii_case("zh-cn") {
-        "zh-CN".to_string()
-    } else if language.eq_ignore_ascii_case("en-us") {
-        "en-US".to_string()
-    } else {
-        return Err(format!("Unsupported language: {language}"));
+    let preference = match language.as_str() {
+        "system" => UiLanguagePreference::System,
+        "en-US" => UiLanguagePreference::English,
+        "zh-CN" => UiLanguagePreference::SimplifiedChinese,
+        _ => return Err(format!("Unsupported language preference: {language}")),
     };
 
     mutate_app_settings(|settings| {
-        settings.language = normalized;
+        settings.ui_language_preference = preference;
         Ok(())
     })
     .map_err(|error| error.to_string())?;
