@@ -352,7 +352,7 @@ pub fn remove_account(account_id: &str) -> Result<()> {
         }
 
         if store.active_account_id.as_deref() == Some(account_id) {
-            store.active_account_id = None;
+            store.active_account_id = store.accounts.first().map(|account| account.id.clone());
         }
 
         Ok(())
