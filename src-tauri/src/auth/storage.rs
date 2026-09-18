@@ -54,7 +54,8 @@ pub fn sync_active_account_tokens(store: &mut AccountsStore, auth: &AuthDotJson)
     let changed = *id_token != tokens.id_token
         || *access_token != tokens.access_token
         || *refresh_token != tokens.refresh_token
-        || account_id.as_ref() != Some(&current_account_id);
+        || account_id.as_ref() != Some(&current_account_id)
+        || account.last_refresh_at != auth.last_refresh;
     if !changed {
         return false;
     }
@@ -63,6 +64,7 @@ pub fn sync_active_account_tokens(store: &mut AccountsStore, auth: &AuthDotJson)
     access_token.clone_from(&tokens.access_token);
     refresh_token.clone_from(&tokens.refresh_token);
     *account_id = Some(current_account_id);
+    account.last_refresh_at = auth.last_refresh;
     true
 }
 
@@ -519,6 +521,8 @@ pub fn update_account_chatgpt_tokens(
         if let Some(subscription_expires_at) = subscription_expires_at {
             account.subscription_expires_at = Some(subscription_expires_at);
         }
+
+        account.last_refresh_at = Some(Utc::now());
 
         Ok(account.clone())
     })
