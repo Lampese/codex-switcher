@@ -57,12 +57,6 @@ async function fetchWebCommand(
 function getWebAuthSecret(): string | null {
   if (webAuthSecret !== undefined) return webAuthSecret;
 
-  const configured = import.meta.env.VITE_CODEX_SWITCHER_WEB_SECRET;
-  if (typeof configured === "string" && configured.length > 0) {
-    webAuthSecret = configured;
-    return webAuthSecret;
-  }
-
   try {
     webAuthSecret = window.sessionStorage.getItem(WEB_SECRET_STORAGE_KEY);
   } catch {
