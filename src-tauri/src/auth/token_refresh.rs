@@ -8,8 +8,8 @@ use tokio::time::{sleep, Duration};
 
 use super::storage::acquire_auth_operation_lock;
 use super::{
-    load_accounts, mutate_accounts, read_current_auth, reconcile_active_projection, save_accounts,
-    switch_to_account, sync_active_account_tokens, update_account_chatgpt_tokens,
+    load_accounts, read_current_auth, reconcile_active_projection, save_accounts, switch_to_account,
+    sync_active_account_tokens, update_account_chatgpt_tokens,
 };
 use crate::types::{
     parse_chatgpt_id_token_claims, AccountsStore, AuthData, AuthDotJson, StoredAccount,
