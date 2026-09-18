@@ -1,4 +1,5 @@
 import type { ImportAccountsSummary } from "../types";
+import { isPassphraseRequiredError, normalizeBackupPassphrase } from "./backupPassphrase";
 
 export type FileSource = string | File;
 
@@ -106,10 +107,10 @@ export async function pickAuthJsonFile(): Promise<FileSource | null> {
   return pickBrowserFile(".json,application/json");
 }
 
-export async function exportFullBackupFile(): Promise<boolean> {
-  const passphrase = requestBackupPassphrase(
-    "Create a passphrase for this full encrypted backup"
-  );
+export async function exportFullBackupFile(
+  requestPassphrase: () => Promise<string | null>
+): Promise<boolean> {
+  const passphrase = normalizeBackupPassphrase(await requestPassphrase());
   if (!passphrase) return false;
 
   if (isTauriRuntime()) {
@@ -140,7 +141,9 @@ export async function exportFullBackupFile(): Promise<boolean> {
   return true;
 }
 
-export async function importFullBackupFile(): Promise<ImportAccountsSummary | null> {
+export async function importFullBackupFile(
+  requestPassphrase: () => Promise<string | null>
+): Promise<ImportAccountsSummary | null> {
   if (isTauriRuntime()) {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
@@ -150,18 +153,19 @@ export async function importFullBackupFile(): Promise<ImportAccountsSummary | nu
     });
 
     if (!selected || Array.isArray(selected)) return null;
-    return importFullBackupSource({ path: selected });
+    return importFullBackupSource({ path: selected }, requestPassphrase);
   }
 
   const selected = await pickBrowserFile(".cswf,application/octet-stream");
   if (!selected) return null;
 
   const contentsBase64 = await fileToBase64(selected);
-  return importFullBackupSource({ contentsBase64 });
+  return importFullBackupSource({ contentsBase64 }, requestPassphrase);
 }
 
 async function importFullBackupSource(
-  source: { path: string } | { contentsBase64: string }
+  source: { path: string } | { contentsBase64: string },
+  requestPassphrase: () => Promise<string | null>
 ): Promise<ImportAccountsSummary | null> {
   const command = "path" in source
     ? "import_accounts_full_encrypted_file"
@@ -173,19 +177,9 @@ async function importFullBackupSource(
     if (!isPassphraseRequiredError(error)) throw error;
   }
 
-  const passphrase = requestBackupPassphrase("Enter the backup passphrase");
+  const passphrase = normalizeBackupPassphrase(await requestPassphrase());
   if (!passphrase) return null;
   return invokeBackend<ImportAccountsSummary>(command, { ...source, passphrase });
-}
-
-function requestBackupPassphrase(message: string): string | null {
-  const entered = window.prompt(message);
-  return entered?.trim() || null;
-}
-
-function isPassphraseRequiredError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /passphrase is required/i.test(message);
 }
 
 export function describeFileSource(source: FileSource | null): string {
