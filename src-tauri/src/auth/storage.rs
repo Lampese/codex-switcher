@@ -512,9 +512,32 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::sync_active_account_tokens;
+    use super::{sync_active_account_tokens, write_file_atomic};
     use crate::types::{AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData};
     use base64::Engine;
+
+    #[test]
+    fn atomic_write_replaces_existing_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-switcher-atomic-write-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        std::fs::write(&path, b"old").unwrap();
+
+        write_file_atomic(&path, b"new").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn account(name: &str, account_id: &str, suffix: &str) -> StoredAccount {
         StoredAccount::new_chatgpt(
