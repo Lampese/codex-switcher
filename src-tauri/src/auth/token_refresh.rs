@@ -16,7 +16,7 @@ use crate::types::{
 
 const DEFAULT_ISSUER: &str = "https://auth.openai.com";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-const EXPIRY_SKEW_SECONDS: i64 = 60;
+const ACCESS_TOKEN_REFRESH_WINDOW_SECONDS: i64 = 5 * 60;
 
 #[derive(Debug, serde::Deserialize)]
 struct RefreshTokenResponse {
@@ -106,7 +106,7 @@ pub async fn refresh_chatgpt_tokens_after_unauthorized(
         return Ok(current);
     };
 
-    if access_token != rejected_access_token {
+    if !rejected_access_token_is_still_current(access_token, rejected_access_token) {
         return Ok(current);
     }
 
@@ -252,14 +252,18 @@ fn access_token_needs_refresh_at(access_token: &str, now: i64) -> bool {
 
 fn id_token_needs_refresh_at(token: &str, now: i64) -> bool {
     match parse_jwt_exp(token) {
-        Some(expiry) => expiry <= now + EXPIRY_SKEW_SECONDS,
+        Some(expiry) => expiry <= now + ACCESS_TOKEN_REFRESH_WINDOW_SECONDS,
         None => true,
     }
 }
 
+fn rejected_access_token_is_still_current(current: &str, rejected: &str) -> bool {
+    current == rejected
+}
+
 fn token_expired_or_near_expiry_at(token: &str, now: i64) -> bool {
     match parse_jwt_exp(token) {
-        Some(expiry) => expiry <= now + EXPIRY_SKEW_SECONDS,
+        Some(expiry) => expiry <= now + ACCESS_TOKEN_REFRESH_WINDOW_SECONDS,
         None => false,
     }
 }
@@ -373,8 +377,8 @@ async fn refresh_tokens_with_refresh_token(refresh_token: &str) -> Result<Refres
 mod tests {
     use super::{
         access_token_needs_refresh_at, chatgpt_tokens_need_refresh, merge_refresh_response,
-        reconcile_active_account_from_auth, resolve_refreshed_id_token,
-        should_refresh_after_provider_status, RefreshTokenResponse,
+        reconcile_active_account_from_auth, rejected_access_token_is_still_current,
+        resolve_refreshed_id_token, should_refresh_after_provider_status, RefreshTokenResponse,
     };
     use crate::types::{AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData};
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -390,6 +394,12 @@ mod tests {
             r#"{{"exp":{exp},"https://api.openai.com/auth":{{"chatgpt_account_id":"{account_id}"}}}}"#
         ));
         format!("header.{payload}.{signature}")
+    }
+
+    #[test]
+    fn concurrent_unauthorized_retry_reuses_a_replaced_access_token() {
+        assert!(rejected_access_token_is_still_current("old-token", "old-token"));
+        assert!(!rejected_access_token_is_still_current("new-token", "old-token"));
     }
 
     #[test]
@@ -415,6 +425,13 @@ mod tests {
         let access_token = jwt_with_exp(now + 3_600);
 
         assert!(!access_token_needs_refresh_at(&access_token, now));
+    }
+
+    #[test]
+    fn access_token_refresh_window_matches_codex_five_minutes() {
+        let now = 1_800_000_000;
+        assert!(access_token_needs_refresh_at(&jwt_with_exp(now + 5 * 60), now));
+        assert!(!access_token_needs_refresh_at(&jwt_with_exp(now + 5 * 60 + 1), now));
     }
 
     #[test]
