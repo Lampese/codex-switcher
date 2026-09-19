@@ -22,7 +22,7 @@
     "release:patch": "node scripts/release.mjs patch",
     "release:minor": "node scripts/release.mjs minor",
     "release:major": "node scripts/release.mjs major",
-    "test": "pnpm test:desktop-reopen && pnpm test:close-preference && pnpm test:reset-credits"
+    "test": "node --experimental-strip-types --test tests/*.test.*"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.0",
