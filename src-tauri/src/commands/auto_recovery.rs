@@ -117,11 +117,13 @@ pub fn find_codex_binary() -> PathBuf {
     }
 
     if let Some(home) = dirs::home_dir() {
-        // Common NVM locations
+        // Common NVM locations - sort descending so newest node/codex (e.g. v24 > v22) is chosen
         let nvm_pattern = home.join(".nvm/versions/node");
         if let Ok(entries) = fs::read_dir(&nvm_pattern) {
-            for entry in entries.filter_map(Result::ok) {
-                let bin = entry.path().join("bin/codex");
+            let mut dirs: Vec<PathBuf> = entries.filter_map(Result::ok).map(|e| e.path()).collect();
+            dirs.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+            for dir in dirs {
+                let bin = dir.join("bin/codex");
                 if bin.is_file() {
                     return bin;
                 }
@@ -187,27 +189,31 @@ pub fn find_active_sessions() -> Result<Vec<ActiveCodexSession>> {
             continue;
         }
 
-        // Determine PID holding this lock
-        if let Some(pid) = find_pid_holding_file(&path) {
-            let cwd = get_process_cwd(pid);
-            let rollout_path = locate_rollout_file(&home, &session_id);
-            let is_managed = managed_pids.contains(&pid);
+        // Determine PID holding or associated with this session
+        let pid = find_pid_for_session(&session_id, &path).unwrap_or(0);
+        let rollout_path = locate_rollout_file(&home, &session_id);
+        let cwd = if pid > 0 {
+            get_process_cwd(pid)
+        } else {
+            None
+        }.or_else(|| rollout_path.as_deref().and_then(extract_cwd_from_rollout));
 
-            let mut session = ActiveCodexSession {
-                session_id: session_id.clone(),
-                pid,
-                cwd,
-                rollout_path: rollout_path.as_ref().map(|p| p.to_string_lossy().to_string()),
-                last_error: None,
-                is_managed,
-            };
+        let is_managed = pid > 0 && managed_pids.contains(&pid);
 
-            if let Some(ref r_path) = rollout_path {
-                session.last_error = check_rollout_for_errors(r_path, &session_id);
-            }
+        let mut session = ActiveCodexSession {
+            session_id: session_id.clone(),
+            pid,
+            cwd,
+            rollout_path: rollout_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+            last_error: None,
+            is_managed,
+        };
 
-            sessions.push(session);
+        if let Some(ref r_path) = rollout_path {
+            session.last_error = check_rollout_for_errors(r_path, &session_id);
         }
+
+        sessions.push(session);
     }
 
     Ok(sessions)
@@ -253,21 +259,65 @@ pub fn locate_rollout_file(codex_home: &Path, session_id: &str) -> Option<PathBu
     None
 }
 
-/// Find PID holding open lock file via lsof or /proc
-fn find_pid_holding_file(file_path: &Path) -> Option<u32> {
+/// Extract working directory from rollout jsonl file if process is no longer inspectable
+fn extract_cwd_from_rollout(rollout_path: &Path) -> Option<String> {
+    use std::io::{BufRead, BufReader};
+    let file = fs::File::open(rollout_path).ok()?;
+    let reader = BufReader::new(file);
+
+    for line in reader.lines().take(50).filter_map(Result::ok) {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
+            if let Some(cwd) = val
+                .get("payload")
+                .and_then(|p| p.get("thread_settings"))
+                .and_then(|ts| ts.get("cwd"))
+                .and_then(|c| c.as_str())
+            {
+                return Some(cwd.to_string());
+            }
+            if let Some(cwd) = val
+                .get("payload")
+                .and_then(|p| p.get("cwd"))
+                .and_then(|c| c.as_str())
+            {
+                return Some(cwd.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+/// Find PID associated with a session ID via /proc or lsof
+fn find_pid_for_session(session_id: &str, file_path: &Path) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        // Check /proc/[pid]/cmdline for session ID without needing root permissions
+        if let Ok(entries) = fs::read_dir("/proc") {
+            for entry in entries.filter_map(Result::ok) {
+                let name = entry.file_name();
+                if let Ok(pid) = name.to_string_lossy().parse::<u32>() {
+                    let cmdline_path = entry.path().join("cmdline");
+                    if let Ok(cmdline_bytes) = fs::read(&cmdline_path) {
+                        let cmdline = String::from_utf8_lossy(&cmdline_bytes);
+                        if cmdline.contains(session_id) && !cmdline.contains("codex-switcher") {
+                            return Some(pid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[cfg(unix)]
     {
-        let output = Command::new("lsof")
-            .arg("-t")
-            .arg(file_path)
-            .output()
-            .ok()?;
-
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                if let Ok(pid) = line.trim().parse::<u32>() {
-                    return Some(pid);
+        if let Ok(output) = Command::new("lsof").arg("-t").arg(file_path).output() {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if let Ok(pid) = line.trim().parse::<u32>() {
+                        return Some(pid);
+                    }
                 }
             }
         }
@@ -331,11 +381,10 @@ pub fn check_rollout_for_errors(rollout_path: &Path, session_id: &str) -> Option
     reader.read_exact(&mut buffer).ok()?;
 
     let content = String::from_utf8_lossy(&buffer);
-    let mut last_detected: Option<DetectedSessionError> = None;
 
     for line in content.lines().rev() {
         let line = line.trim();
-        if !line.contains("\"task_complete\"") || !line.contains("\"error\"") {
+        if !line.contains("\"task_complete\"") {
             continue;
         }
 
@@ -343,12 +392,18 @@ pub fn check_rollout_for_errors(rollout_path: &Path, session_id: &str) -> Option
             continue;
         };
 
-        let payload = json_val.get("payload")?;
-        if payload.get("type")?.as_str()? != "task_complete" {
+        let Some(payload) = json_val.get("payload") else {
+            continue;
+        };
+        if payload.get("type").and_then(|t| t.as_str()) != Some("task_complete") {
             continue;
         }
 
-        let error_obj = payload.get("error")?;
+        // If the latest task_complete succeeded without error, session is in a good state!
+        let Some(error_obj) = payload.get("error").filter(|e| !e.is_null()) else {
+            return None;
+        };
+
         let codex_error_info = error_obj.get("codex_error_info").and_then(|v| v.as_str());
         let message = error_obj
             .get("message")
@@ -372,18 +427,20 @@ pub fn check_rollout_for_errors(rollout_path: &Path, session_id: &str) -> Option
         };
 
         if let Some(kind) = kind {
-            last_detected = Some(DetectedSessionError {
+            return Some(DetectedSessionError {
                 kind,
                 session_id: session_id.to_string(),
                 turn_id,
                 message,
                 detected_at: Utc::now(),
             });
-            break;
+        } else {
+            // Latest task completed with an error, but not one of the recoverable ones
+            return None;
         }
     }
 
-    last_detected
+    None
 }
 
 /// Score an account for auto-switching candidate evaluation.
@@ -813,18 +870,20 @@ async fn handle_account_switch_for_session(
         anyhow::bail!("No eligible fallback account found with available limits");
     };
 
-    // Terminate the failed session gracefully
-    #[cfg(unix)]
-    {
-        let _ = Command::new("kill").arg("-TERM").arg(session.pid.to_string()).status();
-    }
-    #[cfg(windows)]
-    {
-        let _ = Command::new("taskkill").args(["/PID", &session.pid.to_string()]).status();
-    }
+    // Terminate the failed session gracefully if still running
+    if session.pid > 0 {
+        #[cfg(unix)]
+        {
+            let _ = Command::new("kill").arg("-TERM").arg(session.pid.to_string()).status();
+        }
+        #[cfg(windows)]
+        {
+            let _ = Command::new("taskkill").args(["/PID", &session.pid.to_string()]).status();
+        }
 
-    // Give process 2 seconds to release locks
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+        // Give process time to release locks
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+    }
 
     // Switch account credentials in auth.json
     switch_to_account(&target)?;
