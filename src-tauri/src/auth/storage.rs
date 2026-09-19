@@ -717,6 +717,7 @@ mod tests {
         UiLanguagePreference,
     };
     use base64::Engine;
+    use chrono::{Duration, TimeZone, Utc};
 
     #[test]
     fn existing_settings_without_language_stay_english() {
@@ -1029,6 +1030,16 @@ mod tests {
         }
     }
 
+    fn auth_with_refresh_at(
+        account_id: &str,
+        suffix: &str,
+        last_refresh: chrono::DateTime<Utc>,
+    ) -> AuthDotJson {
+        let mut auth = auth(account_id, suffix);
+        auth.last_refresh = Some(last_refresh);
+        auth
+    }
+
     fn refresh_token(account: &StoredAccount) -> &str {
         match &account.auth_data {
             AuthData::ChatGPT { refresh_token, .. } => refresh_token,
@@ -1047,6 +1058,7 @@ mod tests {
     fn projection_follows_matching_runtime_chatgpt_account_and_tokens() {
         let mut account_a = account("A", "workspace-a", "a1");
         let account_a_id = account_a.id.clone();
+        let runtime_refresh_at = account_a.last_refresh_at.unwrap() + Duration::seconds(1);
         let account_b = account("B", "workspace-b", "b1");
         let account_b_id = account_b.id.clone();
         let mut store = AccountsStore {
@@ -1055,7 +1067,7 @@ mod tests {
             ..AccountsStore::default()
         };
 
-        let live = auth("workspace-a", "a2");
+        let live = auth_with_refresh_at("workspace-a", "a2", runtime_refresh_at);
         assert!(reconcile_active_projection(&mut store, Some(&live)));
         assert_eq!(
             store.active_account_id.as_deref(),
@@ -1096,6 +1108,7 @@ mod tests {
     fn preserves_rotated_tokens_before_switching_away_and_back() {
         let account_a = account("A", "workspace-a", "a1");
         let account_a_id = account_a.id.clone();
+        let runtime_refresh_at = account_a.last_refresh_at.unwrap() + Duration::seconds(1);
         let account_b = account("B", "workspace-b", "b1");
         let account_b_id = account_b.id.clone();
         let mut store = AccountsStore {
@@ -1130,7 +1143,7 @@ mod tests {
 
         assert!(sync_active_account_tokens(
             &mut store,
-            &auth("workspace-a", "a2")
+            &auth_with_refresh_at("workspace-a", "a2", runtime_refresh_at)
         ));
         store.active_account_id = Some(account_b_id);
 
@@ -1154,7 +1167,7 @@ mod tests {
             active_account_id: Some(account_id),
             ..AccountsStore::default()
         };
-        let refresh_at = chrono::Utc::now();
+        let refresh_at = store.accounts[0].last_refresh_at.unwrap() + Duration::seconds(1);
         let mut live = auth("workspace-a", "a2");
         live.last_refresh = Some(refresh_at);
 
@@ -1194,6 +1207,7 @@ mod tests {
     fn derives_stored_identity_from_id_token_and_backfills_account_id() {
         let mut account = account("A", "workspace-a", "a1");
         let account_id = account.id.clone();
+        let runtime_refresh_at = account.last_refresh_at.unwrap() + Duration::seconds(1);
         let AuthData::ChatGPT {
             id_token,
             account_id: chatgpt_account_id,
@@ -1213,12 +1227,52 @@ mod tests {
 
         assert!(sync_active_account_tokens(
             &mut store,
-            &auth("workspace-a", "a2")
+            &auth_with_refresh_at("workspace-a", "a2", runtime_refresh_at)
         ));
         let AuthData::ChatGPT { account_id, .. } = &store.accounts[0].auth_data else {
             panic!("expected ChatGPT account");
         };
         assert_eq!(account_id.as_deref(), Some("workspace-a"));
         assert_eq!(refresh_token(&store.accounts[0]), "refresh-a2");
+    }
+
+    #[test]
+    fn stale_runtime_snapshot_does_not_replace_newer_store_credentials() {
+        let old_generation = Utc.timestamp_opt(1_800_000_000, 0).single().unwrap();
+        let newer_generation = old_generation + Duration::seconds(1);
+        let mut account = account("A", "workspace-a", "stored");
+        let account_id = account.id.clone();
+        account.last_refresh_at = Some(newer_generation);
+        let mut store = AccountsStore {
+            accounts: vec![account],
+            active_account_id: Some(account_id),
+            ..AccountsStore::default()
+        };
+
+        assert!(!sync_active_account_tokens(
+            &mut store,
+            &auth_with_refresh_at("workspace-a", "runtime", old_generation)
+        ));
+        assert_eq!(refresh_token(&store.accounts[0]), "refresh-stored");
+        assert_eq!(store.accounts[0].last_refresh_at, Some(newer_generation));
+    }
+
+    #[test]
+    fn unversioned_runtime_snapshot_does_not_replace_known_store_credentials() {
+        let stored_generation = Utc.timestamp_opt(1_800_000_000, 0).single().unwrap();
+        let mut account = account("A", "workspace-a", "stored");
+        let account_id = account.id.clone();
+        account.last_refresh_at = Some(stored_generation);
+        let mut store = AccountsStore {
+            accounts: vec![account],
+            active_account_id: Some(account_id),
+            ..AccountsStore::default()
+        };
+
+        assert!(!sync_active_account_tokens(
+            &mut store,
+            &auth("workspace-a", "runtime")
+        ));
+        assert_eq!(refresh_token(&store.accounts[0]), "refresh-stored");
     }
 }
