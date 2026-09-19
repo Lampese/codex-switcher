@@ -9,6 +9,12 @@
   Easily switch between accounts, monitor usage, schedule warm-ups, and stay in control of your quota
 </p>
 
+<div align="center">
+
+[![](https://dcbadge.limes.pink/api/server/4QzyJTC3S)](https://discord.gg/4QzyJTC3S)
+
+</div>
+
 ## Features
 
 - **Multi-Account Management** – Add, rename, mask, import, export, and manage multiple Codex accounts in one place
