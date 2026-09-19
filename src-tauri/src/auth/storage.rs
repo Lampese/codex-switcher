@@ -92,10 +92,7 @@ fn runtime_snapshot_is_older_than_stored_credentials(
     }
 }
 
-pub fn reconcile_active_projection(
-    store: &mut AccountsStore,
-    auth: Option<&AuthDotJson>,
-) -> bool {
+pub fn reconcile_active_projection(store: &mut AccountsStore, auth: Option<&AuthDotJson>) -> bool {
     let previous_active = store.active_account_id.clone();
 
     let matching_id = auth.and_then(|auth| {
@@ -844,6 +841,7 @@ mod tests {
     fn projection_follows_matching_runtime_chatgpt_account_and_tokens() {
         let mut account_a = account("A", "workspace-a", "a1");
         let account_a_id = account_a.id.clone();
+        let runtime_refresh_at = account_a.last_refresh_at.unwrap() + Duration::seconds(1);
         let account_b = account("B", "workspace-b", "b1");
         let account_b_id = account_b.id.clone();
         let mut store = AccountsStore {
@@ -852,7 +850,7 @@ mod tests {
             ..AccountsStore::default()
         };
 
-        let live = auth("workspace-a", "a2");
+        let live = auth_with_refresh_at("workspace-a", "a2", runtime_refresh_at);
         assert!(reconcile_active_projection(&mut store, Some(&live)));
         assert_eq!(
             store.active_account_id.as_deref(),
