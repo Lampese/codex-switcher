@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::{
     auth::{load_app_settings, mutate_app_settings},
@@ -143,14 +143,7 @@ pub fn set_warmup_policy(policy: WarmupPolicy) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn get_language() -> String {
-    crate::auth::load_app_settings()
-        .map(|settings| resolve_desktop_language(settings.ui_language_preference).to_string())
-        .unwrap_or_else(|_| "en-US".to_string())
-}
-
-#[tauri::command]
-pub fn set_language(app: AppHandle, language: String) -> Result<(), String> {
+pub fn set_language(app: AppHandle, language: String) -> Result<DisplaySettings, String> {
     let preference = match language.as_str() {
         "system" => UiLanguagePreference::System,
         "en-US" => UiLanguagePreference::English,
@@ -158,19 +151,36 @@ pub fn set_language(app: AppHandle, language: String) -> Result<(), String> {
         _ => return Err(format!("Unsupported language preference: {language}")),
     };
 
-    mutate_app_settings(|settings| {
+    let settings = mutate_app_settings(|settings| {
         settings.ui_language_preference = preference;
-        Ok(())
+        Ok(settings.clone())
     })
     .map_err(|error| error.to_string())?;
     #[cfg(desktop)]
     {
-        crate::app_menu::refresh(&app).map_err(|error| error.to_string())?;
+        if let Err(error) = crate::app_menu::refresh_without_notification(&app) {
+            // The settings write is the semantic commit point. A native menu
+            // projection failure must not make React report that persistence
+            // failed; notify webviews to reconcile the authoritative settings.
+            eprintln!("Failed to refresh native app menu after language change: {error}");
+        }
         crate::tray::refresh(&app);
+        // Notify only after both native projections have had their chance to
+        // reconcile. The persisted AppSettings remains the authority.
+        let _ = app.emit("app-settings-changed", ());
     }
     #[cfg(not(desktop))]
     let _ = &app;
-    Ok(())
+    Ok(DisplaySettings {
+        tray_display_mode: settings.tray_display_mode,
+        dock_display_mode: if cfg!(target_os = "macos") {
+            Some(settings.dock_display_mode)
+        } else {
+            None
+        },
+        ui_language_preference: settings.ui_language_preference,
+        resolved_language: resolve_desktop_language(settings.ui_language_preference).to_string(),
+    })
 }
 
 #[tauri::command]

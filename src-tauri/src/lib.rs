@@ -66,7 +66,6 @@ pub fn run() {
             commands::get_warmup_policy,
             get_warmup_state,
             commands::set_warmup_policy,
-            commands::get_language,
             commands::set_tray_display_mode,
             commands::set_language,
             commands::open_codex_app,

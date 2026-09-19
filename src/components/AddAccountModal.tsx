@@ -77,7 +77,7 @@ export function AddAccountModal({
 
   const handleSelectFile = async () => {
     try {
-      const selected = await pickAuthJsonFile();
+      const selected = await pickAuthJsonFile(t("auth.select.auth.json.file"));
       if (selected) setFileSource(selected);
     } catch (err) {
       console.error("Failed to open file dialog:", err);
@@ -112,6 +112,8 @@ export function AddAccountModal({
           <button
             onClick={handleClose}
             className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+            aria-label={t("app.close")}
+            title={t("app.close")}
           >
             ✕
           </button>
@@ -226,7 +228,7 @@ export function AddAccountModal({
               </label>
               <div className="flex gap-2">
                 <div className="flex-1 px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-sm text-gray-600 dark:text-gray-300 truncate">
-                  {describeFileSource(fileSource)}
+                  {describeFileSource(fileSource, t("platform.file.none"))}
                 </div>
                 <button
                   onClick={handleSelectFile}
