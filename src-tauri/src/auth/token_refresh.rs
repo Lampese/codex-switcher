@@ -9,12 +9,11 @@ use tokio::time::{sleep, Duration};
 use super::storage::acquire_auth_operation_lock;
 use super::{
     load_accounts, mutate_accounts, read_current_auth, reconcile_active_projection,
-    switch_to_account, update_account_chatgpt_tokens,
+    switch_to_account, sync_active_account_tokens, update_account_chatgpt_tokens,
 };
 use crate::types::{
     parse_chatgpt_id_token_claims, AccountsStore, AuthData, AuthDotJson, StoredAccount,
 };
-use super::sync_active_account_tokens;
 
 const DEFAULT_ISSUER: &str = "https://auth.openai.com";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -178,6 +177,7 @@ async fn refresh_chatgpt_tokens_locked(account: &StoredAccount) -> Result<Stored
     Ok(updated)
 }
 
+#[cfg(test)]
 fn reconcile_active_account_from_auth(
     store: &mut AccountsStore,
     account_id: &str,
