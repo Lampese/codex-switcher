@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAccounts } from "./hooks/useAccounts";
 import { useDesktopReopen } from "./hooks/useDesktopReopen";
 import { useCodexClosePreference } from "./hooks/useCodexClosePreference";
@@ -37,6 +36,7 @@ import {
   getAutoWarmupWindowKind,
 } from "./lib/autoWarmupPolicy";
 import { useI18n } from "./lib/i18n";
+import { getTauriWindow } from "./lib/tauriWindow";
 import "./App.css";
 
 const LIMIT_FULL_THRESHOLD = 99.5;
@@ -54,7 +54,6 @@ interface BackupPassphraseRequest {
   title: string;
   resolve: (value: string | null) => void;
 }
-const appWindow = getCurrentWindow();
 const isMacOs =
   typeof navigator !== "undefined" &&
   /(Mac|iPhone|iPod|iPad)/i.test(navigator.userAgent);
@@ -260,14 +259,14 @@ function App() {
   const handleTitlebarDrag = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
       if (!isTauriRuntime() || event.button !== 0) return;
-      void appWindow.startDragging();
+      void getTauriWindow()?.startDragging();
     },
     []
   );
 
   const handleTitlebarDoubleClick = useCallback(() => {
     if (!isTauriRuntime()) return;
-    void appWindow.toggleMaximize();
+    void getTauriWindow()?.toggleMaximize();
   }, []);
 
   const toggleMask = (accountId: string) => {
@@ -393,6 +392,9 @@ function App() {
 
   useEffect(() => {
     if (!isTauriRuntime() || isMacOs) return;
+
+    const appWindow = getTauriWindow();
+    if (!appWindow) return;
 
     let unlisten: (() => void) | undefined;
 
@@ -1077,11 +1079,11 @@ function App() {
             onDoubleClick={handleTitlebarDoubleClick}
             className={`h-full flex-1 select-none cursor-default ${isMacOs ? "ml-18 mr-2" : "mr-3"}`}
           />
-          {!isMacOs && (
+          {isTauriRuntime() && !isMacOs && (
             <div className="flex items-center gap-1">
               <button
                 onClick={() => {
-                  void appWindow.minimize();
+                  void getTauriWindow()?.minimize();
                 }}
                 className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
                 title={t("app.minimize")}
@@ -1110,7 +1112,7 @@ function App() {
               </button>
               <button
                 onClick={() => {
-                  void appWindow.close();
+                  void getTauriWindow()?.close();
                 }}
                 className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-red-500 hover:text-white dark:text-gray-400 dark:hover:bg-red-500 dark:hover:text-white"
                 title={t("app.close")}
