@@ -244,12 +244,8 @@ pub async fn import_accounts_slim_text(payload: String) -> Result<ImportAccounts
         })?;
     validate_imported_store(&imported).map_err(|e| format!("{e:#}"))?;
 
-    let summary = mutate_accounts(|latest| {
-        let (merged, summary) = merge_accounts_store(latest.clone(), imported);
-        *latest = merged;
-        Ok(summary)
-    })
-    .map_err(|e| e.to_string())?;
+    let summary = mutate_accounts(|latest| merge_imported_store(latest, imported))
+        .map_err(|e| e.to_string())?;
     Ok(ImportAccountsSummary {
         total_in_payload,
         imported_count: summary.imported_count,
@@ -292,12 +288,7 @@ pub async fn import_accounts_full_encrypted_file(
         decode_full_encrypted_store(&encrypted, passphrase).map_err(|e| e.to_string())?;
     validate_imported_store(&imported).map_err(|e| e.to_string())?;
 
-    mutate_accounts(|latest| {
-        let (merged, summary) = merge_accounts_store(latest.clone(), imported);
-        *latest = merged;
-        Ok(summary)
-    })
-    .map_err(|e| e.to_string())
+    mutate_accounts(|latest| merge_imported_store(latest, imported)).map_err(|e| e.to_string())
 }
 
 /// Import full account config from encrypted bytes uploaded through the browser UI.
@@ -309,12 +300,7 @@ pub async fn import_accounts_full_encrypted_bytes(
     let imported = decode_full_encrypted_store(&bytes, passphrase).map_err(|e| e.to_string())?;
     validate_imported_store(&imported).map_err(|e| e.to_string())?;
 
-    mutate_accounts(|latest| {
-        let (merged, summary) = merge_accounts_store(latest.clone(), imported);
-        *latest = merged;
-        Ok(summary)
-    })
-    .map_err(|e| e.to_string())
+    mutate_accounts(|latest| merge_imported_store(latest, imported)).map_err(|e| e.to_string())
 }
 
 /// Find all running Antigravity codex assistant processes
@@ -764,7 +750,6 @@ fn merge_accounts_store(
     imported: AccountsStore,
 ) -> (AccountsStore, ImportAccountsSummary) {
     let imported_version = imported.version;
-    let imported_active_id = imported.active_account_id;
     let total_in_payload = imported.accounts.len();
     let mut imported_count = 0usize;
     let mut existing_ids: HashSet<String> = current.accounts.iter().map(|a| a.id.clone()).collect();
@@ -783,22 +768,9 @@ fn merge_accounts_store(
 
     current.version = current.version.max(imported_version).max(1);
 
-    let current_active_is_valid = current
+    current.active_account_id = current
         .active_account_id
-        .as_ref()
-        .is_some_and(|id| current.accounts.iter().any(|a| &a.id == id));
-
-    if !current_active_is_valid {
-        if let Some(imported_active) = imported_active_id {
-            if current.accounts.iter().any(|a| a.id == imported_active) {
-                current.active_account_id = Some(imported_active);
-            } else {
-                current.active_account_id = current.accounts.first().map(|a| a.id.clone());
-            }
-        } else {
-            current.active_account_id = current.accounts.first().map(|a| a.id.clone());
-        }
-    }
+        .filter(|id| current.accounts.iter().any(|a| &a.id == id));
 
     (
         current,
@@ -808,6 +780,15 @@ fn merge_accounts_store(
             skipped_count: total_in_payload.saturating_sub(imported_count),
         },
     )
+}
+
+fn merge_imported_store(
+    latest: &mut AccountsStore,
+    imported: AccountsStore,
+) -> anyhow::Result<ImportAccountsSummary> {
+    let (merged, summary) = merge_accounts_store(latest.clone(), imported);
+    *latest = merged;
+    Ok(summary)
 }
 
 /// Get the list of masked account IDs
@@ -825,6 +806,10 @@ pub async fn set_masked_account_ids(ids: Vec<String>) -> Result<(), String> {
 #[cfg(test)]
 mod full_backup_tests {
     use super::*;
+    use crate::auth::storage::mutate_accounts_at;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
 
     fn sample_store() -> AccountsStore {
         let account = StoredAccount::new_api_key("backup account".into(), "api-key".into());
@@ -887,5 +872,117 @@ mod full_backup_tests {
             serde_json::to_value(&decoded).unwrap(),
             serde_json::to_value(&store).unwrap()
         );
+    }
+
+    #[test]
+    fn full_import_does_not_claim_or_replace_runtime_active_projection() {
+        let current_account = StoredAccount::new_api_key("current".into(), "current-key".into());
+        let current_id = current_account.id.clone();
+        let imported_account = StoredAccount::new_api_key("imported".into(), "imported-key".into());
+        let imported_id = imported_account.id.clone();
+        let imported = AccountsStore {
+            active_account_id: Some(imported_id),
+            accounts: vec![imported_account],
+            ..AccountsStore::default()
+        };
+
+        let current = AccountsStore {
+            active_account_id: Some(current_id.clone()),
+            accounts: vec![current_account],
+            ..AccountsStore::default()
+        };
+        let (merged, _) = merge_accounts_store(current, imported.clone());
+        assert_eq!(
+            merged.active_account_id.as_deref(),
+            Some(current_id.as_str())
+        );
+
+        let (merged, _) = merge_accounts_store(AccountsStore::default(), imported.clone());
+        assert!(merged.active_account_id.is_none());
+
+        let current = AccountsStore {
+            active_account_id: Some("missing-local-account".into()),
+            ..AccountsStore::default()
+        };
+        let (merged, _) = merge_accounts_store(current, imported);
+        assert!(merged.active_account_id.is_none());
+    }
+
+    #[test]
+    fn full_import_transaction_preserves_unrelated_latest_store_update() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "codex-switcher-full-import-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let initial_account = StoredAccount::new_api_key("initial".into(), "initial-key".into());
+        let latest_account = StoredAccount::new_api_key("latest".into(), "latest-key".into());
+        let latest_account_id = latest_account.id.clone();
+        let imported_account = StoredAccount::new_api_key("imported".into(), "imported-key".into());
+
+        mutate_accounts_at(&config_dir, |store| {
+            *store = AccountsStore {
+                active_account_id: Some(initial_account.id.clone()),
+                accounts: vec![initial_account.clone()],
+                ..AccountsStore::default()
+            };
+            Ok(())
+        })
+        .unwrap();
+
+        let imported = AccountsStore {
+            active_account_id: Some(imported_account.id.clone()),
+            accounts: vec![imported_account.clone()],
+            ..AccountsStore::default()
+        };
+        let encoded =
+            encode_full_encrypted_store(&imported, "test passphrase", FULL_FILE_VERSION_V2)
+                .unwrap();
+        let imported = decode_full_encrypted_store(&encoded, "test passphrase").unwrap();
+        validate_imported_store(&imported).unwrap();
+
+        let (writer_started_tx, writer_started_rx) = mpsc::channel();
+        let (release_writer_tx, release_writer_rx) = mpsc::channel();
+        let writer_dir = config_dir.clone();
+        let writer = thread::spawn(move || {
+            mutate_accounts_at(&writer_dir, |latest| {
+                writer_started_tx.send(()).unwrap();
+                release_writer_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap();
+                latest.accounts.push(latest_account.clone());
+                Ok(())
+            })
+        });
+
+        writer_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+
+        let importer_dir = config_dir.clone();
+        let importer = thread::spawn(move || {
+            mutate_accounts_at(&importer_dir, |latest| {
+                merge_imported_store(latest, imported)
+            })
+        });
+
+        release_writer_tx.send(()).unwrap();
+        writer.join().unwrap().unwrap();
+        importer.join().unwrap().unwrap();
+
+        let final_store = mutate_accounts_at(&config_dir, |latest| Ok(latest.clone())).unwrap();
+        assert!(final_store
+            .accounts
+            .iter()
+            .any(|account| account.id == latest_account_id));
+        assert!(final_store
+            .accounts
+            .iter()
+            .any(|account| account.id == imported_account.id));
+        assert_eq!(
+            final_store.active_account_id.as_deref(),
+            Some(initial_account.id.as_str())
+        );
+
+        std::fs::remove_dir_all(config_dir).unwrap();
     }
 }
