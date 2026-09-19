@@ -7,13 +7,15 @@ use reqwest::StatusCode;
 use tokio::time::{sleep, Duration};
 
 use super::storage::acquire_auth_operation_lock;
+#[cfg(test)]
+use super::sync_active_account_tokens;
 use super::{
-    load_accounts, mutate_accounts, read_current_auth, switch_to_account,
-    sync_active_account_tokens, update_account_chatgpt_tokens,
+    load_accounts, mutate_accounts, read_current_auth, reconcile_active_projection,
+    switch_to_account, update_account_chatgpt_tokens,
 };
-use crate::types::{
-    parse_chatgpt_id_token_claims, AccountsStore, AuthData, AuthDotJson, StoredAccount,
-};
+use crate::types::{parse_chatgpt_id_token_claims, AuthData, StoredAccount};
+#[cfg(test)]
+use crate::types::{AccountsStore, AuthDotJson};
 
 const DEFAULT_ISSUER: &str = "https://auth.openai.com";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -177,6 +179,7 @@ async fn refresh_chatgpt_tokens_locked(account: &StoredAccount) -> Result<Stored
     Ok(updated)
 }
 
+#[cfg(test)]
 fn reconcile_active_account_from_auth(
     store: &mut AccountsStore,
     account_id: &str,
@@ -190,17 +193,12 @@ fn reconcile_active_account_from_auth(
 }
 
 fn load_account_reconciling_live_auth(account_id: &str) -> Result<(StoredAccount, bool)> {
-    let live_auth = read_current_auth()?;
+    let auth = read_current_auth()?;
 
     mutate_accounts(|store| {
+        reconcile_active_projection(store, auth.as_ref());
+
         let is_active = store.active_account_id.as_deref() == Some(account_id);
-
-        if is_active {
-            if let Some(auth) = live_auth.as_ref() {
-                reconcile_active_account_from_auth(store, account_id, auth);
-            }
-        }
-
         let account = store
             .accounts
             .iter()
