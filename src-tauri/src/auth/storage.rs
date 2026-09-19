@@ -50,6 +50,10 @@ pub fn sync_active_account_tokens(store: &mut AccountsStore, auth: &AuthDotJson)
     if stored_account_id != current_account_id {
         return false;
     }
+    if runtime_snapshot_is_older_than_stored_credentials(account.last_refresh_at, auth.last_refresh)
+    {
+        return false;
+    }
 
     let changed = *id_token != tokens.id_token
         || *access_token != tokens.access_token
@@ -66,6 +70,19 @@ pub fn sync_active_account_tokens(store: &mut AccountsStore, auth: &AuthDotJson)
     *account_id = Some(current_account_id);
     account.last_refresh_at = auth.last_refresh;
     true
+}
+
+fn runtime_snapshot_is_older_than_stored_credentials(
+    stored_last_refresh: Option<DateTime<Utc>>,
+    runtime_last_refresh: Option<DateTime<Utc>>,
+) -> bool {
+    match (stored_last_refresh, runtime_last_refresh) {
+        (Some(stored), Some(runtime)) => runtime < stored,
+        // A runtime snapshot without a generation cannot replace credentials
+        // that were already persisted by a known refresh or credential update.
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
 }
 
 /// Get the path to the codex-switcher config directory
@@ -486,46 +503,73 @@ pub fn update_account_chatgpt_tokens(
     plan_type: Option<String>,
     subscription_expires_at: Option<DateTime<Utc>>,
 ) -> Result<StoredAccount> {
+    let refreshed_at = Utc::now();
     mutate_accounts(|store| {
-        let account = store
-            .accounts
-            .iter_mut()
-            .find(|a| a.id == account_id)
-            .context("Account not found")?;
-
-        match &mut account.auth_data {
-            AuthData::ChatGPT {
-                id_token: stored_id_token,
-                access_token: stored_access_token,
-                refresh_token: stored_refresh_token,
-                account_id: stored_account_id,
-            } => {
-                *stored_id_token = id_token;
-                *stored_access_token = access_token;
-                *stored_refresh_token = refresh_token;
-                if let Some(new_account_id) = chatgpt_account_id {
-                    *stored_account_id = Some(new_account_id);
-                }
-            }
-            AuthData::ApiKey { .. } => {
-                anyhow::bail!("Cannot update OAuth tokens for an API key account");
-            }
-        }
-
-        if let Some(new_email) = email {
-            account.email = Some(new_email);
-        }
-        if let Some(new_plan_type) = plan_type {
-            account.plan_type = Some(new_plan_type);
-        }
-        if let Some(subscription_expires_at) = subscription_expires_at {
-            account.subscription_expires_at = Some(subscription_expires_at);
-        }
-
-        account.last_refresh_at = Some(Utc::now());
-
-        Ok(account.clone())
+        update_account_chatgpt_tokens_in_store(
+            store,
+            account_id,
+            id_token,
+            access_token,
+            refresh_token,
+            chatgpt_account_id,
+            email,
+            plan_type,
+            subscription_expires_at,
+            refreshed_at,
+        )
     })
+}
+
+fn update_account_chatgpt_tokens_in_store(
+    store: &mut AccountsStore,
+    account_id: &str,
+    id_token: String,
+    access_token: String,
+    refresh_token: String,
+    chatgpt_account_id: Option<String>,
+    email: Option<String>,
+    plan_type: Option<String>,
+    subscription_expires_at: Option<DateTime<Utc>>,
+    refreshed_at: DateTime<Utc>,
+) -> Result<StoredAccount> {
+    let account = store
+        .accounts
+        .iter_mut()
+        .find(|account| account.id == account_id)
+        .context("Account not found")?;
+
+    match &mut account.auth_data {
+        AuthData::ChatGPT {
+            id_token: stored_id_token,
+            access_token: stored_access_token,
+            refresh_token: stored_refresh_token,
+            account_id: stored_account_id,
+        } => {
+            *stored_id_token = id_token;
+            *stored_access_token = access_token;
+            *stored_refresh_token = refresh_token;
+            if let Some(new_account_id) = chatgpt_account_id {
+                *stored_account_id = Some(new_account_id);
+            }
+        }
+        AuthData::ApiKey { .. } => {
+            anyhow::bail!("Cannot update OAuth tokens for an API key account");
+        }
+    }
+
+    if let Some(new_email) = email {
+        account.email = Some(new_email);
+    }
+    if let Some(new_plan_type) = plan_type {
+        account.plan_type = Some(new_plan_type);
+    }
+    if let Some(subscription_expires_at) = subscription_expires_at {
+        account.subscription_expires_at = Some(subscription_expires_at);
+    }
+
+    account.last_refresh_at = Some(refreshed_at);
+
+    Ok(account.clone())
 }
 
 /// Get the list of masked account IDs
@@ -545,11 +589,13 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_mutation_lock_at, sync_active_account_tokens, write_file_atomic,
+        acquire_mutation_lock_at, sync_active_account_tokens,
+        update_account_chatgpt_tokens_in_store, write_file_atomic,
         write_file_atomic_with_pre_replace,
     };
     use crate::types::{AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData};
     use base64::Engine;
+    use chrono::{Duration, TimeZone, Utc};
 
     #[test]
     fn mutation_lock_serializes_competing_writers() {
@@ -674,6 +720,16 @@ mod tests {
         }
     }
 
+    fn auth_with_refresh_at(
+        account_id: &str,
+        suffix: &str,
+        last_refresh: chrono::DateTime<Utc>,
+    ) -> AuthDotJson {
+        let mut auth = auth(account_id, suffix);
+        auth.last_refresh = Some(last_refresh);
+        auth
+    }
+
     fn refresh_token(account: &StoredAccount) -> &str {
         match &account.auth_data {
             AuthData::ChatGPT { refresh_token, .. } => refresh_token,
@@ -692,6 +748,7 @@ mod tests {
     fn preserves_rotated_tokens_before_switching_away_and_back() {
         let account_a = account("A", "workspace-a", "a1");
         let account_a_id = account_a.id.clone();
+        let runtime_refresh_at = account_a.last_refresh_at.unwrap() + Duration::seconds(1);
         let account_b = account("B", "workspace-b", "b1");
         let account_b_id = account_b.id.clone();
         let mut store = AccountsStore {
@@ -726,7 +783,7 @@ mod tests {
 
         assert!(sync_active_account_tokens(
             &mut store,
-            &auth("workspace-a", "a2")
+            &auth_with_refresh_at("workspace-a", "a2", runtime_refresh_at)
         ));
         store.active_account_id = Some(account_b_id);
 
@@ -773,6 +830,7 @@ mod tests {
     fn derives_stored_identity_from_id_token_and_backfills_account_id() {
         let mut account = account("A", "workspace-a", "a1");
         let account_id = account.id.clone();
+        let runtime_refresh_at = account.last_refresh_at.unwrap() + Duration::seconds(1);
         let AuthData::ChatGPT {
             id_token,
             account_id: chatgpt_account_id,
@@ -792,12 +850,88 @@ mod tests {
 
         assert!(sync_active_account_tokens(
             &mut store,
-            &auth("workspace-a", "a2")
+            &auth_with_refresh_at("workspace-a", "a2", runtime_refresh_at)
         ));
         let AuthData::ChatGPT { account_id, .. } = &store.accounts[0].auth_data else {
             panic!("expected ChatGPT account");
         };
         assert_eq!(account_id.as_deref(), Some("workspace-a"));
         assert_eq!(refresh_token(&store.accounts[0]), "refresh-a2");
+    }
+
+    #[test]
+    fn rotated_refresh_token_survives_stale_runtime_reconciliation() {
+        let old_generation = Utc.timestamp_opt(1_800_000_000, 0).single().unwrap();
+        let rotated_generation = old_generation + Duration::seconds(1);
+        let mut account = account("A", "workspace-a", "old");
+        let account_id = account.id.clone();
+        account.last_refresh_at = Some(old_generation);
+        let mut store = AccountsStore {
+            accounts: vec![account],
+            active_account_id: Some(account_id.clone()),
+            ..AccountsStore::default()
+        };
+
+        let updated = update_account_chatgpt_tokens_in_store(
+            &mut store,
+            &account_id,
+            "id-rotated".into(),
+            "access-rotated".into(),
+            "refresh-rotated".into(),
+            Some("workspace-a".into()),
+            None,
+            None,
+            None,
+            rotated_generation,
+        )
+        .unwrap();
+        assert_eq!(refresh_token(&updated), "refresh-rotated");
+
+        assert!(!sync_active_account_tokens(
+            &mut store,
+            &auth_with_refresh_at("workspace-a", "old", old_generation)
+        ));
+        assert_eq!(refresh_token(&store.accounts[0]), "refresh-rotated");
+        assert_eq!(store.accounts[0].last_refresh_at, Some(rotated_generation));
+    }
+
+    #[test]
+    fn newer_runtime_generation_projects_tokens_to_the_active_store() {
+        let stored_generation = Utc.timestamp_opt(1_800_000_000, 0).single().unwrap();
+        let runtime_generation = stored_generation + Duration::seconds(1);
+        let mut account = account("A", "workspace-a", "old");
+        let account_id = account.id.clone();
+        account.last_refresh_at = Some(stored_generation);
+        let mut store = AccountsStore {
+            accounts: vec![account],
+            active_account_id: Some(account_id),
+            ..AccountsStore::default()
+        };
+
+        assert!(sync_active_account_tokens(
+            &mut store,
+            &auth_with_refresh_at("workspace-a", "runtime", runtime_generation)
+        ));
+        assert_eq!(refresh_token(&store.accounts[0]), "refresh-runtime");
+        assert_eq!(store.accounts[0].last_refresh_at, Some(runtime_generation));
+    }
+
+    #[test]
+    fn unversioned_runtime_snapshot_does_not_replace_known_store_credentials() {
+        let stored_generation = Utc.timestamp_opt(1_800_000_000, 0).single().unwrap();
+        let mut account = account("A", "workspace-a", "stored");
+        let account_id = account.id.clone();
+        account.last_refresh_at = Some(stored_generation);
+        let mut store = AccountsStore {
+            accounts: vec![account],
+            active_account_id: Some(account_id),
+            ..AccountsStore::default()
+        };
+
+        assert!(!sync_active_account_tokens(
+            &mut store,
+            &auth("workspace-a", "runtime")
+        ));
+        assert_eq!(refresh_token(&store.accounts[0]), "refresh-stored");
     }
 }
