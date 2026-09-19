@@ -8,7 +8,14 @@ import { finishForceClose, type DesktopReopenPreference } from "./lib/desktopReo
 import type { CodexClosePreference } from "./lib/codexClosePreference";
 import { useForceCloseCodexProcesses } from "./hooks/useForceCloseCodexProcesses";
 import { AccountCard, AddAccountModal, UpdateChecker } from "./components";
-import type { AccountWithUsage, CodexProcessInfo, DockDisplayMode, UsageInfo } from "./types";
+import type {
+  AccountWithUsage,
+  CodexProcessInfo,
+  DockDisplayMode,
+  UsageInfo,
+  WarmupPolicy,
+  WarmupState,
+} from "./types";
 import {
   exportFullBackupFile,
   importFullBackupFile,
@@ -23,29 +30,13 @@ import {
   type ThemeMode,
 } from "./lib/theme";
 import {
-  AUTO_WARMUP_ACCOUNTS_STORAGE_KEY,
-  AUTO_WARMUP_ALL_CHANGED_EVENT,
-  AUTO_WARMUP_LEDGER_STORAGE_KEY,
-  TIMED_WARMUP_LEDGER_STORAGE_KEY,
   normalizeTimedWarmupTimes,
-  readAutoWarmupAllEnabled,
-  readTimedWarmupEnabled,
-  readTimedWarmupTimes,
-  writeAutoWarmupAllEnabled,
-  writeTimedWarmupEnabled,
-  writeTimedWarmupTimes,
 } from "./lib/autoWarmup";
 import {
-  getAutoWarmupWindowKey,
   getAutoWarmupWindowKind,
-  getDueAutoWarmupWindow,
-  type AutoWarmupWindow,
-  type AutoWarmupWindowKind,
 } from "./lib/autoWarmupPolicy";
 import "./App.css";
 
-const AUTO_WARMUP_CHECK_INTERVAL_MS = 30 * 1000;
-const AUTO_WARMUP_RETRY_BACKOFF_MS = 60 * 1000;
 const LIMIT_FULL_THRESHOLD = 99.5;
 const ACCOUNT_SEARCH_THRESHOLD = 8;
 const SWITCH_ACCOUNT_BLOCKED_EVENT = "switch-account-blocked";
@@ -57,79 +48,10 @@ interface SwitchAccountBlockedPayload {
 interface CloseBehaviorRequestedPayload {
   requestId?: number;
 }
-type AutoWarmupLedger = Record<
-  string,
-  {
-    lastSuccessfulWarmupAt?: number;
-    lastAutoWindowKey?: string;
-    lastAutoWindowKind?: AutoWarmupWindowKind;
-  }
->;
 const appWindow = getCurrentWindow();
 const isMacOs =
   typeof navigator !== "undefined" &&
   /(Mac|iPhone|iPod|iPad)/i.test(navigator.userAgent);
-
-function readStoredStringArray(key: string): string[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(key) ?? "[]");
-    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
-function readStoredAutoWarmupLedger(): AutoWarmupLedger {
-  if (typeof window === "undefined") return {};
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(AUTO_WARMUP_LEDGER_STORAGE_KEY) ?? "{}");
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-
-    const entries: Array<[string, AutoWarmupLedger[string]]> = [];
-    for (const [accountId, value] of Object.entries(parsed)) {
-      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
-
-      const entry: AutoWarmupLedger[string] = {};
-      if (
-        "lastSuccessfulWarmupAt" in value &&
-        typeof value.lastSuccessfulWarmupAt === "number"
-      ) {
-        entry.lastSuccessfulWarmupAt = value.lastSuccessfulWarmupAt;
-      }
-      if ("lastAutoWindowKey" in value && typeof value.lastAutoWindowKey === "string") {
-        entry.lastAutoWindowKey = value.lastAutoWindowKey;
-      }
-      if (
-        "lastAutoWindowKind" in value &&
-        (value.lastAutoWindowKind === "session" || value.lastAutoWindowKind === "weekly")
-      ) {
-        entry.lastAutoWindowKind = value.lastAutoWindowKind;
-      }
-
-      if (Object.keys(entry).length > 0) entries.push([accountId, entry]);
-    }
-    return Object.fromEntries(entries);
-  } catch {
-    return {};
-  }
-}
-
-function readStoredTimedWarmupLedger(): Record<string, string> {
-  if (typeof window === "undefined") return {};
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(TIMED_WARMUP_LEDGER_STORAGE_KEY) ?? "{}");
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    return Object.fromEntries(
-      Object.entries(parsed).filter(
-        (entry): entry is [string, string] =>
-          typeof entry[0] === "string" && typeof entry[1] === "string"
-      )
-    );
-  } catch {
-    return {};
-  }
-}
 
 function isLimitFull(usedPercent: number | null | undefined): boolean {
   return usedPercent !== null && usedPercent !== undefined && usedPercent >= LIMIT_FULL_THRESHOLD;
@@ -141,16 +63,6 @@ function getPreferredUsedPercent(usage: UsageInfo | undefined): number | null | 
 
 function getPreferredResetsAt(usage: UsageInfo | undefined): number | null | undefined {
   return usage?.primary_resets_at ?? usage?.secondary_resets_at;
-}
-
-function getTimedWarmupTargets(accounts: AccountWithUsage[]): AccountWithUsage[] {
-  return accounts.filter(
-    (account) =>
-      account.usage &&
-      !account.usageLoading &&
-      !account.usage.error &&
-      !isLimitFull(account.usage.secondary_used_percent)
-  );
 }
 
 function matchesAccountSearch(
@@ -213,25 +125,17 @@ function App() {
     message: string;
     isError: boolean;
   } | null>(null);
-  const [autoWarmupAllEnabled, setAutoWarmupAllEnabled] = useState(() => {
-    return readAutoWarmupAllEnabled();
-  });
+  const [autoWarmupAllEnabled, setAutoWarmupAllEnabled] = useState(false);
   const [autoWarmupAccountIds, setAutoWarmupAccountIds] = useState<Set<string>>(
-    () => new Set(readStoredStringArray(AUTO_WARMUP_ACCOUNTS_STORAGE_KEY))
+    () => new Set()
   );
-  const [autoWarmupLedger, setAutoWarmupLedger] =
-    useState<AutoWarmupLedger>(() => readStoredAutoWarmupLedger());
-  const [autoWarmupRunningIds, setAutoWarmupRunningIds] = useState<Set<string>>(
-    new Set()
-  );
-  const [timedWarmupEnabled, setTimedWarmupEnabled] = useState(() =>
-    readTimedWarmupEnabled()
-  );
-  const [timedWarmupTimes, setTimedWarmupTimes] = useState<string[]>(() =>
-    readTimedWarmupTimes()
-  );
+  const [, setAutoWarmupLedger] = useState<
+    WarmupState["ledger"]["accounts"]
+  >({});
+  const [autoWarmupRunningIds] = useState<Set<string>>(new Set());
+  const [timedWarmupEnabled, setTimedWarmupEnabled] = useState(false);
+  const [timedWarmupTimes, setTimedWarmupTimes] = useState<string[]>([]);
   const [isTimedWarmupOpen, setIsTimedWarmupOpen] = useState(false);
-  const [timedWarmupRunning, setTimedWarmupRunning] = useState(false);
   const [timedWarmupDraft, setTimedWarmupDraft] = useState("");
   const [maskedAccounts, setMaskedAccounts] = useState<Set<string>>(new Set());
   const [accountSearchQuery, setAccountSearchQuery] = useState("");
@@ -276,19 +180,6 @@ function App() {
   const [closeBehaviorPromptOpen, setCloseBehaviorPromptOpen] = useState(false);
   const [closeBehaviorDontAskAgain, setCloseBehaviorDontAskAgain] = useState(false);
   const [isCompletingCloseBehavior, setIsCompletingCloseBehavior] = useState(false);
-  const accountsRef = useRef(accounts);
-  const autoWarmupAccountIdsRef = useRef(autoWarmupAccountIds);
-  const autoWarmupLedgerRef = useRef(autoWarmupLedger);
-  const autoWarmupRunningIdsRef = useRef(autoWarmupRunningIds);
-  const autoWarmupRetryAfterRef = useRef<Record<string, number>>({});
-  const timedWarmupRunningRef = useRef(timedWarmupRunning);
-  // Tracks the last calendar date (YYYY-MM-DD) each scheduled time fired on,
-  // so each time triggers at most once per day.
-  const timedWarmupLastFireRef = useRef<Record<string, string>>(readStoredTimedWarmupLedger());
-
-  useEffect(() => {
-    accountsRef.current = accounts;
-  }, [accounts]);
 
   useEffect(() => {
     if (!isAccountSearchEnabled && accountSearchQuery) {
@@ -296,33 +187,6 @@ function App() {
     }
   }, [accountSearchQuery, isAccountSearchEnabled]);
 
-  useEffect(() => {
-    autoWarmupAccountIdsRef.current = autoWarmupAccountIds;
-  }, [autoWarmupAccountIds]);
-
-  useEffect(() => {
-    autoWarmupRunningIdsRef.current = autoWarmupRunningIds;
-  }, [autoWarmupRunningIds]);
-
-  useEffect(() => {
-    timedWarmupRunningRef.current = timedWarmupRunning;
-  }, [timedWarmupRunning]);
-
-  useEffect(() => {
-    try {
-      writeTimedWarmupEnabled(timedWarmupEnabled);
-    } catch {
-      // Ignore storage errors; timed warm-up still works for the current session.
-    }
-  }, [timedWarmupEnabled]);
-
-  useEffect(() => {
-    try {
-      writeTimedWarmupTimes(timedWarmupTimes);
-    } catch {
-      // Ignore storage errors; timed warm-up still works for the current session.
-    }
-  }, [timedWarmupTimes]);
 
   useEffect(() => {
     if (loading || error) return;
@@ -340,50 +204,46 @@ function App() {
       );
       return Object.keys(next).length === Object.keys(prev).length ? prev : next;
     });
-
-    for (const accountId of Object.keys(autoWarmupRetryAfterRef.current)) {
-      if (!validAccountIds.has(accountId)) {
-        delete autoWarmupRetryAfterRef.current[accountId];
-      }
-    }
   }, [accounts, error, loading]);
 
   useEffect(() => {
-    autoWarmupLedgerRef.current = autoWarmupLedger;
-    try {
-      window.localStorage.setItem(
-        AUTO_WARMUP_LEDGER_STORAGE_KEY,
-        JSON.stringify(autoWarmupLedger)
-      );
-    } catch {
-      // Ignore storage errors; auto warm-up still works for the current session.
-    }
-  }, [autoWarmupLedger]);
+    let disposed = false;
+    const loadWarmupState = async () => {
+      try {
+        const state = await invokeBackend<WarmupState>("get_warmup_state");
+        if (disposed) return;
+        setAutoWarmupAllEnabled(state.policy.auto_warmup_all_enabled);
+        setAutoWarmupAccountIds(new Set(state.policy.auto_warmup_account_ids));
+        setTimedWarmupEnabled(state.policy.timed_warmup_enabled);
+        setTimedWarmupTimes(state.policy.timed_warmup_times);
+        setAutoWarmupLedger(state.ledger.accounts);
+      } catch (err) {
+        console.error("Failed to load host warm-up state:", err);
+      }
+    };
 
-  useEffect(() => {
-    try {
-      writeAutoWarmupAllEnabled(autoWarmupAllEnabled);
-    } catch {
-      // Ignore storage errors; auto warm-up still works for the current session.
-    }
+    void loadWarmupState();
+    const interval = window.setInterval(() => void loadWarmupState(), 30_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, []);
 
-    if (isTauriRuntime()) {
-      void import("@tauri-apps/api/event")
-        .then(({ emit }) => emit(AUTO_WARMUP_ALL_CHANGED_EVENT, autoWarmupAllEnabled))
-        .catch((err) => console.error("Failed to sync tray auto warm-up:", err));
-    }
-  }, [autoWarmupAllEnabled]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(
-        AUTO_WARMUP_ACCOUNTS_STORAGE_KEY,
-        JSON.stringify(Array.from(autoWarmupAccountIds))
-      );
-    } catch {
-      // Ignore storage errors; auto warm-up still works for the current session.
-    }
-  }, [autoWarmupAccountIds]);
+  const persistWarmupPolicy = useCallback((overrides: Partial<WarmupPolicy>) => {
+    return invokeBackend("set_warmup_policy", {
+      auto_warmup_all_enabled: autoWarmupAllEnabled,
+      auto_warmup_account_ids: Array.from(autoWarmupAccountIds),
+      timed_warmup_enabled: timedWarmupEnabled,
+      timed_warmup_times: timedWarmupTimes,
+      ...overrides,
+    }).catch((err) => console.error("Failed to persist host warm-up policy:", err));
+  }, [
+    autoWarmupAccountIds,
+    autoWarmupAllEnabled,
+    timedWarmupEnabled,
+    timedWarmupTimes,
+  ]);
 
   const handleTitlebarDrag = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
@@ -623,24 +483,10 @@ function App() {
     }
   }, []);
 
-  const markSuccessfulWarmup = useCallback(
-    (accountId: string, timestamp = Date.now(), window?: AutoWarmupWindow) => {
-      delete autoWarmupRetryAfterRef.current[accountId];
-      setAutoWarmupLedger((prev) => ({
-        ...prev,
-        [accountId]: {
-          lastSuccessfulWarmupAt: timestamp,
-          ...(window
-            ? {
-                lastAutoWindowKey: getAutoWarmupWindowKey(window),
-                lastAutoWindowKind: window.kind,
-              }
-            : {}),
-        },
-      }));
-    },
-    []
-  );
+  const refreshWarmupProjection = useCallback(async () => {
+    const state = await invokeBackend<WarmupState>("get_warmup_state");
+    setAutoWarmupLedger(state.ledger.accounts);
+  }, []);
 
   const {
     forceCloseConfirmOpen,
@@ -674,7 +520,6 @@ function App() {
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
-    let unlistenAutoWarmup: (() => void) | undefined;
     let unlistenCloseBehavior: (() => void) | undefined;
 
     void (async () => {
@@ -714,14 +559,6 @@ function App() {
           );
         }
       );
-      unlistenAutoWarmup = await listen<boolean>(
-        AUTO_WARMUP_ALL_CHANGED_EVENT,
-        ({ payload }) => {
-          if (typeof payload === "boolean") {
-            setAutoWarmupAllEnabled(payload);
-          }
-        }
-      );
       unlistenCloseBehavior = await listen<CloseBehaviorRequestedPayload>(
         CLOSE_BEHAVIOR_REQUESTED_EVENT,
         ({ payload }) => {
@@ -737,7 +574,6 @@ function App() {
 
     return () => {
       unlisten?.();
-      unlistenAutoWarmup?.();
       unlistenCloseBehavior?.();
     };
   }, [checkProcesses, formatWarmupError, setForceCloseConfirmOpen, showWarmupToast, switchAccount]);
@@ -816,7 +652,11 @@ function App() {
     try {
       setWarmingUpId(accountId);
       await warmupAccount(accountId);
-      markSuccessfulWarmup(accountId);
+      try {
+        await refreshWarmupProjection();
+      } catch (err) {
+        console.error("Failed to refresh warm-up projection:", err);
+      }
       showWarmupToast(`Warm-up sent for ${accountName}`);
     } catch (err) {
       console.error("Failed to warm up account:", err);
@@ -838,13 +678,11 @@ function App() {
         return;
       }
 
-      const warmedAt = Date.now();
-      const failedAccountIds = new Set(summary.failed_account_ids);
-      accounts.forEach((account) => {
-        if (!failedAccountIds.has(account.id)) {
-          markSuccessfulWarmup(account.id, warmedAt);
-        }
-      });
+      try {
+        await refreshWarmupProjection();
+      } catch (err) {
+        console.error("Failed to refresh warm-up projection:", err);
+      }
 
       if (summary.failed_account_ids.length === 0) {
         showWarmupToast(
@@ -867,23 +705,15 @@ function App() {
   };
 
   const toggleAutoWarmupAccount = (accountId: string) => {
-    setAutoWarmupAccountIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(accountId)) {
-        next.delete(accountId);
-      } else {
-        next.add(accountId);
-      }
-      return next;
-    });
+    const next = new Set(autoWarmupAccountIds);
+    if (next.has(accountId)) {
+      next.delete(accountId);
+    } else {
+      next.add(accountId);
+    }
+    setAutoWarmupAccountIds(next);
+    void persistWarmupPolicy({ auto_warmup_account_ids: Array.from(next) });
   };
-
-  const getDueAutoWarmupForAccount = useCallback(
-    (accountId: string, usage: UsageInfo | undefined) => {
-      return getDueAutoWarmupWindow(usage, autoWarmupLedgerRef.current[accountId]);
-    },
-    []
-  );
 
   const formatWindowDuration = (minutes: number | null | undefined): string => {
     if (!minutes || minutes <= 0) return "";
@@ -927,195 +757,25 @@ function App() {
       : "Auto: off";
   }, [autoWarmupAccountIds.size, autoWarmupAllEnabled, autoWarmupRunningIds]);
 
-  const timedWarmupTargetsReady = useMemo(
-    () =>
-      accounts.length > 0 &&
-      accounts.every((account) => account.usage && !account.usageLoading),
-    [accounts]
-  );
-
-  const timedWarmupTargetCount = useMemo(
-    () => getTimedWarmupTargets(accounts).length,
-    [accounts]
-  );
-
-  const backOffAutoWarmupRetry = useCallback((accountId: string) => {
-    autoWarmupRetryAfterRef.current[accountId] =
-      Date.now() + AUTO_WARMUP_RETRY_BACKOFF_MS;
-  }, []);
-
-  const runAutoWarmupForAccount = useCallback(
-    async (accountId: string, accountName: string) => {
-      setAutoWarmupRunningIds((prev) => new Set(prev).add(accountId));
-
-      try {
-        let freshUsage: UsageInfo;
-        try {
-          freshUsage = await refreshSingleUsage(accountId);
-        } catch (err) {
-          console.error("Auto warm-up usage refresh failed:", err);
-          backOffAutoWarmupRetry(accountId);
-          return;
-        }
-
-        const window = getDueAutoWarmupForAccount(accountId, freshUsage);
-        if (!window) return;
-
-        await warmupAccount(accountId);
-        markSuccessfulWarmup(accountId, Date.now(), window);
-        const modeLabel = window.kind === "session" ? "5h" : "weekly";
-        showWarmupToast(`Auto ${modeLabel} warm-up sent for ${accountName}`);
-      } catch (err) {
-        console.error("Auto warm-up failed:", err);
-        backOffAutoWarmupRetry(accountId);
-        showWarmupToast(
-          `Auto warm-up failed for ${accountName}: ${formatWarmupError(err)}`,
-          true
-        );
-      } finally {
-        setAutoWarmupRunningIds((prev) => {
-          const next = new Set(prev);
-          next.delete(accountId);
-          return next;
-        });
-      }
-    },
-    [
-      backOffAutoWarmupRetry,
-      formatWarmupError,
-      getDueAutoWarmupForAccount,
-      markSuccessfulWarmup,
-      refreshSingleUsage,
-      showWarmupToast,
-      warmupAccount,
-    ]
-  );
-
-  useEffect(() => {
-    if (!autoWarmupAllEnabled && autoWarmupAccountIds.size === 0) return;
-
-    const checkAutoWarmup = () => {
-      for (const account of accountsRef.current) {
-        const autoEnabled =
-          autoWarmupAllEnabled || autoWarmupAccountIdsRef.current.has(account.id);
-        if (!autoEnabled || autoWarmupRunningIdsRef.current.has(account.id)) continue;
-
-        const retryAfter = autoWarmupRetryAfterRef.current[account.id];
-        if (retryAfter && Date.now() < retryAfter) continue;
-
-        if (!getDueAutoWarmupForAccount(account.id, account.usage)) continue;
-
-        void runAutoWarmupForAccount(account.id, account.name);
-      }
-    };
-
-    checkAutoWarmup();
-    const interval = window.setInterval(
-      checkAutoWarmup,
-      AUTO_WARMUP_CHECK_INTERVAL_MS
-    );
-
-    return () => window.clearInterval(interval);
-  }, [
-    autoWarmupAccountIds.size,
-    autoWarmupAllEnabled,
-    getDueAutoWarmupForAccount,
-    runAutoWarmupForAccount,
-  ]);
-
-  const runTimedWarmup = useCallback(async () => {
-    const targets = getTimedWarmupTargets(accountsRef.current);
-    if (targets.length === 0) return;
-
-    setTimedWarmupRunning(true);
-    try {
-      const warmedAt = Date.now();
-      let warmed = 0;
-      let failed = 0;
-      for (const account of targets) {
-        try {
-          await warmupAccount(account.id);
-          markSuccessfulWarmup(account.id, warmedAt);
-          warmed += 1;
-        } catch (err) {
-          console.error("Timed warm-up failed:", err);
-          failed += 1;
-        }
-      }
-
-      if (failed === 0) {
-        showWarmupToast(
-          `Timed warm-up sent for ${warmed} account${warmed === 1 ? "" : "s"}`
-        );
-      } else {
-        showWarmupToast(`Timed warm-up: ${warmed} ok, ${failed} failed`, true);
-      }
-    } finally {
-      setTimedWarmupRunning(false);
-    }
-  }, [markSuccessfulWarmup, showWarmupToast, warmupAccount]);
-
-  useEffect(() => {
-    if (!timedWarmupEnabled || timedWarmupTimes.length === 0) return;
-
-    const checkTimedWarmup = () => {
-      if (timedWarmupRunningRef.current) return;
-
-      const now = new Date();
-      const todayKey = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
-      const currentTime = `${String(now.getHours()).padStart(2, "0")}:${String(
-        now.getMinutes()
-      ).padStart(2, "0")}`;
-
-      // Only fire during the scheduled minute itself; a missed time (e.g. while
-      // asleep) is skipped rather than warmed late at the wrong moment.
-      if (!timedWarmupTimes.includes(currentTime)) return;
-      if (timedWarmupLastFireRef.current[currentTime] === todayKey) return;
-      if (!timedWarmupTargetsReady || timedWarmupTargetCount === 0) return;
-
-      // Mark before running so a slow warm-up can't double-fire on the next tick.
-      timedWarmupLastFireRef.current[currentTime] = todayKey;
-      try {
-        window.localStorage.setItem(
-          TIMED_WARMUP_LEDGER_STORAGE_KEY,
-          JSON.stringify(timedWarmupLastFireRef.current)
-        );
-      } catch {
-        // Ignore storage errors; timed warm-up still works for the current session.
-      }
-      void runTimedWarmup();
-    };
-
-    checkTimedWarmup();
-    const interval = window.setInterval(
-      checkTimedWarmup,
-      AUTO_WARMUP_CHECK_INTERVAL_MS
-    );
-
-    return () => window.clearInterval(interval);
-  }, [
-    timedWarmupEnabled,
-    timedWarmupTimes,
-    timedWarmupTargetsReady,
-    timedWarmupTargetCount,
-    runTimedWarmup,
-  ]);
-
   const handleAddTimedWarmupTime = useCallback(() => {
     const normalized = normalizeTimedWarmupTimes([timedWarmupDraft]);
     if (normalized.length === 0) return;
-    setTimedWarmupTimes((prev) =>
-      normalizeTimedWarmupTimes([...prev, normalized[0]])
-    );
+    const next = normalizeTimedWarmupTimes([...timedWarmupTimes, normalized[0]]);
+    setTimedWarmupTimes(next);
+    void persistWarmupPolicy({ timed_warmup_times: next });
     setTimedWarmupDraft("");
-  }, [timedWarmupDraft]);
+  }, [persistWarmupPolicy, timedWarmupDraft, timedWarmupTimes]);
 
-  const handleRemoveTimedWarmupTime = useCallback((time: string) => {
-    setTimedWarmupTimes((prev) => prev.filter((entry) => entry !== time));
-  }, []);
+  const handleRemoveTimedWarmupTime = useCallback(
+    (time: string) => {
+      const next = timedWarmupTimes.filter((entry) => entry !== time);
+      setTimedWarmupTimes(next);
+      void persistWarmupPolicy({ timed_warmup_times: next });
+    },
+    [persistWarmupPolicy, timedWarmupTimes]
+  );
 
   const timedWarmupLabel = useMemo(() => {
-    if (timedWarmupRunning) return "Timed warming...";
     if (!timedWarmupEnabled || timedWarmupTimes.length === 0) return "Timed: off";
 
     const now = new Date();
@@ -1125,7 +785,7 @@ function App() {
       return hours * 60 + minutes > nowMinutes;
     });
     return `Timed: ${upcoming ?? timedWarmupTimes[0]}`;
-  }, [timedWarmupEnabled, timedWarmupRunning, timedWarmupTimes]);
+  }, [timedWarmupEnabled, timedWarmupTimes]);
 
   const handleExportSlimText = async () => {
     setConfigModalMode("slim_export");
@@ -1552,7 +1212,9 @@ function App() {
                     <button
                       onClick={() => {
                         setIsNavMenuOpen(false);
-                        setAutoWarmupAllEnabled((prev) => !prev);
+                        const next = !autoWarmupAllEnabled;
+                        setAutoWarmupAllEnabled(next);
+                        void persistWarmupPolicy({ auto_warmup_all_enabled: next });
                       }}
                       disabled={accounts.length === 0}
                       className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 disabled:opacity-50 dark:text-white dark:hover:bg-neutral-900"
@@ -1607,7 +1269,11 @@ function App() {
                       <input
                         type="checkbox"
                         checked={timedWarmupEnabled}
-                        onChange={(e) => setTimedWarmupEnabled(e.target.checked)}
+                        onChange={(e) => {
+                          const next = e.target.checked;
+                          setTimedWarmupEnabled(next);
+                          void persistWarmupPolicy({ timed_warmup_enabled: next });
+                        }}
                         className="h-4 w-4 accent-emerald-600"
                       />
                     </label>

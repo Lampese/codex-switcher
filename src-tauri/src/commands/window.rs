@@ -8,8 +8,8 @@ use std::{
 use tauri::{AppHandle, Manager, Runtime};
 
 use crate::{
-    auth::{load_app_settings, save_app_settings},
-    types::{DockDisplayMode, TrayDisplayMode, UsageInfo},
+    auth::load_app_settings,
+    types::{DockDisplayMode, TrayDisplayMode, UsageInfo, WarmupPolicy, WarmupState},
 };
 
 /// Label of the borderless tray popup window.
@@ -119,6 +119,23 @@ pub fn get_display_settings() -> Result<DisplaySettings, String> {
 }
 
 #[tauri::command]
+pub fn get_warmup_policy() -> Result<WarmupPolicy, String> {
+    Ok(load_app_settings()
+        .map_err(|error| error.to_string())?
+        .warmup_policy)
+}
+
+#[tauri::command]
+pub fn get_warmup_state() -> Result<WarmupState, String> {
+    crate::warmup_scheduler::get_state().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn set_warmup_policy(policy: WarmupPolicy) -> Result<(), String> {
+    crate::warmup_scheduler::set_policy(policy).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn set_tray_display_mode(app: AppHandle, mode: TrayDisplayMode) -> Result<(), String> {
     #[cfg(desktop)]
     {
@@ -173,11 +190,14 @@ pub fn complete_close_behavior(
 ) -> Result<Option<DockDisplayMode>, String> {
     #[cfg(target_os = "macos")]
     {
-        let mut settings = crate::app_menu::set_dock_display_mode(&app, mode)
+        let settings = crate::app_menu::set_dock_display_mode(&app, mode)
             .map_err(|error| error.to_string())?;
         if dont_ask_again {
-            settings.close_behavior_prompt_enabled = false;
-            save_app_settings(&settings).map_err(|error| error.to_string())?;
+            mutate_app_settings(|settings| {
+                settings.close_behavior_prompt_enabled = false;
+                Ok(())
+            })
+            .map_err(|error| error.to_string())?;
         }
         hide_main_window(&app);
         Ok(Some(settings.dock_display_mode))
