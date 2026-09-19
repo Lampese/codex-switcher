@@ -205,13 +205,13 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
 
     let tray_settings = Submenu::with_items(
         app,
-        text(language, "Tray"),
+        text(language, NativeText::Tray),
         true,
         &[
             &CheckMenuItem::with_id(
                 app,
                 TRAY_ICON_AND_SESSION_ID,
-                text(language, "Icon + Session"),
+                text(language, NativeText::IconAndSession),
                 true,
                 settings.tray_display_mode == TrayDisplayMode::IconAndSession,
                 None::<&str>,
@@ -219,7 +219,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
             &CheckMenuItem::with_id(
                 app,
                 TRAY_ACTIVE_USAGE_TEXT_ID,
-                text(language, "Hourly + Weekly"),
+                text(language, NativeText::HourlyAndWeekly),
                 true,
                 settings.tray_display_mode == TrayDisplayMode::ActiveUsageText,
                 None::<&str>,
@@ -227,7 +227,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
             &CheckMenuItem::with_id(
                 app,
                 TRAY_HIDDEN_ID,
-                text(language, "Hidden"),
+                text(language, NativeText::Hidden),
                 true,
                 settings.tray_display_mode == TrayDisplayMode::Hidden,
                 None::<&str>,
@@ -238,13 +238,13 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
     #[cfg(target_os = "macos")]
     let dock_settings = Submenu::with_items(
         app,
-        text(language, "Dock Icon"),
+        text(language, NativeText::DockIcon),
         true,
         &[
             &CheckMenuItem::with_id(
                 app,
                 DOCK_SHOW_IN_DOCK_ID,
-                text(language, "Show in Dock"),
+                text(language, NativeText::ShowInDock),
                 true,
                 settings.dock_display_mode == DockDisplayMode::ShowInDock,
                 None::<&str>,
@@ -252,7 +252,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
             &CheckMenuItem::with_id(
                 app,
                 DOCK_MENU_BAR_ONLY_ID,
-                text(language, "Menu Bar Only"),
+                text(language, NativeText::MenuBarOnly),
                 true,
                 settings.dock_display_mode == DockDisplayMode::MenuBarOnly,
                 None::<&str>,
@@ -263,7 +263,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
     let desktop_reopen_settings = MenuItem::with_id(
         app,
         DESKTOP_REOPEN_SETTINGS_ID,
-        text(language, "Reopen Codex after force close..."),
+        text(language, NativeText::ReopenAfterForceClose),
         cfg!(any(target_os = "macos", windows)),
         None::<&str>,
     )?;
@@ -271,7 +271,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
     #[cfg(target_os = "macos")]
     let settings_menu = Submenu::with_items(
         app,
-        text(language, "Settings"),
+        text(language, NativeText::Settings),
         true,
         &[&tray_settings, &dock_settings, &desktop_reopen_settings],
     )?;
@@ -279,25 +279,25 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
     #[cfg(not(target_os = "macos"))]
     let settings_menu = Submenu::with_items(
         app,
-        text(language, "Settings"),
+        text(language, NativeText::Settings),
         true,
         &[&tray_settings, &desktop_reopen_settings],
     )?;
 
     let window_menu = Submenu::with_items(
         app,
-        text(language, "Window"),
+        text(language, NativeText::Window),
         true,
         &[
-            &PredefinedMenuItem::minimize(app, Some(&text(language, "Minimize")))?,
-            &PredefinedMenuItem::maximize(app, Some(&text(language, "Maximize")))?,
+            &PredefinedMenuItem::minimize(app, Some(&text(language, NativeText::Minimize)))?,
+            &PredefinedMenuItem::maximize(app, Some(&text(language, NativeText::Maximize)))?,
             #[cfg(target_os = "macos")]
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::close_window(app, Some(&text(language, "Close")))?,
+            &PredefinedMenuItem::close_window(app, Some(&text(language, NativeText::Close)))?,
         ],
     )?;
 
-    let help_menu = Submenu::with_items(app, text(language, "Help"), true, &[])?;
+    let help_menu = Submenu::with_items(app, text(language, NativeText::Help), true, &[])?;
 
     Menu::with_items(
         app,
@@ -310,18 +310,24 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
                 &[
                     &PredefinedMenuItem::about(
                         app,
-                        Some(&text(language, "About")),
+                        Some(&text(language, NativeText::About)),
                         Some(about_metadata),
                     )?,
                     &PredefinedMenuItem::separator(app)?,
                     &settings_menu,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::services(app, Some(&text(language, "Services")))?,
+                    &PredefinedMenuItem::services(
+                        app,
+                        Some(&text(language, NativeText::Services)),
+                    )?,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::hide(app, Some(&text(language, "Hide")))?,
-                    &PredefinedMenuItem::hide_others(app, Some(&text(language, "Hide Others")))?,
+                    &PredefinedMenuItem::hide(app, Some(&text(language, NativeText::Hide)))?,
+                    &PredefinedMenuItem::hide_others(
+                        app,
+                        Some(&text(language, NativeText::HideOthers)),
+                    )?,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::quit(app, Some(&text(language, "Quit")))?,
+                    &PredefinedMenuItem::quit(app, Some(&text(language, NativeText::Quit)))?,
                 ],
             )?,
             #[cfg(not(any(
@@ -333,36 +339,42 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
             )))]
             &Submenu::with_items(
                 app,
-                text(language, "File"),
+                text(language, NativeText::File),
                 true,
                 &[
-                    &PredefinedMenuItem::close_window(app, Some(&text(language, "Close")))?,
+                    &PredefinedMenuItem::close_window(
+                        app,
+                        Some(&text(language, NativeText::Close)),
+                    )?,
                     #[cfg(not(target_os = "macos"))]
-                    &PredefinedMenuItem::quit(app, Some(&text(language, "Quit")))?,
+                    &PredefinedMenuItem::quit(app, Some(&text(language, NativeText::Quit)))?,
                 ],
             )?,
             &Submenu::with_items(
                 app,
-                text(language, "Edit"),
+                text(language, NativeText::Edit),
                 true,
                 &[
-                    &PredefinedMenuItem::undo(app, Some(&text(language, "Undo")))?,
-                    &PredefinedMenuItem::redo(app, Some(&text(language, "Redo")))?,
+                    &PredefinedMenuItem::undo(app, Some(&text(language, NativeText::Undo)))?,
+                    &PredefinedMenuItem::redo(app, Some(&text(language, NativeText::Redo)))?,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::cut(app, Some(&text(language, "Cut")))?,
-                    &PredefinedMenuItem::copy(app, Some(&text(language, "Copy")))?,
-                    &PredefinedMenuItem::paste(app, Some(&text(language, "Paste")))?,
-                    &PredefinedMenuItem::select_all(app, Some(&text(language, "Select All")))?,
+                    &PredefinedMenuItem::cut(app, Some(&text(language, NativeText::Cut)))?,
+                    &PredefinedMenuItem::copy(app, Some(&text(language, NativeText::Copy)))?,
+                    &PredefinedMenuItem::paste(app, Some(&text(language, NativeText::Paste)))?,
+                    &PredefinedMenuItem::select_all(
+                        app,
+                        Some(&text(language, NativeText::SelectAll)),
+                    )?,
                 ],
             )?,
             #[cfg(target_os = "macos")]
             &Submenu::with_items(
                 app,
-                text(language, "View"),
+                text(language, NativeText::View),
                 true,
                 &[&PredefinedMenuItem::fullscreen(
                     app,
-                    Some(&text(language, "Fullscreen")),
+                    Some(&text(language, NativeText::Fullscreen)),
                 )?],
             )?,
             #[cfg(not(target_os = "macos"))]
@@ -373,46 +385,117 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
     )
 }
 
-pub(crate) fn text(language: &str, value: &str) -> String {
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+pub(crate) enum NativeText {
+    Tray,
+    IconAndSession,
+    HourlyAndWeekly,
+    Hidden,
+    DockIcon,
+    ShowInDock,
+    MenuBarOnly,
+    ReopenAfterForceClose,
+    Settings,
+    Window,
+    File,
+    Edit,
+    View,
+    Help,
+    About,
+    Services,
+    Hide,
+    HideOthers,
+    Undo,
+    Redo,
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+    Minimize,
+    Maximize,
+    Fullscreen,
+    Close,
+    NoAccounts,
+    OpenSwitcher,
+    CodexSwitcher,
+    Quit,
+}
+
+pub(crate) fn text(language: &str, key: NativeText) -> String {
+    let english = match key {
+        NativeText::Tray => "Tray",
+        NativeText::IconAndSession => "Icon + Session",
+        NativeText::HourlyAndWeekly => "Hourly + Weekly",
+        NativeText::Hidden => "Hidden",
+        NativeText::DockIcon => "Dock Icon",
+        NativeText::ShowInDock => "Show in Dock",
+        NativeText::MenuBarOnly => "Menu Bar Only",
+        NativeText::ReopenAfterForceClose => "Reopen Codex after force close...",
+        NativeText::Settings => "Settings",
+        NativeText::Window => "Window",
+        NativeText::File => "File",
+        NativeText::Edit => "Edit",
+        NativeText::View => "View",
+        NativeText::Help => "Help",
+        NativeText::About => "About",
+        NativeText::Services => "Services",
+        NativeText::Hide => "Hide",
+        NativeText::HideOthers => "Hide Others",
+        NativeText::Undo => "Undo",
+        NativeText::Redo => "Redo",
+        NativeText::Cut => "Cut",
+        NativeText::Copy => "Copy",
+        NativeText::Paste => "Paste",
+        NativeText::SelectAll => "Select All",
+        NativeText::Minimize => "Minimize",
+        NativeText::Maximize => "Maximize",
+        NativeText::Fullscreen => "Fullscreen",
+        NativeText::Close => "Close",
+        NativeText::NoAccounts => "No accounts configured",
+        NativeText::OpenSwitcher => "Open Codex Switcher",
+        NativeText::CodexSwitcher => "Codex Switcher",
+        NativeText::Quit => "Quit",
+    };
+
     if language.eq_ignore_ascii_case("zh-cn") {
-        match value {
-            "Tray" => "托盘",
-            "Icon + Session" => "图标 + 会话",
-            "Hourly + Weekly" => "每小时 + 每周",
-            "Hidden" => "隐藏",
-            "Dock Icon" => "Dock 图标",
-            "Show in Dock" => "在 Dock 中显示",
-            "Menu Bar Only" => "仅菜单栏",
-            "Reopen Codex after force close..." => "强制关闭后重新打开 Codex……",
-            "Settings" => "设置",
-            "Window" => "窗口",
-            "File" => "文件",
-            "Edit" => "编辑",
-            "View" => "视图",
-            "Help" => "帮助",
-            "About" => "关于",
-            "Services" => "服务",
-            "Hide" => "隐藏 Codex Switcher",
-            "Hide Others" => "隐藏其他应用",
-            "Undo" => "撤销",
-            "Redo" => "重做",
-            "Cut" => "剪切",
-            "Copy" => "复制",
-            "Paste" => "粘贴",
-            "Select All" => "全选",
-            "Minimize" => "最小化",
-            "Maximize" => "最大化",
-            "Fullscreen" => "全屏",
-            "Close" => "关闭",
-            "No accounts configured" => "未配置账号",
-            "Open Codex Switcher" => "打开 Codex Switcher",
-            "Codex Switcher" => "Codex Switcher",
-            "Quit" => "退出",
-            other => other,
+        match key {
+            NativeText::Tray => "托盘",
+            NativeText::IconAndSession => "图标 + 会话",
+            NativeText::HourlyAndWeekly => "每小时 + 每周",
+            NativeText::Hidden => "隐藏",
+            NativeText::DockIcon => "Dock 图标",
+            NativeText::ShowInDock => "在 Dock 中显示",
+            NativeText::MenuBarOnly => "仅菜单栏",
+            NativeText::ReopenAfterForceClose => "强制关闭后重新打开 Codex……",
+            NativeText::Settings => "设置",
+            NativeText::Window => "窗口",
+            NativeText::File => "文件",
+            NativeText::Edit => "编辑",
+            NativeText::View => "视图",
+            NativeText::Help => "帮助",
+            NativeText::About => "关于",
+            NativeText::Services => "服务",
+            NativeText::Hide => "隐藏 Codex Switcher",
+            NativeText::HideOthers => "隐藏其他应用",
+            NativeText::Undo => "撤销",
+            NativeText::Redo => "重做",
+            NativeText::Cut => "剪切",
+            NativeText::Copy => "复制",
+            NativeText::Paste => "粘贴",
+            NativeText::SelectAll => "全选",
+            NativeText::Minimize => "最小化",
+            NativeText::Maximize => "最大化",
+            NativeText::Fullscreen => "全屏",
+            NativeText::Close => "关闭",
+            NativeText::NoAccounts => "未配置账号",
+            NativeText::OpenSwitcher => "打开 Codex Switcher",
+            NativeText::CodexSwitcher => "Codex Switcher",
+            NativeText::Quit => "退出",
         }
         .to_string()
     } else {
-        value.to_string()
+        english.to_string()
     }
 }
 
@@ -450,14 +533,13 @@ mod tests {
 
 #[cfg(test)]
 mod text_tests {
-    use super::text;
+    use super::{text, NativeText};
 
     #[test]
     fn native_menu_text_has_english_fallback_and_simplified_chinese() {
-        assert_eq!(text("en-US", "Settings"), "Settings");
-        assert_eq!(text("zh-CN", "Settings"), "设置");
-        assert_eq!(text("zh-CN", "File"), "文件");
-        assert_eq!(text("zh-CN", "Quit"), "退出");
-        assert_eq!(text("zh-CN", "untranslated"), "untranslated");
+        assert_eq!(text("en-US", NativeText::Settings), "Settings");
+        assert_eq!(text("zh-CN", NativeText::Settings), "设置");
+        assert_eq!(text("zh-CN", NativeText::File), "文件");
+        assert_eq!(text("zh-CN", NativeText::Quit), "退出");
     }
 }

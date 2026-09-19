@@ -12,6 +12,7 @@ use tauri::{
     WindowEvent,
 };
 
+use crate::app_menu::NativeText;
 use crate::{
     api::usage::get_account_usage,
     auth::{get_account, get_accounts_file, load_accounts, load_app_settings},
@@ -68,7 +69,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 
     let builder = TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
-        .tooltip(crate::app_menu::text(language, "Codex Switcher"))
+        .tooltip(crate::app_menu::text(language, NativeText::CodexSwitcher))
         .menu(&menu)
         .on_menu_event(handle_menu_event);
 
@@ -240,7 +241,7 @@ fn create_tray_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let settings = load_app_settings().unwrap_or_default();
     let language = resolve_desktop_language(settings.ui_language_preference);
     let window = WebviewWindowBuilder::new(app, TRAY_WINDOW, WebviewUrl::App("tray.html".into()))
-        .title(crate::app_menu::text(&language, "Codex Switcher"))
+        .title(crate::app_menu::text(&language, NativeText::CodexSwitcher))
         .inner_size(TRAY_WIDTH, TRAY_HEIGHT)
         .resizable(false)
         .decorations(false)
@@ -329,7 +330,7 @@ fn build_menu<R: Runtime>(
         menu.append(
             &MenuItemBuilder::with_id(
                 "empty",
-                crate::app_menu::text(language, "No accounts configured"),
+                crate::app_menu::text(language, NativeText::NoAccounts),
             )
             .enabled(false)
             .build(app)?,
@@ -353,13 +354,16 @@ fn build_menu<R: Runtime>(
     menu.append(
         &MenuItemBuilder::with_id(
             OPEN_ITEM_ID,
-            crate::app_menu::text(language, "Open Codex Switcher"),
+            crate::app_menu::text(language, NativeText::OpenSwitcher),
         )
         .build(app)?,
     )?;
     menu.append(
-        &MenuItemBuilder::with_id(QUIT_ITEM_ID, crate::app_menu::text(language, "Quit"))
-            .build(app)?,
+        &MenuItemBuilder::with_id(
+            QUIT_ITEM_ID,
+            crate::app_menu::text(language, NativeText::Quit),
+        )
+        .build(app)?,
     )?;
     Ok(menu)
 }
@@ -371,7 +375,7 @@ fn append_dock_settings_menu<R: Runtime>(app: &AppHandle<R>, menu: &Menu<R>) -> 
         app,
         crate::app_menu::text(
             resolve_desktop_language(settings.ui_language_preference),
-            "Dock Icon",
+            NativeText::DockIcon,
         ),
         true,
         &[
@@ -379,7 +383,7 @@ fn append_dock_settings_menu<R: Runtime>(app: &AppHandle<R>, menu: &Menu<R>) -> 
                 crate::app_menu::DOCK_SHOW_IN_DOCK_ID,
                 crate::app_menu::text(
                     resolve_desktop_language(settings.ui_language_preference),
-                    "Show in Dock",
+                    NativeText::ShowInDock,
                 ),
             )
             .checked(settings.dock_display_mode == crate::app_menu::DockDisplayMode::ShowInDock)
@@ -388,7 +392,7 @@ fn append_dock_settings_menu<R: Runtime>(app: &AppHandle<R>, menu: &Menu<R>) -> 
                 crate::app_menu::DOCK_MENU_BAR_ONLY_ID,
                 crate::app_menu::text(
                     resolve_desktop_language(settings.ui_language_preference),
-                    "Menu Bar Only",
+                    NativeText::MenuBarOnly,
                 ),
             )
             .checked(settings.dock_display_mode == crate::app_menu::DockDisplayMode::MenuBarOnly)
