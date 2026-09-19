@@ -4,7 +4,6 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 
 use crate::auth::storage::{acquire_mutation_lock, write_file_atomic};
 use crate::types::{
@@ -67,7 +66,7 @@ fn create_auth_json(account: &StoredAccount) -> Result<AuthDotJson> {
                 refresh_token: refresh_token.clone(),
                 account_id: account_id.clone(),
             }),
-            last_refresh: Some(Utc::now()),
+            last_refresh: account.last_refresh_at,
         }),
     }
 }
@@ -89,6 +88,7 @@ pub fn import_from_auth_json_contents(
     let auth: AuthDotJson =
         serde_json::from_str(&content).context("Failed to parse auth.json contents")?;
     let account_name = account_name.trim().to_string();
+    let last_refresh = auth.last_refresh;
 
     // Determine auth mode and create account
     if let Some(api_key) = auth.openai_api_key {
@@ -96,7 +96,7 @@ pub fn import_from_auth_json_contents(
     } else if let Some(tokens) = auth.tokens {
         let claims = parse_chatgpt_id_token_claims(&tokens.id_token);
 
-        Ok(StoredAccount::new_chatgpt(
+        Ok(StoredAccount::new_chatgpt_with_refresh_at(
             account_name,
             claims.email,
             claims.plan_type,
@@ -105,6 +105,7 @@ pub fn import_from_auth_json_contents(
             tokens.access_token,
             tokens.refresh_token,
             claims.account_id.or(tokens.account_id),
+            last_refresh,
         ))
     } else {
         anyhow::bail!("auth.json contains neither API key nor tokens");
@@ -143,6 +144,14 @@ mod tests {
     use serde_json::json;
 
     fn auth_json(payload: serde_json::Value, account_id: &str) -> String {
+        auth_json_with_last_refresh(payload, account_id, None)
+    }
+
+    fn auth_json_with_last_refresh(
+        payload: serde_json::Value,
+        account_id: &str,
+        last_refresh: Option<&str>,
+    ) -> String {
         let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
         serde_json::json!({
             "tokens": {
@@ -150,7 +159,8 @@ mod tests {
                 "access_token": "access",
                 "refresh_token": "refresh",
                 "account_id": account_id
-            }
+            },
+            "last_refresh": last_refresh
         })
         .to_string()
     }
@@ -181,5 +191,27 @@ mod tests {
             import_from_auth_json_contents(&auth_json(json!({}), "acct-87654321"), "".into())
                 .unwrap();
         assert_eq!(account.name, "ChatGPT account (87654321)");
+    }
+
+    #[test]
+    fn import_preserves_runtime_refresh_timestamp() {
+        let account = import_from_auth_json_contents(
+            &auth_json_with_last_refresh(
+                serde_json::json!({"email": "imported@example.com"}),
+                "acct-import",
+                Some("2026-09-19T00:00:00Z"),
+            ),
+            "Imported Account".into(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            account.last_refresh_at,
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-09-19T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+            )
+        );
     }
 }

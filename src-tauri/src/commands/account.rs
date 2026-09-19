@@ -4,8 +4,7 @@ use crate::auth::storage::acquire_auth_operation_lock;
 use crate::auth::{
     add_account, create_chatgpt_account_from_refresh_token, ensure_chatgpt_tokens_fresh_locked,
     import_from_auth_json, import_from_auth_json_contents, load_accounts, mutate_accounts,
-    read_current_auth, reconcile_active_projection, remove_account, save_accounts,
-    switch_to_account,
+    read_current_auth, reconcile_active_projection, remove_account, switch_to_account,
 };
 use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
 
@@ -72,14 +71,13 @@ struct SlimAccountPayload {
 }
 
 fn load_reconciled_accounts() -> Result<AccountsStore, String> {
-    let mut store = load_accounts().map_err(|e| e.to_string())?;
     let auth = read_current_auth().map_err(|e| e.to_string())?;
 
-    if reconcile_active_projection(&mut store, auth.as_ref()) {
-        save_accounts(&store).map_err(|e| e.to_string())?;
-    }
-
-    Ok(store)
+    mutate_accounts(|store| {
+        reconcile_active_projection(store, auth.as_ref());
+        Ok(store.clone())
+    })
+    .map_err(|e| e.to_string())
 }
 
 /// List all accounts with their info
@@ -655,8 +653,7 @@ fn decode_full_encrypted_store(
 
 fn export_backup_key(passphrase: Option<&str>) -> Result<&str, String> {
     passphrase
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.is_empty() && !value.trim().is_empty())
         .ok_or_else(|| "A passphrase is required for full backup export".to_string())
 }
 
@@ -664,6 +661,10 @@ fn import_backup_key<'a>(
     file_bytes: &[u8],
     passphrase: Option<&'a str>,
 ) -> Result<&'a str, String> {
+    if file_bytes.len() < 5 || &file_bytes[..4] != FULL_FILE_MAGIC {
+        return Err("Encrypted file header is invalid".to_string());
+    }
+
     let version = file_bytes
         .get(4)
         .copied()
@@ -671,8 +672,7 @@ fn import_backup_key<'a>(
     match version {
         FULL_FILE_VERSION_V1 => Ok(FULL_PRESET_PASSPHRASE),
         FULL_FILE_VERSION_V2 => passphrase
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .filter(|value| !value.is_empty() && !value.trim().is_empty())
             .ok_or_else(|| "A passphrase is required for this backup".to_string()),
         _ => Err(format!("Unsupported encrypted file version: {version}")),
     }
@@ -825,10 +825,9 @@ mod full_backup_tests {
     #[test]
     fn v2_round_trip_rejects_wrong_or_corrupted_ciphertext() {
         let store = sample_store();
-        let first =
-            encode_full_encrypted_store(&store, "correct horse", FULL_FILE_VERSION_V2).unwrap();
-        let second =
-            encode_full_encrypted_store(&store, "correct horse", FULL_FILE_VERSION_V2).unwrap();
+        let passphrase = "  correct horse  ";
+        let first = encode_full_encrypted_store(&store, passphrase, FULL_FILE_VERSION_V2).unwrap();
+        let second = encode_full_encrypted_store(&store, passphrase, FULL_FILE_VERSION_V2).unwrap();
 
         assert_eq!(first[4], FULL_FILE_VERSION_V2);
         assert_ne!(&first[5..5 + FULL_SALT_LEN], &second[5..5 + FULL_SALT_LEN]);
@@ -837,8 +836,10 @@ mod full_backup_tests {
             &second[5 + FULL_SALT_LEN..5 + FULL_SALT_LEN + FULL_NONCE_LEN]
         );
 
-        let passphrase = import_backup_key(&first, Some("correct horse")).unwrap();
-        let decoded = decode_full_encrypted_store(&first, passphrase).unwrap();
+        let decoded_passphrase = import_backup_key(&first, Some(passphrase)).unwrap();
+        assert_eq!(decoded_passphrase, passphrase);
+        assert_eq!(export_backup_key(Some(passphrase)).unwrap(), passphrase);
+        let decoded = decode_full_encrypted_store(&first, decoded_passphrase).unwrap();
         assert_eq!(
             serde_json::to_value(&decoded).unwrap(),
             serde_json::to_value(&store).unwrap()
@@ -849,7 +850,12 @@ mod full_backup_tests {
 
         let mut corrupted = first.clone();
         *corrupted.last_mut().unwrap() ^= 1;
-        assert!(decode_full_encrypted_store(&corrupted, "correct horse").is_err());
+        assert!(decode_full_encrypted_store(&corrupted, passphrase).is_err());
+
+        assert_eq!(
+            import_backup_key(b"bad", Some(passphrase)).unwrap_err(),
+            "Encrypted file header is invalid"
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@ import zhCN from "../src/locales/zh-CN.json" with { type: "json" };
 import {
   resolveInitialLanguage,
   resolveBrowserLanguagePreference,
+  resolveBrowserPresentationLanguage,
   resolvePreferredLanguage,
   resolveSupportedLocale,
   translate,
@@ -17,6 +18,8 @@ test("i18n resolves only supported English and Simplified Chinese locales", () =
   assert.equal(resolveSupportedLocale("zh-Hans"), "zh-CN");
   assert.equal(resolveSupportedLocale("zh-Hans-CN"), "zh-CN");
   assert.equal(resolveSupportedLocale("zh-SG"), "zh-CN");
+  assert.equal(resolveSupportedLocale("zh-CN-u-nu-hanidec"), "zh-CN");
+  assert.equal(resolveSupportedLocale("zh-SG-x-foo"), "zh-CN");
   assert.equal(resolveSupportedLocale("zh-MO"), null);
   assert.equal(resolveSupportedLocale("zh"), null);
   assert.equal(resolveSupportedLocale("en"), "en-US");
@@ -25,6 +28,7 @@ test("i18n resolves only supported English and Simplified Chinese locales", () =
   assert.equal(resolveSupportedLocale("zh-TW"), null);
   assert.equal(resolveSupportedLocale("zh-HK"), null);
   assert.equal(resolveSupportedLocale("zh-Hant"), null);
+  assert.equal(resolveSupportedLocale("zh-Hant-TW"), null);
   assert.equal(resolveSupportedLocale("fr-FR"), null);
   assert.equal(resolveSupportedLocale(undefined), null);
 
@@ -78,5 +82,20 @@ test("i18n falls back safely and interpolates dynamic values", () => {
   assert.equal(
     translateMessage("app.switch.failed.error", { error: "raw-provider-error/account@example.com" }, "zh-CN"),
     "切换失败：raw-provider-error/account@example.com"
+  );
+});
+
+test("browser prompts follow the current UI projection before environment defaults", () => {
+  assert.equal(
+    resolveBrowserPresentationLanguage("en-US", ["zh-CN", "en-US"]),
+    "en-US"
+  );
+  assert.equal(
+    resolveBrowserPresentationLanguage("zh-CN", ["en-US", "fr-FR"]),
+    "zh-CN"
+  );
+  assert.equal(
+    resolveBrowserPresentationLanguage(undefined, ["fr-FR", "zh-CN"]),
+    "zh-CN"
   );
 });
