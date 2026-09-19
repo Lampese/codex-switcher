@@ -860,21 +860,6 @@ async fn handle_account_switch_for_session(
         anyhow::bail!("No eligible fallback account found with available limits");
     };
 
-    // Terminate the failed session gracefully if still running
-    if session.pid > 0 {
-        #[cfg(unix)]
-        {
-            let _ = Command::new("kill").arg("-TERM").arg(session.pid.to_string()).status();
-        }
-        #[cfg(windows)]
-        {
-            let _ = Command::new("taskkill").args(["/PID", &session.pid.to_string()]).status();
-        }
-
-        // Give process time to release locks
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-    }
-
     // Switch account credentials in auth.json
     switch_to_account(&target)?;
     let mut updated_store = store;
@@ -884,19 +869,28 @@ async fn handle_account_switch_for_session(
         let _ = fs::write(&accounts_path, content);
     }
 
-    // Relaunch the session in terminal
     let phrase = if settings.continue_phrase.trim().is_empty() {
         "continue"
     } else {
         &settings.continue_phrase
     };
 
-    launch_session_in_terminal(
-        &session.session_id,
-        session.cwd.as_deref(),
-        phrase,
-        settings.preferred_terminal.as_deref(),
-    )?;
+    // Try in-place recovery first: push continue via queue so active session picks up new auth.json
+    let queue_succeeded = if session.pid > 0 {
+        send_codex_queue_resume(&session.session_id, phrase).await.is_ok()
+    } else {
+        false
+    };
+
+    if !queue_succeeded {
+        // Fallback: if process is dead or queue failed, launch session in terminal
+        let _ = launch_session_in_terminal(
+            &session.session_id,
+            session.cwd.as_deref(),
+            phrase,
+            settings.preferred_terminal.as_deref(),
+        );
+    }
 
     // Mark handled
     if let Ok(mut tracker) = TRACKER.lock() {
