@@ -50,6 +50,10 @@ pub fn sync_active_account_tokens(store: &mut AccountsStore, auth: &AuthDotJson)
     if stored_account_id != current_account_id {
         return false;
     }
+    if runtime_snapshot_is_older_than_stored_credentials(account.last_refresh_at, auth.last_refresh)
+    {
+        return false;
+    }
 
     let changed = *id_token != tokens.id_token
         || *access_token != tokens.access_token
@@ -66,6 +70,19 @@ pub fn sync_active_account_tokens(store: &mut AccountsStore, auth: &AuthDotJson)
     *account_id = Some(current_account_id);
     account.last_refresh_at = auth.last_refresh;
     true
+}
+
+fn runtime_snapshot_is_older_than_stored_credentials(
+    stored_last_refresh: Option<DateTime<Utc>>,
+    runtime_last_refresh: Option<DateTime<Utc>>,
+) -> bool {
+    match (stored_last_refresh, runtime_last_refresh) {
+        (Some(stored), Some(runtime)) => runtime < stored,
+        // A runtime snapshot without a generation cannot replace credentials
+        // that were already persisted by a known refresh or credential update.
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
 }
 
 pub fn reconcile_active_projection(store: &mut AccountsStore, auth: Option<&AuthDotJson>) -> bool {
