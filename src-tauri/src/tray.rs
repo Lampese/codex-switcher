@@ -15,7 +15,7 @@ use tauri::{
 use crate::app_menu::NativeText;
 use crate::{
     api::usage::get_account_usage,
-    auth::{get_account, get_accounts_file, load_accounts, load_app_settings},
+    auth::{get_account, get_accounts_file, load_accounts, load_app_settings_or_fallback},
     commands::{
         is_codex_running_switch_block, restore_main_window, switch_account_by_id,
         window::TRAY_WINDOW,
@@ -51,7 +51,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     #[cfg(not(target_os = "linux"))]
     create_tray_window(app)?;
 
-    let settings = load_app_settings().unwrap_or_default();
+    let settings = load_app_settings_or_fallback();
     let language = resolve_desktop_language(settings.ui_language_preference);
     let menu = build_menu(app, &load_accounts().unwrap_or_default(), language)?;
 
@@ -238,7 +238,7 @@ fn create_tray_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         return Ok(());
     }
 
-    let settings = load_app_settings().unwrap_or_default();
+    let settings = load_app_settings_or_fallback();
     let language = resolve_desktop_language(settings.ui_language_preference);
     let window = WebviewWindowBuilder::new(app, TRAY_WINDOW, WebviewUrl::App("tray.html".into()))
         .title(crate::app_menu::text(&language, NativeText::CodexSwitcher))
@@ -370,7 +370,7 @@ fn build_menu<R: Runtime>(
 
 #[cfg(target_os = "macos")]
 fn append_dock_settings_menu<R: Runtime>(app: &AppHandle<R>, menu: &Menu<R>) -> tauri::Result<()> {
-    let settings = load_app_settings().unwrap_or_default();
+    let settings = load_app_settings_or_fallback();
     let dock_settings = Submenu::with_items(
         app,
         crate::app_menu::text(
@@ -466,7 +466,7 @@ fn refresh_menu_on_main_thread<R: Runtime>(app: &AppHandle<R>) {
     match load_accounts()
         .map_err(|error| error.to_string())
         .and_then(|store| {
-            let settings = load_app_settings().unwrap_or_default();
+            let settings = load_app_settings_or_fallback();
             let title = active_tray_title(
                 store.active_account_id.as_deref(),
                 settings.tray_display_mode,

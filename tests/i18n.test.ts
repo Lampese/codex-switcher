@@ -4,8 +4,9 @@ import enUS from "../src/locales/en-US.json" with { type: "json" };
 import zhCN from "../src/locales/zh-CN.json" with { type: "json" };
 import {
   resolveInitialLanguage,
+  resolveBrowserAuthority,
   resolveBrowserLanguagePreference,
-  resolveBrowserPresentationLanguage,
+  resolveCurrentBrowserLanguage,
   resolvePreferredLanguage,
   resolveSupportedLocale,
   translate,
@@ -85,17 +86,49 @@ test("i18n falls back safely and interpolates dynamic values", () => {
   );
 });
 
-test("browser prompts follow the current UI projection before environment defaults", () => {
+test("browser authority wins over stale DOM projection and environment defaults", () => {
   assert.equal(
-    resolveBrowserPresentationLanguage("en-US", ["zh-CN", "en-US"]),
-    "en-US"
+    resolveBrowserAuthority("zh-CN", ["en-US"]),
+    "zh-CN",
   );
   assert.equal(
-    resolveBrowserPresentationLanguage("zh-CN", ["en-US", "fr-FR"]),
+    resolveBrowserAuthority("en-US", ["zh-CN"]),
+    "en-US",
+  );
+  assert.equal(
+    resolveBrowserAuthority("browser", ["fr-FR", "zh-CN"]),
     "zh-CN"
   );
-  assert.equal(
-    resolveBrowserPresentationLanguage(undefined, ["fr-FR", "zh-CN"]),
-    "zh-CN"
-  );
+});
+
+test("browser prompt authority reads saved preference before DOM projection updates", () => {
+  const descriptors = ["window", "navigator", "document"].map((name) => [
+    name,
+    Object.getOwnPropertyDescriptor(globalThis, name),
+  ] as const);
+
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { localStorage: { getItem: () => "zh-CN" } },
+  });
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: { languages: ["en-US"], language: "en-US" },
+  });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: { documentElement: { lang: "en-US" } },
+  });
+
+  try {
+    assert.equal(resolveCurrentBrowserLanguage(), "zh-CN");
+  } finally {
+    for (const [name, descriptor] of descriptors) {
+      if (descriptor) {
+        Object.defineProperty(globalThis, name, descriptor);
+      } else {
+        delete (globalThis as Record<string, unknown>)[name];
+      }
+    }
+  }
 });

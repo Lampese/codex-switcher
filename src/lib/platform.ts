@@ -1,6 +1,6 @@
 import type { ImportAccountsSummary } from "../types";
 import { isPassphraseRequiredError, normalizeBackupPassphrase } from "./backupPassphrase";
-import { resolveBrowserPresentationLanguage, translate } from "./i18n";
+import { resolveCurrentBrowserLanguage, translate } from "./i18n";
 
 export type FileSource = string | File;
 
@@ -69,11 +69,7 @@ function getWebAuthSecret(): string | null {
 
 function promptForWebSecret(): string | null {
   if (typeof window === "undefined") return null;
-  const locales = navigator.languages?.length ? Array.from(navigator.languages) : [navigator.language];
-  const language = resolveBrowserPresentationLanguage(
-    typeof document === "undefined" ? undefined : document.documentElement.lang,
-    locales,
-  );
+  const language = resolveCurrentBrowserLanguage();
   const entered = window.prompt(translate("web.secret.prompt", language));
   const secret = entered?.trim() || null;
   webAuthSecret = secret;

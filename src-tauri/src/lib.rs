@@ -30,7 +30,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
-            auth::initialize_app_settings()?;
+            if let Err(error) = auth::initialize_app_settings() {
+                eprintln!(
+                    "Failed to initialize app settings; continuing with runtime defaults: {error}"
+                );
+            }
             #[cfg(desktop)]
             {
                 app.handle()
