@@ -40,17 +40,31 @@ const LanguageContext = createContext<LanguageContextValue | null>(null);
 export function resolveSupportedLocale(locale?: string): SupportedLanguage | null {
   if (!locale) return null;
   const normalized = locale.replace(/_/g, "-").toLowerCase();
+  const subtags = normalized.split("-");
 
-  if (
-    normalized === "zh-cn" ||
-    normalized === "zh-sg" ||
-    normalized === "zh-hans" ||
-    normalized.startsWith("zh-hans-")
-  ) {
-    return "zh-CN";
+  if (subtags[0] === "zh") {
+    const script = subtags.slice(1).find((subtag) => subtag.length === 4);
+    const region = subtags.slice(1).find(
+      (subtag) => /^[a-z]{2}$/.test(subtag) || /^\d{3}$/.test(subtag)
+    );
+
+    if (
+      script === "hant" ||
+      region === "tw" ||
+      region === "hk" ||
+      region === "mo"
+    ) {
+      return null;
+    }
+
+    if (script === "hans" || region === "cn" || region === "sg") {
+      return "zh-CN";
+    }
+
+    return null;
   }
 
-  if (normalized === "en" || normalized.startsWith("en-")) {
+  if (subtags[0] === "en") {
     return "en-US";
   }
 
@@ -95,6 +109,14 @@ export function resolveBrowserLanguagePreference(
   locales: readonly string[],
 ): SupportedLanguage {
   return preference === "browser" ? resolvePreferredLanguage(locales) : preference;
+}
+
+/** Resolve prompt copy from the current browser UI projection first. */
+export function resolveBrowserPresentationLanguage(
+  documentLocale: string | undefined,
+  locales: readonly string[],
+): SupportedLanguage {
+  return resolveSupportedLocale(documentLocale) ?? resolvePreferredLanguage(locales);
 }
 
 function resolveBrowserPreference(preference: BrowserLanguagePreference): SupportedLanguage {

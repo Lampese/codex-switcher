@@ -30,6 +30,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            auth::initialize_app_settings()?;
             #[cfg(desktop)]
             {
                 app.handle()

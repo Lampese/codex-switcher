@@ -427,6 +427,40 @@ fn defaults_for_missing_settings(accounts_file_exists: bool) -> AppSettings {
     settings
 }
 
+fn initialize_app_settings_at(settings_path: &Path, accounts_path: &Path) -> Result<AppSettings> {
+    if !settings_path.exists() {
+        let settings = defaults_for_missing_settings(accounts_path.exists());
+        let content =
+            serde_json::to_vec_pretty(&settings).context("Failed to serialize settings")?;
+        write_file_atomic(settings_path, &content)?;
+        return Ok(settings);
+    }
+
+    let content = fs::read_to_string(settings_path)
+        .with_context(|| format!("Failed to read settings file: {}", settings_path.display()))?;
+    let raw: serde_json::Value =
+        serde_json::from_str(&content).context("Failed to parse settings JSON")?;
+    let had_language_preference =
+        raw.get("ui_language_preference").is_some() || raw.get("language").is_some();
+    let settings = parse_existing_app_settings(&content)?;
+
+    if !had_language_preference {
+        let content =
+            serde_json::to_vec_pretty(&settings).context("Failed to serialize settings")?;
+        write_file_atomic(settings_path, &content)?;
+    }
+
+    Ok(settings)
+}
+
+/// Initialize and durably migrate the settings marker before native surfaces
+/// or background schedulers read it. This keeps a new install's System
+/// preference stable after its first account is created.
+pub fn initialize_app_settings() -> Result<AppSettings> {
+    let _lock = acquire_mutation_lock("settings.lock")?;
+    initialize_app_settings_at(&get_settings_file()?, &get_accounts_file()?)
+}
+
 pub fn load_app_settings() -> Result<AppSettings> {
     let path = get_settings_file()?;
 
@@ -724,12 +758,13 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
 mod tests {
     use super::{
         acquire_mutation_lock_at, add_account_to_store, reconcile_active_projection,
-        defaults_for_missing_settings, parse_existing_app_settings, sync_active_account_tokens,
-        update_account_chatgpt_tokens_in_store, write_file_atomic,
+        defaults_for_missing_settings, initialize_app_settings_at, parse_existing_app_settings,
+        sync_active_account_tokens, update_account_chatgpt_tokens_in_store, write_file_atomic,
         write_file_atomic_with_pre_replace,
     };
     use crate::types::{
-        AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData, UiLanguagePreference,
+        AccountsStore, AppSettings, AuthData, AuthDotJson, StoredAccount, TokenData,
+        UiLanguagePreference,
     };
     use base64::Engine;
     use chrono::{Duration, TimeZone, Utc};
@@ -840,6 +875,66 @@ mod tests {
             .iter()
             .any(|account| account.id == profile_id));
         assert_eq!(store.active_account_id, None);
+    }
+
+    #[test]
+    fn new_install_language_marker_survives_first_account_creation() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-switcher-settings-initialization-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let settings_path = dir.join("settings.json");
+        let accounts_path = dir.join("accounts.json");
+
+        let settings = initialize_app_settings_at(&settings_path, &accounts_path).unwrap();
+        assert_eq!(
+            settings.ui_language_preference,
+            UiLanguagePreference::System
+        );
+
+        let mut store = AccountsStore::default();
+        let profile = account("A", "workspace-a", "a1");
+        add_account_to_store(&mut store, profile).unwrap();
+        write_file_atomic(&accounts_path, &serde_json::to_vec(&store).unwrap()).unwrap();
+
+        let persisted: AppSettings =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(
+            persisted.ui_language_preference,
+            UiLanguagePreference::System
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn existing_settings_without_language_are_migrated_durably() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-switcher-settings-migration-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let settings_path = dir.join("settings.json");
+        let accounts_path = dir.join("accounts.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &settings_path,
+            br#"{"tray_display_mode":"active_usage_text"}"#,
+        )
+        .unwrap();
+
+        let settings = initialize_app_settings_at(&settings_path, &accounts_path).unwrap();
+        assert_eq!(
+            settings.ui_language_preference,
+            UiLanguagePreference::English
+        );
+        let persisted: AppSettings =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(
+            persisted.ui_language_preference,
+            UiLanguagePreference::English
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1037,6 +1132,23 @@ mod tests {
             panic!("expected ChatGPT account");
         };
         assert_eq!(refresh_token, "refresh-a2");
+    }
+
+    #[test]
+    fn runtime_refresh_timestamp_is_projected_with_live_tokens() {
+        let account = account("A", "workspace-a", "a1");
+        let account_id = account.id.clone();
+        let mut store = AccountsStore {
+            accounts: vec![account],
+            active_account_id: Some(account_id),
+            ..AccountsStore::default()
+        };
+        let refresh_at = chrono::Utc::now();
+        let mut live = auth("workspace-a", "a2");
+        live.last_refresh = Some(refresh_at);
+
+        assert!(sync_active_account_tokens(&mut store, &live));
+        assert_eq!(store.accounts[0].last_refresh_at, Some(refresh_at));
     }
 
     #[test]

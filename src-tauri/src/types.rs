@@ -119,10 +119,27 @@ pub fn is_simplified_chinese_locale(locale: Option<&str>) -> bool {
         return false;
     };
     let normalized = locale.replace('_', "-").to_ascii_lowercase();
-    normalized == "zh-cn"
-        || normalized == "zh-sg"
-        || normalized == "zh-hans"
-        || normalized.starts_with("zh-hans-")
+    let subtags: Vec<&str> = normalized.split('-').collect();
+    if subtags.first().copied() != Some("zh") {
+        return false;
+    }
+
+    let script = subtags.iter().skip(1).find(|subtag| subtag.len() == 4);
+    let region = subtags.iter().skip(1).find(|subtag| {
+        (subtag.len() == 2
+            && subtag
+                .chars()
+                .all(|character| character.is_ascii_lowercase()))
+            || (subtag.len() == 3 && subtag.chars().all(|character| character.is_ascii_digit()))
+    });
+
+    if matches!(script.copied(), Some("hant"))
+        || matches!(region.copied(), Some("tw" | "hk" | "mo"))
+    {
+        return false;
+    }
+
+    matches!(script.copied(), Some("hans")) || matches!(region.copied(), Some("cn" | "sg"))
 }
 
 pub fn resolve_desktop_language(preference: UiLanguagePreference) -> &'static str {
@@ -674,6 +691,8 @@ mod tests {
         assert!(is_simplified_chinese_locale(Some("zh-Hans-SG")));
         assert!(is_simplified_chinese_locale(Some("zh-SG")));
         assert!(is_simplified_chinese_locale(Some("zh_CN")));
+        assert!(is_simplified_chinese_locale(Some("zh-CN-u-nu-hanidec")));
+        assert!(is_simplified_chinese_locale(Some("zh-SG-x-foo")));
         assert!(!is_simplified_chinese_locale(Some("zh-TW")));
         assert!(!is_simplified_chinese_locale(Some("zh-HK")));
         assert!(!is_simplified_chinese_locale(Some("zh-MO")));
