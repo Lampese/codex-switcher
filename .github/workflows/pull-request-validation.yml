@@ -65,7 +65,7 @@ jobs:
         run: |
           mapfile -t files < <(git diff --name-only --diff-filter=ACMR "$BASE_SHA" "$HEAD_SHA" -- 'src-tauri/**/*.rs')
           if (( ${#files[@]} )); then
-            rustfmt --edition 2021 --check "${files[@]}"
+            rustfmt --edition 2021 --check --config skip_children=true "${files[@]}"
           fi
 
       - name: Run Rust tests
