@@ -579,6 +579,7 @@ mod tests {
             "stored-refresh".into(),
             Some("workspace-a".into()),
         );
+        account.last_refresh_at = None;
         let local_id = account.id.clone();
         let mut store = AccountsStore {
             accounts: vec![account.clone()],
