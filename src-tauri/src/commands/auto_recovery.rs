@@ -740,7 +740,6 @@ pub async fn check_and_recover_sessions() -> Result<Option<RecoveryEventNotifica
                 }
 
                 let mut should_retry = false;
-                let mut should_escalate = false;
                 let mut attempt_number = 1;
 
                 {
@@ -764,15 +763,11 @@ pub async fn check_and_recover_sessions() -> Result<Option<RecoveryEventNotifica
                             * (entry.1 as u64 + 1),
                     );
 
-                    if entry.2.elapsed() >= delay_needed {
-                        if entry.1 < settings.auto_retry_capacity_max_attempts {
-                            entry.1 += 1;
-                            entry.2 = Instant::now();
-                            attempt_number = entry.1;
-                            should_retry = true;
-                        } else if settings.auto_retry_capacity_escalate_to_switch {
-                            should_escalate = true;
-                        }
+                    if entry.2.elapsed() >= delay_needed && entry.1 < settings.auto_retry_capacity_max_attempts {
+                        entry.1 += 1;
+                        entry.2 = Instant::now();
+                        attempt_number = entry.1;
+                        should_retry = true;
                     }
                 }
 
@@ -799,11 +794,6 @@ pub async fn check_and_recover_sessions() -> Result<Option<RecoveryEventNotifica
                         tracker.last_event = Some(notification.clone());
                     }
                     return Ok(Some(notification));
-                }
-
-                if should_escalate && settings.auto_switch_limit_enabled {
-                    // Escalate capacity failure to account switch
-                    return handle_account_switch_for_session(&session, &settings).await;
                 }
             }
             SessionErrorKind::UsageLimitExceeded => {
