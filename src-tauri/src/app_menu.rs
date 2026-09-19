@@ -8,7 +8,7 @@ use tauri::{
 #[cfg(target_os = "macos")]
 pub(crate) use crate::types::DockDisplayMode;
 use crate::{
-    auth::{load_app_settings, mutate_app_settings},
+    auth::{load_app_settings_or_fallback, mutate_app_settings},
     types::{resolve_desktop_language, AppSettings, TrayDisplayMode},
 };
 
@@ -38,7 +38,7 @@ pub(crate) fn refresh_without_notification<R: Runtime>(app: &AppHandle<R>) -> ta
 }
 
 fn refresh_internal<R: Runtime>(app: &AppHandle<R>, notify: bool) -> tauri::Result<()> {
-    let settings = load_app_settings().unwrap_or_default();
+    let settings = load_app_settings_or_fallback();
     let menu = build_menu(app, &settings)?;
     app.set_menu(menu)?;
     if notify {

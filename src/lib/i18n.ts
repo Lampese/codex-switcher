@@ -93,6 +93,7 @@ function browserLocales(): string[] {
 }
 
 function readBrowserPreference(): BrowserLanguagePreference {
+  if (typeof window === "undefined") return "browser";
   try {
     const stored = window.localStorage.getItem(LANGUAGE_STORAGE_KEY);
     if (stored === "browser" || stored === "en-US" || stored === "zh-CN") {
@@ -111,16 +112,21 @@ export function resolveBrowserLanguagePreference(
   return preference === "browser" ? resolvePreferredLanguage(locales) : preference;
 }
 
-/** Resolve prompt copy from the current browser UI projection first. */
-export function resolveBrowserPresentationLanguage(
-  documentLocale: string | undefined,
+/** Resolve the browser language from its synchronous preference authority. */
+export function resolveBrowserAuthority(
+  preference: BrowserLanguagePreference,
   locales: readonly string[],
 ): SupportedLanguage {
-  return resolveSupportedLocale(documentLocale) ?? resolvePreferredLanguage(locales);
+  return resolveBrowserLanguagePreference(preference, locales);
+}
+
+/** Read the browser preference and locale list without consulting DOM projections. */
+export function resolveCurrentBrowserLanguage(): SupportedLanguage {
+  return resolveBrowserAuthority(readBrowserPreference(), browserLocales());
 }
 
 function resolveBrowserPreference(preference: BrowserLanguagePreference): SupportedLanguage {
-  return resolveBrowserLanguagePreference(preference, browserLocales());
+  return resolveBrowserAuthority(preference, browserLocales());
 }
 
 export function translate(key: string, language: SupportedLanguage = "en-US"): string {
@@ -140,7 +146,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   const [browserPreference, setBrowserPreferenceState] =
     useState<BrowserLanguagePreference>(() => (desktop ? "browser" : readBrowserPreference()));
   const [language, setLanguage] = useState<SupportedLanguage>(() =>
-    desktop ? "en-US" : resolveBrowserPreference(readBrowserPreference())
+    desktop ? "en-US" : resolveCurrentBrowserLanguage()
   );
 
   useEffect(() => {

@@ -440,6 +440,26 @@ pub fn load_app_settings() -> Result<AppSettings> {
         .with_context(|| format!("Failed to parse settings file: {}", path.display()))
 }
 
+/// Return the safe native-surface defaults used when settings cannot be read.
+///
+/// Native menus and the tray must remain usable if settings storage is
+/// temporarily unavailable during startup. English is the same safe fallback
+/// used by the frontend before it can reconcile desktop settings.
+pub fn fallback_app_settings() -> AppSettings {
+    AppSettings {
+        ui_language_preference: crate::types::UiLanguagePreference::English,
+        ..AppSettings::default()
+    }
+}
+
+/// Load settings for native surfaces without making storage failures fatal.
+pub fn load_app_settings_or_fallback() -> AppSettings {
+    load_app_settings().unwrap_or_else(|error| {
+        eprintln!("Failed to load app settings; using native English fallback: {error}");
+        fallback_app_settings()
+    })
+}
+
 pub fn save_app_settings(settings: &AppSettings) -> Result<()> {
     let _lock = acquire_mutation_lock("settings.lock")?;
     save_app_settings_unlocked(settings)
@@ -665,8 +685,9 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
 mod tests {
     use super::{
         acquire_mutation_lock_at, add_account_to_store, defaults_for_missing_settings,
-        initialize_app_settings_at, parse_existing_app_settings, reconcile_active_projection,
-        sync_active_account_tokens, write_file_atomic, write_file_atomic_with_pre_replace,
+        fallback_app_settings, initialize_app_settings_at, parse_existing_app_settings,
+        reconcile_active_projection, sync_active_account_tokens, write_file_atomic,
+        write_file_atomic_with_pre_replace,
     };
     use crate::types::{
         AccountsStore, AppSettings, AuthData, AuthDotJson, StoredAccount, TokenData,
@@ -707,6 +728,14 @@ mod tests {
     fn missing_settings_keep_english_for_existing_install() {
         assert_eq!(
             defaults_for_missing_settings(true).ui_language_preference,
+            UiLanguagePreference::English
+        );
+    }
+
+    #[test]
+    fn native_settings_fallback_stays_english() {
+        assert_eq!(
+            fallback_app_settings().ui_language_preference,
             UiLanguagePreference::English
         );
     }
