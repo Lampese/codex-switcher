@@ -206,6 +206,14 @@ fn handle_request(
     }
 
     if method == Method::Post && url.starts_with("/api/invoke/") {
+        if !has_json_content_type(&request) {
+            respond_json(
+                request,
+                StatusCode(415),
+                &json!({ "error": "Content-Type must be application/json" }),
+            )?;
+            return Ok(());
+        }
         if !is_authorized(&request, auth) {
             respond_unauthorized(request)?;
             return Ok(());
@@ -243,6 +251,26 @@ fn handle_request(
         "text/plain; charset=utf-8",
     )?;
     Ok(())
+}
+
+fn has_json_content_type(request: &Request) -> bool {
+    let mut content_types = request
+        .headers()
+        .iter()
+        .filter(|header| header.field.equiv("Content-Type"));
+    let Some(content_type) = content_types.next() else {
+        return false;
+    };
+    if content_types.next().is_some() {
+        return false;
+    }
+
+    content_type
+        .value
+        .as_str()
+        .split(';')
+        .next()
+        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
 }
 
 fn is_authorized(request: &Request, auth: &WebAuth) -> bool {
@@ -570,6 +598,39 @@ mod tests {
             Err(RequestBodyError::TooLarge)
         ));
         assert_eq!(parse_request_bytes(b"{}\n").unwrap(), json!({}));
+    }
+
+    #[test]
+    fn text_plain_mutation_request_is_rejected_before_dispatch() {
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let address = server.server_addr().to_ip().unwrap();
+        let worker = thread::spawn(move || {
+            let request = server.recv().unwrap();
+            let runtime = Runtime::new().unwrap();
+            handle_request(
+                request,
+                &runtime,
+                Path::new("."),
+                &WebAuth::from_host_and_secret("127.0.0.1", None).unwrap(),
+            )
+            .unwrap();
+        });
+
+        let body = r#"{"accountId":"target"}"#;
+        let request = format!(
+            "POST /api/invoke/delete_account HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        stream.shutdown(Shutdown::Write).unwrap();
+
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        worker.join().unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 415"));
+        assert!(response.contains("Content-Type must be application/json"));
     }
 
     #[test]
