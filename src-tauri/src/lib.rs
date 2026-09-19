@@ -36,6 +36,18 @@ pub fn run() {
                 app_menu::setup(app.handle())?;
                 tray::setup(app.handle())?;
             }
+
+            // Spawn background auto-recovery loop
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    if let Ok(Some(event)) = commands::auto_recovery::check_and_recover_sessions().await {
+                        let _ = app_handle.emit("session-recovery-event", event);
+                    }
+                }
+            });
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -65,6 +77,12 @@ pub fn run() {
             commands::open_codex_app,
             commands::get_codex_reopen_info,
             commands::reopen_closed_codex_desktop,
+            // Auto Recovery & Session Automation
+            commands::get_app_settings,
+            commands::get_auto_recovery_status,
+            commands::trigger_auto_recovery_check,
+            commands::launch_codex_session,
+            commands::save_auto_recovery_settings,
             // Account management
             list_accounts,
             get_active_account_info,

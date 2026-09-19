@@ -36,8 +36,44 @@ pub enum DockDisplayMode {
     MenuBarOnly,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoSwitchStrategy {
+    SmartBalanced,
+    ResetsFirst,
+    ExpiringSubscriptionFirst,
+    MostRemainingQuota,
+    RoundRobin,
+}
+
+impl Default for AutoSwitchStrategy {
+    fn default() -> Self {
+        Self::SmartBalanced
+    }
+}
+
 fn default_close_behavior_prompt_enabled() -> bool {
     true
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_max_attempts() -> u32 {
+    3
+}
+
+fn default_initial_delay_sec() -> u32 {
+    5
+}
+
+fn default_continue_phrase() -> String {
+    "continue".to_string()
+}
+
+fn default_reset_credit_warning_days() -> u32 {
+    3
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +83,24 @@ pub struct AppSettings {
     pub dock_display_mode: DockDisplayMode,
     #[serde(default = "default_close_behavior_prompt_enabled")]
     pub close_behavior_prompt_enabled: bool,
+    #[serde(default = "default_true")]
+    pub auto_retry_capacity_enabled: bool,
+    #[serde(default = "default_max_attempts")]
+    pub auto_retry_capacity_max_attempts: u32,
+    #[serde(default = "default_initial_delay_sec")]
+    pub auto_retry_capacity_initial_delay_sec: u32,
+    #[serde(default = "default_true")]
+    pub auto_retry_capacity_escalate_to_switch: bool,
+    #[serde(default = "default_true")]
+    pub auto_switch_limit_enabled: bool,
+    #[serde(default)]
+    pub auto_switch_strategy: AutoSwitchStrategy,
+    #[serde(default = "default_continue_phrase")]
+    pub continue_phrase: String,
+    #[serde(default = "default_reset_credit_warning_days")]
+    pub reset_credit_warning_days: u32,
+    #[serde(default)]
+    pub preferred_terminal: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -55,6 +109,15 @@ impl Default for AppSettings {
             tray_display_mode: TrayDisplayMode::default(),
             dock_display_mode: DockDisplayMode::default(),
             close_behavior_prompt_enabled: true,
+            auto_retry_capacity_enabled: true,
+            auto_retry_capacity_max_attempts: 3,
+            auto_retry_capacity_initial_delay_sec: 5,
+            auto_retry_capacity_escalate_to_switch: true,
+            auto_switch_limit_enabled: true,
+            auto_switch_strategy: AutoSwitchStrategy::default(),
+            continue_phrase: default_continue_phrase(),
+            reset_credit_warning_days: 3,
+            preferred_terminal: None,
         }
     }
 }
@@ -493,8 +556,8 @@ pub struct CreditStatusDetails {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_chatgpt_id_token_claims, AccountInfo, AppSettings, DockDisplayMode, StoredAccount,
-        TrayDisplayMode,
+        parse_chatgpt_id_token_claims, AccountInfo, AppSettings, AutoSwitchStrategy,
+        DockDisplayMode, StoredAccount, TrayDisplayMode,
     };
     use base64::Engine;
     use chrono::{TimeZone, Utc};
@@ -545,5 +608,13 @@ mod tests {
         assert_eq!(settings.tray_display_mode, TrayDisplayMode::ActiveUsageText);
         assert_eq!(settings.dock_display_mode, DockDisplayMode::ShowInDock);
         assert!(settings.close_behavior_prompt_enabled);
+        assert!(settings.auto_retry_capacity_enabled);
+        assert_eq!(settings.auto_retry_capacity_max_attempts, 3);
+        assert_eq!(settings.auto_retry_capacity_initial_delay_sec, 5);
+        assert!(settings.auto_retry_capacity_escalate_to_switch);
+        assert!(settings.auto_switch_limit_enabled);
+        assert_eq!(settings.auto_switch_strategy, AutoSwitchStrategy::SmartBalanced);
+        assert_eq!(settings.continue_phrase, "continue");
+        assert_eq!(settings.reset_credit_warning_days, 3);
     }
 }

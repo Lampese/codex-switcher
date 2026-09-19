@@ -25,6 +25,7 @@ interface AccountCardProps {
   autoWarmupManagedByAll?: boolean;
   autoWarmupLabel?: string;
   onToggleAutoWarmup?: () => void;
+  resetCreditWarningDays?: number;
 }
 
 function formatLastRefresh(date: Date | null): string {
@@ -112,6 +113,7 @@ export function AccountCard({
   autoWarmupManagedByAll = false,
   autoWarmupLabel,
   onToggleAutoWarmup,
+  resetCreditWarningDays,
 }: AccountCardProps) {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(
@@ -345,6 +347,7 @@ export function AccountCard({
           <ResetCreditsMenu
             compact={compactResetCredits}
             resetCredits={resetCredits}
+            warningDays={resetCreditWarningDays}
           />
         </div>
       </div>

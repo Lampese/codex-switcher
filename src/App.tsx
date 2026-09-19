@@ -8,7 +8,7 @@ import { finishForceClose, type DesktopReopenPreference } from "./lib/desktopReo
 import type { CodexClosePreference } from "./lib/codexClosePreference";
 import { useForceCloseCodexProcesses } from "./hooks/useForceCloseCodexProcesses";
 import { AccountCard, AddAccountModal, UpdateChecker } from "./components";
-import type { AccountWithUsage, CodexProcessInfo, DockDisplayMode, UsageInfo } from "./types";
+import type { AccountWithUsage, AppSettings, CodexProcessInfo, DockDisplayMode, UsageInfo } from "./types";
 import {
   exportFullBackupFile,
   importFullBackupFile,
@@ -268,6 +268,22 @@ function App() {
       unlisten?.();
     };
   }, []);
+
+  const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
+
+  const loadAppSettings = useCallback(async () => {
+    if (!isTauriRuntime()) return;
+    try {
+      const s = await invokeBackend<AppSettings>("get_app_settings");
+      setAppSettings(s);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadAppSettings();
+  }, [loadAppSettings]);
 
   const actionsMenuRef = useRef<HTMLDivElement | null>(null);
   const navMenuRef = useRef<HTMLDivElement | null>(null);
@@ -611,6 +627,28 @@ function App() {
     setWarmupToast({ message, isError });
     toastTimerRef.current = setTimeout(() => setWarmupToast(null), isError ? 10000 : 2500);
   }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/event").then(async ({ listen }) => {
+      const stop = await listen<{ message: string; event_type: string }>(
+        "session-recovery-event",
+        (event) => {
+          showWarmupToast(event.payload.message);
+          void loadAccounts();
+          void refreshUsage();
+        }
+      );
+      if (disposed) stop();
+      else unlisten = stop;
+    }).catch((err) => console.error("Failed to listen for session-recovery-event:", err));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [loadAccounts, refreshUsage, showWarmupToast]);
 
   const formatWarmupError = useCallback((err: unknown) => {
     if (!err) return "Unknown error";
@@ -1851,6 +1889,7 @@ function App() {
                       autoWarmupRunningIds.has(activeAccount.id)
                     )}
                     onToggleAutoWarmup={() => toggleAutoWarmupAccount(activeAccount.id)}
+                    resetCreditWarningDays={appSettings?.reset_credit_warning_days ?? 3}
                   />
                 </section>
               )}
@@ -1948,6 +1987,7 @@ function App() {
                         autoWarmupRunningIds.has(account.id)
                       )}
                       onToggleAutoWarmup={() => toggleAutoWarmupAccount(account.id)}
+                      resetCreditWarningDays={appSettings?.reset_credit_warning_days ?? 3}
                     />
                   ))}
                 </div>
@@ -1990,7 +2030,10 @@ function App() {
           onReopenPreferenceChange={saveDesktopReopenPreference}
           closePreference={codexClose.preference}
           onClosePreferenceChange={saveCodexClosePreference}
-          onClose={() => setIsSettingsOpen(false)}
+          onClose={() => {
+            setIsSettingsOpen(false);
+            void loadAppSettings();
+          }}
         />
       )}
 
