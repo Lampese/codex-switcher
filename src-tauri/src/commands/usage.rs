@@ -1,12 +1,7 @@
 //! Usage query Tauri commands
 
-use crate::api::usage::{
-    fetch_chatgpt_account_metadata, get_account_usage, refresh_all_usage,
-    warmup_account as send_warmup,
-};
-use crate::auth::{
-    ensure_chatgpt_tokens_fresh, get_account, load_accounts, update_account_metadata,
-};
+use crate::api::usage::{fetch_chatgpt_account_metadata, get_account_usage, refresh_all_usage};
+use crate::auth::{get_account, load_accounts, update_account_metadata};
 use crate::types::{AccountInfo, AuthData, UsageInfo, WarmupSummary};
 
 /// Fetch usage info for a specific account (shared by the Tauri command and web mode).
