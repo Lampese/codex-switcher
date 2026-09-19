@@ -16,6 +16,7 @@ export type SupportedLanguage = "en-US" | "zh-CN";
 export type BrowserLanguagePreference = "browser" | SupportedLanguage;
 
 const LANGUAGE_STORAGE_KEY = "codex-switcher-language";
+let currentBrowserPreference: BrowserLanguagePreference | undefined;
 
 const i18n = i18next.createInstance({
   resources: {
@@ -105,6 +106,20 @@ function readBrowserPreference(): BrowserLanguagePreference {
   return "browser";
 }
 
+function getBrowserLanguageAuthority(): BrowserLanguagePreference {
+  if (currentBrowserPreference !== undefined) return currentBrowserPreference;
+
+  const preference = readBrowserPreference();
+  if (typeof window !== "undefined") {
+    currentBrowserPreference = preference;
+  }
+  return preference;
+}
+
+export function setBrowserLanguageAuthority(preference: BrowserLanguagePreference): void {
+  currentBrowserPreference = preference;
+}
+
 export function resolveBrowserLanguagePreference(
   preference: BrowserLanguagePreference,
   locales: readonly string[],
@@ -113,20 +128,9 @@ export function resolveBrowserLanguagePreference(
 }
 
 /** Resolve the browser language from its synchronous preference authority. */
-export function resolveBrowserAuthority(
-  preference: BrowserLanguagePreference,
-  locales: readonly string[],
-): SupportedLanguage {
-  return resolveBrowserLanguagePreference(preference, locales);
-}
-
 /** Read the browser preference and locale list without consulting DOM projections. */
 export function resolveCurrentBrowserLanguage(): SupportedLanguage {
-  return resolveBrowserAuthority(readBrowserPreference(), browserLocales());
-}
-
-function resolveBrowserPreference(preference: BrowserLanguagePreference): SupportedLanguage {
-  return resolveBrowserAuthority(preference, browserLocales());
+  return resolveBrowserLanguagePreference(getBrowserLanguageAuthority(), browserLocales());
 }
 
 export function translate(key: string, language: SupportedLanguage = "en-US"): string {
@@ -144,7 +148,9 @@ export function translateMessage(
 export function I18nProvider({ children }: { children: ReactNode }) {
   const desktop = isTauriRuntime();
   const [browserPreference, setBrowserPreferenceState] =
-    useState<BrowserLanguagePreference>(() => (desktop ? "browser" : readBrowserPreference()));
+    useState<BrowserLanguagePreference>(() =>
+      desktop ? "browser" : getBrowserLanguageAuthority()
+    );
   const [language, setLanguage] = useState<SupportedLanguage>(() =>
     desktop ? "en-US" : resolveCurrentBrowserLanguage()
   );
@@ -187,8 +193,9 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   const setBrowserPreference = useCallback(
     (next: BrowserLanguagePreference) => {
       if (desktop) return;
+      setBrowserLanguageAuthority(next);
       setBrowserPreferenceState(next);
-      setLanguage(resolveBrowserPreference(next));
+      setLanguage(resolveBrowserLanguagePreference(next, browserLocales()));
       try {
         window.localStorage.setItem(LANGUAGE_STORAGE_KEY, next);
       } catch {

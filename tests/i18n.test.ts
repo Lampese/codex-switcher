@@ -1,17 +1,25 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import enUS from "../src/locales/en-US.json" with { type: "json" };
 import zhCN from "../src/locales/zh-CN.json" with { type: "json" };
 import {
+  I18nProvider,
   resolveInitialLanguage,
-  resolveBrowserAuthority,
   resolveBrowserLanguagePreference,
   resolveCurrentBrowserLanguage,
   resolvePreferredLanguage,
   resolveSupportedLocale,
+  setBrowserLanguageAuthority,
   translate,
   translateMessage,
+  useI18n,
 } from "../src/lib/i18n.ts";
+
+function BrowserLanguageProbe() {
+  return createElement("output", null, useI18n().language);
+}
 
 test("i18n resolves only supported English and Simplified Chinese locales", () => {
   assert.equal(resolveSupportedLocale("zh-CN"), "zh-CN");
@@ -88,15 +96,15 @@ test("i18n falls back safely and interpolates dynamic values", () => {
 
 test("browser authority wins over stale DOM projection and environment defaults", () => {
   assert.equal(
-    resolveBrowserAuthority("zh-CN", ["en-US"]),
+    resolveBrowserLanguagePreference("zh-CN", ["en-US"]),
     "zh-CN",
   );
   assert.equal(
-    resolveBrowserAuthority("en-US", ["zh-CN"]),
+    resolveBrowserLanguagePreference("en-US", ["zh-CN"]),
     "en-US",
   );
   assert.equal(
-    resolveBrowserAuthority("browser", ["fr-FR", "zh-CN"]),
+    resolveBrowserLanguagePreference("browser", ["fr-FR", "zh-CN"]),
     "zh-CN"
   );
 });
@@ -123,6 +131,51 @@ test("browser prompt authority reads saved preference before DOM projection upda
   try {
     assert.equal(resolveCurrentBrowserLanguage(), "zh-CN");
   } finally {
+    for (const [name, descriptor] of descriptors) {
+      if (descriptor) {
+        Object.defineProperty(globalThis, name, descriptor);
+      } else {
+        delete (globalThis as Record<string, unknown>)[name];
+      }
+    }
+  }
+});
+
+test("browser prompt keeps the explicit in-memory preference when storage is unavailable", () => {
+  const descriptors = ["window", "navigator"].map((name) => [
+    name,
+    Object.getOwnPropertyDescriptor(globalThis, name),
+  ] as const);
+
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      localStorage: {
+        getItem: () => {
+          throw new Error("storage unavailable");
+        },
+        setItem: () => {
+          throw new Error("storage unavailable");
+        },
+      },
+    },
+  });
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: { languages: ["en-US"], language: "en-US" },
+  });
+
+  try {
+    setBrowserLanguageAuthority("zh-CN");
+    assert.match(
+      renderToStaticMarkup(
+        createElement(I18nProvider, null, createElement(BrowserLanguageProbe))
+      ),
+      /<output>zh-CN<\/output>/
+    );
+    assert.equal(resolveCurrentBrowserLanguage(), "zh-CN");
+  } finally {
+    setBrowserLanguageAuthority("browser");
     for (const [name, descriptor] of descriptors) {
       if (descriptor) {
         Object.defineProperty(globalThis, name, descriptor);

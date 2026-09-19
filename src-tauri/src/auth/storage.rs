@@ -419,20 +419,28 @@ fn parse_existing_app_settings(content: &str) -> Result<AppSettings> {
     Ok(settings)
 }
 
-fn defaults_for_missing_settings(accounts_file_exists: bool) -> AppSettings {
-    let mut settings = AppSettings::default();
+fn initial_settings_for_missing_file(accounts_file_exists: bool) -> AppSettings {
     if accounts_file_exists {
-        settings.ui_language_preference = crate::types::UiLanguagePreference::English;
+        fallback_app_settings()
+    } else {
+        AppSettings::default()
     }
-    settings
 }
 
 fn initialize_app_settings_at(settings_path: &Path, accounts_path: &Path) -> Result<AppSettings> {
+    initialize_app_settings_at_with_writer(settings_path, accounts_path, write_file_atomic)
+}
+
+fn initialize_app_settings_at_with_writer(
+    settings_path: &Path,
+    accounts_path: &Path,
+    write_settings: impl Fn(&Path, &[u8]) -> Result<()>,
+) -> Result<AppSettings> {
     if !settings_path.exists() {
-        let settings = defaults_for_missing_settings(accounts_path.exists());
+        let settings = initial_settings_for_missing_file(accounts_path.exists());
         let content =
             serde_json::to_vec_pretty(&settings).context("Failed to serialize settings")?;
-        write_file_atomic(settings_path, &content)?;
+        write_settings(settings_path, &content)?;
         return Ok(settings);
     }
 
@@ -447,7 +455,7 @@ fn initialize_app_settings_at(settings_path: &Path, accounts_path: &Path) -> Res
     if !had_language_preference {
         let content =
             serde_json::to_vec_pretty(&settings).context("Failed to serialize settings")?;
-        write_file_atomic(settings_path, &content)?;
+        write_settings(settings_path, &content)?;
     }
 
     Ok(settings)
@@ -461,27 +469,7 @@ pub fn initialize_app_settings() -> Result<AppSettings> {
     initialize_app_settings_at(&get_settings_file()?, &get_accounts_file()?)
 }
 
-pub fn load_app_settings() -> Result<AppSettings> {
-    let path = get_settings_file()?;
-
-    if !path.exists() {
-        // A settings file is not a reliable installation marker: older
-        // installs may already have an account store without ever having
-        // written settings. Keep those installs on the pre-localization
-        // English UI while preserving System default for genuinely new users.
-        let accounts_file_exists = get_accounts_file()
-            .map(|accounts| accounts.exists())
-            .unwrap_or(false);
-        return Ok(defaults_for_missing_settings(accounts_file_exists));
-    }
-
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("Failed to read settings file: {}", path.display()))?;
-    parse_existing_app_settings(&content)
-        .with_context(|| format!("Failed to parse settings file: {}", path.display()))
-}
-
-/// Return the safe native-surface defaults used when settings cannot be read.
+/// Return the safe defaults used when no usable settings authority is available.
 ///
 /// Native menus and the tray must remain usable if settings storage is
 /// temporarily unavailable during startup. English is the same safe fallback
@@ -491,6 +479,24 @@ pub fn fallback_app_settings() -> AppSettings {
         ui_language_preference: crate::types::UiLanguagePreference::English,
         ..AppSettings::default()
     }
+}
+
+fn load_app_settings_at(path: &Path) -> Result<AppSettings> {
+    if !path.exists() {
+        // Installation identity is established only by successful
+        // initialization. A missing marker after that attempt is a runtime
+        // failure path, so it must not be re-inferred from accounts.json.
+        return Ok(fallback_app_settings());
+    }
+
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read settings file: {}", path.display()))?;
+    parse_existing_app_settings(&content)
+        .with_context(|| format!("Failed to parse settings file: {}", path.display()))
+}
+
+pub fn load_app_settings() -> Result<AppSettings> {
+    load_app_settings_at(&get_settings_file()?)
 }
 
 /// Load settings for native surfaces without making storage failures fatal.
@@ -778,7 +784,8 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
 mod tests {
     use super::{
         acquire_mutation_lock_at, add_account_to_store, reconcile_active_projection,
-        defaults_for_missing_settings, fallback_app_settings, initialize_app_settings_at,
+        defaults_for_missing_settings, fallback_app_settings, initial_settings_for_missing_file,
+        initialize_app_settings_at, initialize_app_settings_at_with_writer, load_app_settings_at,
         parse_existing_app_settings, sync_active_account_tokens,
         update_account_chatgpt_tokens_in_store, write_file_atomic,
         write_file_atomic_with_pre_replace,
@@ -813,27 +820,94 @@ mod tests {
     }
 
     #[test]
-    fn missing_settings_keep_system_for_new_install() {
+    fn initialization_preserves_existing_explicit_language_preference() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-switcher-settings-explicit-language-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let settings_path = dir.join("settings.json");
+        let accounts_path = dir.join("accounts.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&settings_path, br#"{"ui_language_preference":"zh-CN"}"#).unwrap();
+
+        let settings = initialize_app_settings_at(&settings_path, &accounts_path).unwrap();
         assert_eq!(
-            defaults_for_missing_settings(false).ui_language_preference,
+            settings.ui_language_preference,
+            UiLanguagePreference::SimplifiedChinese
+        );
+        let persisted: AppSettings =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(
+            persisted.ui_language_preference,
+            UiLanguagePreference::SimplifiedChinese
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn initialization_uses_system_for_new_install() {
+        assert_eq!(
+            initial_settings_for_missing_file(false).ui_language_preference,
             UiLanguagePreference::System
         );
     }
 
     #[test]
-    fn missing_settings_keep_english_for_existing_install() {
+    fn initialization_uses_english_for_existing_install() {
         assert_eq!(
-            defaults_for_missing_settings(true).ui_language_preference,
+            initial_settings_for_missing_file(true).ui_language_preference,
             UiLanguagePreference::English
         );
     }
 
     #[test]
-    fn native_settings_fallback_stays_english() {
+    fn missing_settings_use_runtime_english_fallback() {
+        let path = std::env::temp_dir().join(format!(
+            "codex-switcher-settings-runtime-fallback-{}",
+            uuid::Uuid::new_v4()
+        ));
         assert_eq!(
-            fallback_app_settings().ui_language_preference,
+            load_app_settings_at(&path).unwrap().ui_language_preference,
             UiLanguagePreference::English
         );
+    }
+
+    #[test]
+    fn initialization_write_failure_keeps_missing_settings_on_english_fallback() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-switcher-settings-initialization-failure-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings_path = dir.join("settings.json");
+        let accounts_path = dir.join("accounts.json");
+
+        let result =
+            initialize_app_settings_at_with_writer(&settings_path, &accounts_path, |_, _| {
+                anyhow::bail!("injected settings write failure")
+            });
+        assert!(result.is_err());
+        assert!(!settings_path.exists());
+        assert_eq!(
+            load_app_settings_at(&settings_path)
+                .unwrap()
+                .ui_language_preference,
+            UiLanguagePreference::English
+        );
+
+        let mut store = AccountsStore::default();
+        add_account_to_store(&mut store, account("A", "workspace-a", "a1")).unwrap();
+        write_file_atomic(&accounts_path, &serde_json::to_vec(&store).unwrap()).unwrap();
+
+        assert_eq!(
+            load_app_settings_at(&settings_path)
+                .unwrap()
+                .ui_language_preference,
+            UiLanguagePreference::English
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -907,7 +981,7 @@ mod tests {
     }
 
     #[test]
-    fn new_install_language_marker_survives_first_account_creation() {
+    fn new_install_initialization_persists_system_through_first_account_creation() {
         let dir = std::env::temp_dir().join(format!(
             "codex-switcher-settings-initialization-{}",
             uuid::Uuid::new_v4()
