@@ -82,6 +82,8 @@ struct SessionTrackerState {
     managed_pids: Vec<u32>,
     /// Last recovery event notification
     last_event: Option<RecoveryEventNotification>,
+    /// Last account switch timestamp and target account ID (to prevent cascading switches across multiple active sessions)
+    last_account_switch: Option<(Instant, String)>,
 }
 
 static TRACKER: std::sync::LazyLock<Mutex<SessionTrackerState>> =
@@ -91,6 +93,7 @@ static TRACKER: std::sync::LazyLock<Mutex<SessionTrackerState>> =
             handled_usage_limits: HashMap::new(),
             managed_pids: Vec::new(),
             last_event: None,
+            last_account_switch: None,
         })
     });
 
@@ -832,6 +835,51 @@ async fn handle_account_switch_for_session(
     let store = load_accounts()?;
     let current_id = store.active_account_id.as_deref();
 
+    // Anti-cascade guard: if an account switch happened recently (within 20s),
+    // another active session's error is from the OLD account. Don't cascade-switch to yet another account!
+    // Instead, simply give this session a `continue` so it runs on the newly active account.
+    let recent_switch = {
+        let Ok(tracker) = TRACKER.lock() else {
+            return Ok(None);
+        };
+        tracker.last_account_switch.clone()
+    };
+
+    if let Some((switch_time, _)) = recent_switch {
+        if switch_time.elapsed() < Duration::from_secs(20) {
+            let phrase = if settings.continue_phrase.trim().is_empty() {
+                "continue"
+            } else {
+                &settings.continue_phrase
+            };
+
+            let _ = send_codex_queue_resume(&session.session_id, phrase).await;
+
+            if let Ok(mut tracker) = TRACKER.lock() {
+                let turn_key = session
+                    .last_error
+                    .as_ref()
+                    .and_then(|e| e.turn_id.clone())
+                    .unwrap_or_else(|| "default".to_string());
+                tracker
+                    .handled_usage_limits
+                    .insert(session.session_id.clone(), turn_key);
+            }
+
+            let notification = RecoveryEventNotification {
+                event_type: "account_switched_queued".to_string(),
+                session_id: session.session_id.clone(),
+                message: format!(
+                    "Resumed session with '{phrase}' on newly active account (switched {}s ago)",
+                    switch_time.elapsed().as_secs()
+                ),
+                timestamp: Utc::now(),
+            };
+
+            return Ok(Some(notification));
+        }
+    }
+
     // Fetch usage and stats cache
     let mut usage_map = HashMap::new();
     let mut resets_map = HashMap::new();
@@ -892,7 +940,7 @@ async fn handle_account_switch_for_session(
         );
     }
 
-    // Mark handled
+    // Mark handled and record switch timestamp for anti-cascade
     if let Ok(mut tracker) = TRACKER.lock() {
         let turn_key = session
             .last_error
@@ -902,6 +950,7 @@ async fn handle_account_switch_for_session(
         tracker
             .handled_usage_limits
             .insert(session.session_id.clone(), turn_key);
+        tracker.last_account_switch = Some((Instant::now(), target.id.clone()));
     }
 
     let notification = RecoveryEventNotification {
