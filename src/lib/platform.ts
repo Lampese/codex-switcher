@@ -1,6 +1,11 @@
 import type { ImportAccountsSummary } from "../types";
+import { isPassphraseRequiredError, normalizeBackupPassphrase } from "./backupPassphrase";
+import { resolveCurrentBrowserLanguage, translate } from "./i18n";
 
 export type FileSource = string | File;
+
+const WEB_SECRET_STORAGE_KEY = "codex-switcher-web-secret";
+let webAuthSecret: string | null | undefined;
 
 export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -15,11 +20,14 @@ export async function invokeBackend<T>(
     return invoke<T>(command, args);
   }
 
-  const response = await fetch(`/api/invoke/${command}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(args ?? {}),
-  });
+  let response = await fetchWebCommand(command, args);
+
+  if (response.status === 401) {
+    const secret = promptForWebSecret();
+    if (secret) {
+      response = await fetchWebCommand(command, args);
+    }
+  }
 
   const payload = await readJsonResponse(response);
   if (!response.ok) {
@@ -33,6 +41,48 @@ export async function invokeBackend<T>(
   return payload as T;
 }
 
+async function fetchWebCommand(
+  command: string,
+  args?: Record<string, unknown>
+): Promise<Response> {
+  const headers = new Headers({ "Content-Type": "application/json" });
+  const secret = getWebAuthSecret();
+  if (secret) headers.set("Authorization", `Bearer ${secret}`);
+
+  return fetch(`/api/invoke/${command}`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(args ?? {}),
+  });
+}
+
+function getWebAuthSecret(): string | null {
+  if (webAuthSecret !== undefined) return webAuthSecret;
+
+  try {
+    webAuthSecret = window.sessionStorage.getItem(WEB_SECRET_STORAGE_KEY);
+  } catch {
+    webAuthSecret = null;
+  }
+  return webAuthSecret;
+}
+
+function promptForWebSecret(): string | null {
+  if (typeof window === "undefined") return null;
+  const language = resolveCurrentBrowserLanguage();
+  const entered = window.prompt(translate("web.secret.prompt", language));
+  const secret = entered?.trim() || null;
+  webAuthSecret = secret;
+  if (secret) {
+    try {
+      window.sessionStorage.setItem(WEB_SECRET_STORAGE_KEY, secret);
+    } catch {
+      // Session storage can be unavailable in privacy-restricted browsers.
+    }
+  }
+  return secret;
+}
+
 export async function openExternalUrl(url: string): Promise<void> {
   if (isTauriRuntime()) {
     const { openUrl } = await import("@tauri-apps/plugin-opener");
@@ -43,13 +93,13 @@ export async function openExternalUrl(url: string): Promise<void> {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
-export async function pickAuthJsonFile(): Promise<FileSource | null> {
+export async function pickAuthJsonFile(title?: string): Promise<FileSource | null> {
   if (isTauriRuntime()) {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
       multiple: false,
       filters: [{ name: "JSON", extensions: ["json"] }],
-      title: "Select auth.json file",
+      title: title ?? translate("platform.auth_file.title"),
     });
 
     if (!selected || Array.isArray(selected)) return null;
@@ -59,21 +109,33 @@ export async function pickAuthJsonFile(): Promise<FileSource | null> {
   return pickBrowserFile(".json,application/json");
 }
 
-export async function exportFullBackupFile(): Promise<boolean> {
+export async function exportFullBackupFile(
+  requestPassphrase: () => Promise<string | null>,
+  title?: string,
+): Promise<boolean> {
+  const passphrase = normalizeBackupPassphrase(await requestPassphrase());
+  if (!passphrase) return false;
+
   if (isTauriRuntime()) {
     const { save } = await import("@tauri-apps/plugin-dialog");
     const selected = await save({
-      title: "Export Full Encrypted Account Config",
+      title: title ?? translate("platform.backup.export_title"),
       defaultPath: "codex-switcher-full.cswf",
       filters: [{ name: "Codex Switcher Full Backup", extensions: ["cswf"] }],
     });
 
     if (!selected) return false;
-    await invokeBackend("export_accounts_full_encrypted_file", { path: selected });
+    await invokeBackend("export_accounts_full_encrypted_file", {
+      path: selected,
+      passphrase,
+    });
     return true;
   }
 
-  const contentsBase64 = await invokeBackend<string>("export_accounts_full_encrypted_bytes");
+  const contentsBase64 = await invokeBackend<string>(
+    "export_accounts_full_encrypted_bytes",
+    { passphrase }
+  );
   downloadBase64File(
     contentsBase64,
     "codex-switcher-full.cswf",
@@ -82,32 +144,50 @@ export async function exportFullBackupFile(): Promise<boolean> {
   return true;
 }
 
-export async function importFullBackupFile(): Promise<ImportAccountsSummary | null> {
+export async function importFullBackupFile(
+  requestPassphrase: () => Promise<string | null>,
+  title?: string,
+): Promise<ImportAccountsSummary | null> {
   if (isTauriRuntime()) {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
       multiple: false,
-      title: "Import Full Encrypted Account Config",
+      title: title ?? translate("platform.backup.import_title"),
       filters: [{ name: "Codex Switcher Full Backup", extensions: ["cswf"] }],
     });
 
     if (!selected || Array.isArray(selected)) return null;
-    return invokeBackend<ImportAccountsSummary>("import_accounts_full_encrypted_file", {
-      path: selected,
-    });
+    return importFullBackupSource({ path: selected }, requestPassphrase);
   }
 
   const selected = await pickBrowserFile(".cswf,application/octet-stream");
   if (!selected) return null;
 
   const contentsBase64 = await fileToBase64(selected);
-  return invokeBackend<ImportAccountsSummary>("import_accounts_full_encrypted_bytes", {
-    contentsBase64,
-  });
+  return importFullBackupSource({ contentsBase64 }, requestPassphrase);
 }
 
-export function describeFileSource(source: FileSource | null): string {
-  if (!source) return "No file selected";
+async function importFullBackupSource(
+  source: { path: string } | { contentsBase64: string },
+  requestPassphrase: () => Promise<string | null>
+): Promise<ImportAccountsSummary | null> {
+  const command = "path" in source
+    ? "import_accounts_full_encrypted_file"
+    : "import_accounts_full_encrypted_bytes";
+
+  try {
+    return await invokeBackend<ImportAccountsSummary>(command, source);
+  } catch (error) {
+    if (!isPassphraseRequiredError(error)) throw error;
+  }
+
+  const passphrase = normalizeBackupPassphrase(await requestPassphrase());
+  if (!passphrase) return null;
+  return invokeBackend<ImportAccountsSummary>(command, { ...source, passphrase });
+}
+
+export function describeFileSource(source: FileSource | null, emptyLabel?: string): string {
+  if (!source) return emptyLabel ?? translate("platform.file.none");
   return typeof source === "string" ? source : source.name;
 }
 
