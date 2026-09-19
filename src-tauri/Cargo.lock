@@ -6378,7 +6378,9 @@ dependencies = [
  "serde",
  "syn 2.0.117",
  "winnow 0.7.15",
-][[package]]
+]
+
+[[package]]
 name = "sys-locale"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

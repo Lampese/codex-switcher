@@ -125,7 +125,6 @@ pub fn is_simplified_chinese_locale(locale: Option<&str>) -> bool {
         || normalized.starts_with("zh-hans-")
 }
 
-
 pub fn resolve_desktop_language(preference: UiLanguagePreference) -> &'static str {
     let system_locale = sys_locale::get_locale();
     preference.resolved(system_locale.as_deref())
@@ -672,10 +671,15 @@ mod tests {
     fn simplified_chinese_locale_resolution_excludes_traditional_chinese() {
         assert!(is_simplified_chinese_locale(Some("zh-CN")));
         assert!(is_simplified_chinese_locale(Some("zh_Hans_CN")));
+        assert!(is_simplified_chinese_locale(Some("zh-Hans-SG")));
         assert!(is_simplified_chinese_locale(Some("zh-SG")));
+        assert!(is_simplified_chinese_locale(Some("zh_CN")));
         assert!(!is_simplified_chinese_locale(Some("zh-TW")));
         assert!(!is_simplified_chinese_locale(Some("zh-HK")));
+        assert!(!is_simplified_chinese_locale(Some("zh-MO")));
         assert!(!is_simplified_chinese_locale(Some("zh-Hant")));
+        assert!(!is_simplified_chinese_locale(Some("zh-Hant-TW")));
+        assert!(!is_simplified_chinese_locale(Some("zh")));
         assert!(!is_simplified_chinese_locale(Some("fr-FR")));
     }
 
@@ -690,7 +694,10 @@ mod tests {
             "en-US"
         );
         assert_eq!(UiLanguagePreference::System.resolved(None), "en-US");
-        assert_eq!(UiLanguagePreference::English.resolved(Some("zh-CN")), "en-US");
+        assert_eq!(
+            UiLanguagePreference::English.resolved(Some("zh-CN")),
+            "en-US"
+        );
         assert_eq!(
             UiLanguagePreference::SimplifiedChinese.resolved(Some("en-US")),
             "zh-CN"
@@ -705,5 +712,24 @@ mod tests {
         assert_eq!(settings.tray_display_mode, TrayDisplayMode::ActiveUsageText);
         assert_eq!(settings.dock_display_mode, DockDisplayMode::ShowInDock);
         assert!(settings.close_behavior_prompt_enabled);
+        assert_eq!(
+            settings.ui_language_preference,
+            UiLanguagePreference::System
+        );
+    }
+
+    #[test]
+    fn language_preference_round_trips_as_a_persisted_preference() {
+        let settings = AppSettings {
+            ui_language_preference: UiLanguagePreference::SimplifiedChinese,
+            ..Default::default()
+        };
+        let encoded = serde_json::to_string(&settings).unwrap();
+        let decoded: AppSettings = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(
+            decoded.ui_language_preference,
+            UiLanguagePreference::SimplifiedChinese
+        );
     }
 }

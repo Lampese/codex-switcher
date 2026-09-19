@@ -70,7 +70,10 @@ function RateLimitBar({
         <span>{windowLabel ? `${windowLabel} ${t("usage.limit")}` : label}</span>
         <span>
           {remainingPercent.toFixed(0)}% {t("usage.left")}
-          {resetLabel && ` • ${t("usage.resets.value", { value: resetLabel })}`}
+          {resetLabel &&
+            (resetLabel === "now"
+              ? ` • ${t("tray.resets.now")}`
+              : ` • ${t("usage.resets.value", { value: resetLabel })}`)}
           {resetLabel && exactResetLabel && ` (${exactResetLabel})`}
         </span>
       </div>

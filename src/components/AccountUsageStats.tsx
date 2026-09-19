@@ -82,14 +82,18 @@ function formatDateLabel(date: string): string {
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(parsed);
 }
 
-function formatGeneratedAt(value: string | null): string {
+function formatGeneratedAtLabel(value: string | null, t: Translator): string {
   if (!value) return "";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
   const diff = Date.now() - date.getTime();
-  if (diff < 60_000) return "just now";
-  if (diff < 60 * 60_000) return `${Math.floor(diff / 60_000)}m ago`;
-  if (diff < 24 * 60 * 60_000) return `${Math.floor(diff / (60 * 60_000))}h ago`;
+  if (diff < 60_000) return t("accounts.just.now");
+  if (diff < 60 * 60_000) {
+    return t("accounts.count.m.ago", { count: Math.floor(diff / 60_000) });
+  }
+  if (diff < 24 * 60 * 60_000) {
+    return t("accounts.count.h.ago", { count: Math.floor(diff / (60 * 60_000)) });
+  }
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(date);
 }
 
@@ -109,11 +113,11 @@ function sumDays(daily: AccountDailyUsage[], days: number): number {
 
 type ActivityRange = 30 | 90 | 180 | "all";
 
-const ACTIVITY_RANGE_OPTIONS: { value: ActivityRange; label: string }[] = [
-  { value: 30, label: "30d" },
-  { value: 90, label: "3 mo" },
-  { value: 180, label: "6 mo" },
-  { value: "all", label: "All" },
+const ACTIVITY_RANGE_OPTIONS: { value: ActivityRange; labelKey: string }[] = [
+  { value: 30, labelKey: "stats.range.30.days" },
+  { value: 90, labelKey: "stats.range.3.months" },
+  { value: 180, labelKey: "stats.range.6.months" },
+  { value: "all", labelKey: "stats.range.all" },
 ];
 
 function activityRangeDays(range: ActivityRange, daily: AccountDailyUsage[]): number {
@@ -196,8 +200,8 @@ function TokenActivity({ daily }: { daily: AccountDailyUsage[] }) {
             aria-label={t("stats.token.activity.range")}
           >
             {ACTIVITY_RANGE_OPTIONS.map((option) => (
-              <option key={option.label} value={option.value}>
-                {option.label}
+              <option key={option.labelKey} value={option.value}>
+                {t(option.labelKey)}
               </option>
             ))}
           </select>
@@ -362,6 +366,8 @@ export function AccountUsageStats({
   const requestSeq = useRef(0);
   const backgroundInFlight = useRef(false);
   const lastObservedUsage = useRef<UsageInfo | undefined>(usage);
+  const translatorRef = useRef(t);
+  translatorRef.current = t;
 
   const loadStats = useCallback(async (background = false) => {
     if (background && backgroundInFlight.current) return;
@@ -369,7 +375,10 @@ export function AccountUsageStats({
 
     if (!enabled) {
       if (background) return;
-      const next = emptyStats(accountId, t("stats.chat.gpt.only.usage.stats"));
+      const next = emptyStats(
+        accountId,
+        translatorRef.current("stats.chat.gpt.only.usage.stats")
+      );
       setStats(next);
       onStatsLoaded?.(next);
       setLoading(false);
@@ -401,7 +410,7 @@ export function AccountUsageStats({
         setLoading(false);
       }
     }
-  }, [accountId, enabled, onStatsLoaded, t]);
+  }, [accountId, enabled, onStatsLoaded]);
 
   useEffect(() => {
     requestSeq.current += 1;
@@ -418,7 +427,9 @@ export function AccountUsageStats({
   }, [enabled, loadStats, open, usage, usageLoading]);
 
   const currentStats = stats?.account_id === accountId ? stats : null;
-  const generatedAt = currentStats ? formatGeneratedAt(currentStats.generated_at) : "";
+  const generatedAt = currentStats
+    ? formatGeneratedAtLabel(currentStats.generated_at, t)
+    : "";
   const todayTokens = currentStats ? sumDays(currentStats.daily, 1) : null;
   const sevenDayTokens = currentStats ? sumDays(currentStats.daily, 7) : null;
   const thirtyDayTokens = currentStats ? sumDays(currentStats.daily, 30) : null;

@@ -174,6 +174,8 @@ function App() {
   const [isCompletingForceClose, setIsCompletingForceClose] = useState(false);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const forceCloseInFlightRef = useRef(false);
+  const translatorRef = useRef(t);
+  translatorRef.current = t;
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -483,15 +485,15 @@ function App() {
   }, []);
 
   const formatWarmupError = useCallback((err: unknown) => {
-    if (!err) return t("app.unknown.error");
+    if (!err) return translatorRef.current("app.unknown.error");
     if (err instanceof Error && err.message) return err.message;
     if (typeof err === "string") return err;
     try {
       return JSON.stringify(err);
     } catch {
-      return t("app.unknown.error");
+      return translatorRef.current("app.unknown.error");
     }
-  }, [t]);
+  }, []);
 
   const refreshWarmupProjection = useCallback(async () => {
     const state = await invokeBackend<WarmupState>("get_warmup_state");
@@ -553,10 +555,13 @@ function App() {
               setSwitchingId(accountId);
               await switchAccount(accountId);
               setPendingSwitchAccountId(null);
-              showWarmupToast(t("app.switched.account.from.tray"));
+              showWarmupToast(translatorRef.current("app.switched.account.from.tray"));
             } catch (err) {
               console.error("Failed to retry tray account switch:", err);
-              showWarmupToast(t("app.switch.failed.error", { error: formatWarmupError(err) }), true);
+              showWarmupToast(
+                translatorRef.current("app.switch.failed.error", { error: formatWarmupError(err) }),
+                true
+              );
             } finally {
               setSwitchingId(null);
             }
@@ -564,7 +569,7 @@ function App() {
           }
 
           showWarmupToast(
-            event.payload?.error || t("app.account.switch.was.blocked"),
+            event.payload?.error || translatorRef.current("app.account.switch.was.blocked"),
             true
           );
         }
@@ -599,7 +604,10 @@ function App() {
         setCloseBehaviorPromptOpen(false);
       } catch (err) {
         console.error("Failed to complete close behavior:", err);
-        showWarmupToast(t("app.close.failed.error", { error: formatWarmupError(err) }), true);
+        showWarmupToast(
+          translatorRef.current("app.close.failed.error", { error: formatWarmupError(err) }),
+          true
+        );
       } finally {
         setIsCompletingCloseBehavior(false);
       }
@@ -674,11 +682,11 @@ function App() {
       } catch (err) {
         console.error("Failed to refresh warm-up projection:", err);
       }
-      showWarmupToast(t("app.warmup.sent.for", { account: accountName }));
+      showWarmupToast(t("warmup.account.sent", { account: accountName }));
     } catch (err) {
       console.error("Failed to warm up account:", err);
       showWarmupToast(
-        t("app.warmup.failed.for", { account: accountName, error: formatWarmupError(err) }),
+        t("warmup.account.failed", { account: accountName, error: formatWarmupError(err) }),
         true
       );
     } finally {
@@ -691,7 +699,7 @@ function App() {
       setIsWarmingAll(true);
       const summary = await warmupAllAccounts();
       if (summary.total_accounts === 0) {
-        showWarmupToast(t("app.no.accounts.available.for.warm.up"), true);
+        showWarmupToast(t("warmup.none"), true);
         return;
       }
 
@@ -702,10 +710,10 @@ function App() {
       }
 
       if (summary.failed_account_ids.length === 0) {
-        showWarmupToast(t("app.warmup.all.sent", { count: summary.warmed_accounts }));
+        showWarmupToast(t("warmup.all.sent", { count: summary.warmed_accounts }));
       } else {
         showWarmupToast(
-          t("app.warmup.all.summary", {
+          t("warmup.all.summary", {
             warmed: summary.warmed_accounts,
             total: summary.total_accounts,
             failed: summary.failed_account_ids.length,
@@ -715,7 +723,7 @@ function App() {
       }
     } catch (err) {
       console.error("Failed to warm up all accounts:", err);
-      showWarmupToast(t("app.warmup.all.failed", { error: formatWarmupError(err) }), true);
+      showWarmupToast(t("warmup.all.failed", { error: formatWarmupError(err) }), true);
     } finally {
       setIsWarmingAll(false);
     }
@@ -746,7 +754,7 @@ function App() {
       isEnabled: boolean,
       isRunning: boolean
     ) => {
-      if (isRunning) return t("app.warming");
+      if (isRunning) return t("warmup.state.warming");
       if (!isEnabled) return t("common.off");
       if (!usage || usage.error) return t("common.on");
 
@@ -768,7 +776,7 @@ function App() {
   );
 
   const headerAutoWarmupLabel = useMemo(() => {
-    if (autoWarmupRunningIds.size > 0) return t("app.auto.warming");
+    if (autoWarmupRunningIds.size > 0) return t("warmup.state.auto_warming");
     return autoWarmupAllEnabled || autoWarmupAccountIds.size > 0
       ? `${t("common.auto")}: ${t("common.on")}`
       : `${t("common.auto")}: ${t("common.off")}`;
@@ -793,7 +801,7 @@ function App() {
   );
 
   const timedWarmupLabel = useMemo(() => {
-    if (!timedWarmupEnabled || timedWarmupTimes.length === 0) return `${t("app.timed")}: ${t("common.off")}`;
+    if (!timedWarmupEnabled || timedWarmupTimes.length === 0) return `${t("warmup.timed.label")}: ${t("common.off")}`;
 
     const now = new Date();
     const nowMinutes = now.getHours() * 60 + now.getMinutes();
@@ -801,7 +809,7 @@ function App() {
       const [hours, minutes] = time.split(":").map(Number);
       return hours * 60 + minutes > nowMinutes;
     });
-    return `${t("app.timed")}: ${upcoming ?? timedWarmupTimes[0]}`;
+    return `${t("warmup.timed.label")}: ${upcoming ?? timedWarmupTimes[0]}`;
   }, [t, timedWarmupEnabled, timedWarmupTimes]);
 
   const requestBackupPassphrase = (title: string): Promise<string | null> =>
@@ -874,7 +882,7 @@ function App() {
       const summary = await importAccountsSlimText(configPayload);
       setMaskedAccounts(new Set());
       setIsConfigModalOpen(false);
-      showWarmupToast(t("app.imported.imported.skipped.skipped.total.total", {
+      showWarmupToast(t("backup.import_summary", {
         imported: summary.imported_count,
         skipped: summary.skipped_count,
         total: summary.total_in_payload,
@@ -892,14 +900,15 @@ function App() {
   const handleExportFullFile = async () => {
     try {
       setIsExportingFull(true);
-      const exported = await exportFullBackupFile(() =>
-        requestBackupPassphrase(t("app.create.a.passphrase.for.this.full.encrypted.backup"))
+      const exported = await exportFullBackupFile(
+        () => requestBackupPassphrase(t("backup.passphrase.create_title")),
+        t("platform.backup.export_title")
       );
       if (!exported) return;
-      showWarmupToast(t("app.full.encrypted.file.exported"));
+      showWarmupToast(t("backup.full.exported"));
     } catch (err) {
       console.error("Failed to export full encrypted file:", err);
-      showWarmupToast(t("app.full.export.failed"), true);
+      showWarmupToast(t("backup.full.export_failed"), true);
     } finally {
       setIsExportingFull(false);
     }
@@ -908,22 +917,23 @@ function App() {
   const handleImportFullFile = async () => {
     try {
       setIsImportingFull(true);
-      const summary = await importFullBackupFile(() =>
-        requestBackupPassphrase(t("app.enter.the.backup.passphrase"))
+      const summary = await importFullBackupFile(
+        () => requestBackupPassphrase(t("backup.passphrase.enter_title")),
+        t("platform.backup.import_title")
       );
       if (!summary) return;
       const accountList = await loadAccounts();
       await refreshUsage(accountList);
       const maskedIds = await loadMaskedAccountIds();
       setMaskedAccounts(new Set(maskedIds));
-      showWarmupToast(t("app.imported.imported.skipped.skipped.total.total", {
+      showWarmupToast(t("backup.import_summary", {
         imported: summary.imported_count,
         skipped: summary.skipped_count,
         total: summary.total_in_payload,
       }));
     } catch (err) {
       console.error("Failed to import full encrypted file:", err);
-      showWarmupToast(t("app.full.import.failed"), true);
+      showWarmupToast(t("backup.full.import_failed"), true);
     } finally {
       setIsImportingFull(false);
     }
@@ -1206,7 +1216,7 @@ function App() {
                     ? "bg-amber-100 text-amber-500 dark:bg-amber-900/30 dark:text-amber-300"
                     : "bg-amber-50 text-amber-700 hover:bg-amber-100 dark:bg-amber-900/20 dark:text-amber-300 dark:hover:bg-amber-900/40"
                 }`}
-                title={isWarmingAll ? t("app.warming.up.all.accounts") : t("app.warm.up.all.accounts")}
+                title={isWarmingAll ? t("warmup.all.running") : t("warmup.all.run")}
               >
                 <span className={isWarmingAll ? "animate-pulse" : ""}>⚡</span>
               </button>
@@ -1272,7 +1282,7 @@ function App() {
                       disabled={accounts.length === 0}
                       className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 disabled:opacity-50 dark:text-white dark:hover:bg-neutral-900"
                     >
-                      <span>{t("app.auto.warm.up")}</span>
+                      <span>{t("warmup.auto.label")}</span>
                       <span
                         className={`rounded-md px-1.5 py-0.5 text-[11px] font-medium ${
                           autoWarmupAllEnabled
@@ -1318,7 +1328,7 @@ function App() {
                 {isTimedWarmupOpen && (
                   <div className="absolute right-0 z-20 mt-2 w-64 rounded-lg border border-gray-200 bg-white p-3 shadow-lg dark:border-gray-700 dark:bg-gray-900">
                     <label className="flex items-center justify-between text-sm font-medium text-gray-800 dark:text-gray-100">
-                      <span>{t("app.timed.warm.up")}</span>
+                      <span>{t("warmup.timed.title")}</span>
                       <input
                         type="checkbox"
                         checked={timedWarmupEnabled}
@@ -1347,7 +1357,8 @@ function App() {
                             <button
                               onClick={() => handleRemoveTimedWarmupTime(time)}
                               className="text-gray-400 transition-colors hover:text-red-500"
-                              title={`Remove ${time}`}
+                              title={t("app.remove.time", { time })}
+                              aria-label={t("app.remove.time", { time })}
                             >
                               ✕
                             </button>
@@ -1945,6 +1956,8 @@ function App() {
               <button
                 onClick={() => setIsConfigModalOpen(false)}
                 className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+                aria-label={t("app.close")}
+                title={t("app.close")}
               >
                 ✕
               </button>

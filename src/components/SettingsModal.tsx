@@ -34,7 +34,7 @@ export function SettingsModal({
   onClosePreferenceChange,
   onClose,
 }: SettingsModalProps) {
-  const { browserPreference, setBrowserPreference, t } = useI18n();
+  const { browserPreference, setBrowserPreference, reconcileDesktopLanguage, t } = useI18n();
   const [displaySettings, setDisplaySettings] = useState<DisplaySettings | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -103,12 +103,14 @@ export function SettingsModal({
 
     setSaving(true);
     try {
-      await invokeBackend("set_language", { language: next });
-      await loadDisplaySettings();
+      const authoritative = await invokeBackend<DisplaySettings>("set_language", {
+        language: next,
+      });
+      setDisplaySettings(authoritative);
+      reconcileDesktopLanguage(authoritative.resolved_language);
     } catch (err) {
       requestId.current += 1;
-      const message = err instanceof Error ? err.message : String(err);
-      setError(t("settings.language.save_failed", { error: message }));
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSaving(false);
     }

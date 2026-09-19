@@ -9,8 +9,8 @@ import {
   type ReactNode,
 } from "react";
 import i18next from "i18next";
-import enUS from "../locales/en-US.json";
-import zhCN from "../locales/zh-CN.json";
+import enUS from "../locales/en-US.json" with { type: "json" };
+import zhCN from "../locales/zh-CN.json" with { type: "json" };
 
 export type SupportedLanguage = "en-US" | "zh-CN";
 export type BrowserLanguagePreference = "browser" | SupportedLanguage;
@@ -31,6 +31,7 @@ type LanguageContextValue = {
   language: SupportedLanguage;
   browserPreference: BrowserLanguagePreference;
   setBrowserPreference: (preference: BrowserLanguagePreference) => void;
+  reconcileDesktopLanguage: (language: SupportedLanguage) => void;
   t: (key: string, variables?: Record<string, string | number>) => string;
 };
 
@@ -89,8 +90,15 @@ function readBrowserPreference(): BrowserLanguagePreference {
   return "browser";
 }
 
+export function resolveBrowserLanguagePreference(
+  preference: BrowserLanguagePreference,
+  locales: readonly string[],
+): SupportedLanguage {
+  return preference === "browser" ? resolvePreferredLanguage(locales) : preference;
+}
+
 function resolveBrowserPreference(preference: BrowserLanguagePreference): SupportedLanguage {
-  return preference === "browser" ? resolvePreferredLanguage(browserLocales()) : preference;
+  return resolveBrowserLanguagePreference(preference, browserLocales());
 }
 
 export function translate(key: string, language: SupportedLanguage = "en-US"): string {
@@ -114,7 +122,9 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   );
 
   useEffect(() => {
-    void i18n.changeLanguage(language);
+    if (typeof document !== "undefined") {
+      document.documentElement.lang = language;
+    }
   }, [language]);
 
   useEffect(() => {
@@ -125,9 +135,9 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 
     const loadDesktopLanguage = () =>
       import("@tauri-apps/api/core")
-        .then(({ invoke }) => invoke<string>("get_language"))
-        .then((value) => {
-          if (!disposed) setLanguage(resolveInitialLanguage(value));
+        .then(({ invoke }) => invoke<{ resolved_language?: string }>("get_display_settings"))
+        .then((settings) => {
+          if (!disposed) setLanguage(resolveInitialLanguage(settings.resolved_language));
         })
         .catch(() => undefined);
 
@@ -160,15 +170,23 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     [desktop]
   );
 
+  const reconcileDesktopLanguage = useCallback(
+    (next: SupportedLanguage) => {
+      if (desktop) setLanguage(next);
+    },
+    [desktop]
+  );
+
   const value = useMemo(
     () => ({
       language,
       browserPreference,
       setBrowserPreference,
+      reconcileDesktopLanguage,
       t: (key: string, variables: Record<string, string | number> = {}) =>
         translateMessage(key, variables, language),
     }),
-    [browserPreference, language, setBrowserPreference]
+    [browserPreference, language, reconcileDesktopLanguage, setBrowserPreference]
   );
 
   return createElement(LanguageContext.Provider, { value }, children);

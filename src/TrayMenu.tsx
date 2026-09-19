@@ -400,16 +400,19 @@ function TrayMenu() {
               usage && !usage.error
                 ? ([
                     {
+                      kind: "session" as const,
                       label: t("tray.session"),
                       used: usage.primary_used_percent,
                       resetAt: usage.primary_resets_at,
                     },
                     {
+                      kind: "weekly" as const,
                       label: t("tray.weekly"),
                       used: usage.secondary_used_percent,
                       resetAt: usage.secondary_resets_at,
                     },
                   ].filter((w) => w.used != null) as {
+                    kind: "session" | "weekly";
                     label: string;
                     used: number;
                     resetAt: number | null;
@@ -459,9 +462,9 @@ function TrayMenu() {
                         const remaining = Math.max(0, 100 - w.used);
                         const tone = remainingTone(remaining);
                         const reset = formatResetAt(w.resetAt);
-                        const exactReset = formatExactResetTime(w.resetAt, w.label === "Weekly");
+                        const exactReset = formatExactResetTime(w.resetAt, w.kind === "weekly");
                         return (
-                          <span key={w.label} className="block">
+                          <span key={w.kind} className="block">
                             <span className="flex items-center gap-1">
                               <span className="text-[11px] font-medium text-gray-700 dark:text-gray-200">
                                 {w.label}
@@ -478,7 +481,9 @@ function TrayMenu() {
                             </span>
                             <span className="mt-0.5 flex justify-between text-[11px] text-gray-500 dark:text-gray-400">
                               <span className={tone.text}>
-                                {remaining.toFixed(0)}% left
+                                {t("tray.remaining.percent", {
+                                  value: remaining.toFixed(0),
+                                })}
                               </span>
                               {reset && (
                                 <span className="shrink-0 whitespace-nowrap">

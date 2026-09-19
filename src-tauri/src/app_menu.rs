@@ -30,11 +30,21 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 }
 
 pub fn refresh<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    refresh_internal(app, true)
+}
+
+pub(crate) fn refresh_without_notification<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    refresh_internal(app, false)
+}
+
+fn refresh_internal<R: Runtime>(app: &AppHandle<R>, notify: bool) -> tauri::Result<()> {
     let settings = load_app_settings().unwrap_or_default();
     let menu = build_menu(app, &settings)?;
     app.set_menu(menu)?;
-    if let Err(error) = app.emit("app-settings-changed", ()) {
-        eprintln!("Failed to notify settings changes: {error}");
+    if notify {
+        if let Err(error) = app.emit("app-settings-changed", ()) {
+            eprintln!("Failed to notify settings changes: {error}");
+        }
     }
     Ok(())
 }
@@ -298,7 +308,11 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
                 pkg_info.name.clone(),
                 true,
                 &[
-                    &PredefinedMenuItem::about(app, Some(&text(language, "About")), Some(about_metadata))?,
+                    &PredefinedMenuItem::about(
+                        app,
+                        Some(&text(language, "About")),
+                        Some(about_metadata),
+                    )?,
                     &PredefinedMenuItem::separator(app)?,
                     &settings_menu,
                     &PredefinedMenuItem::separator(app)?,
@@ -346,7 +360,10 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
                 app,
                 text(language, "View"),
                 true,
-                &[&PredefinedMenuItem::fullscreen(app, Some(&text(language, "Fullscreen")))?],
+                &[&PredefinedMenuItem::fullscreen(
+                    app,
+                    Some(&text(language, "Fullscreen")),
+                )?],
             )?,
             #[cfg(not(target_os = "macos"))]
             &settings_menu,
@@ -439,6 +456,8 @@ mod text_tests {
     fn native_menu_text_has_english_fallback_and_simplified_chinese() {
         assert_eq!(text("en-US", "Settings"), "Settings");
         assert_eq!(text("zh-CN", "Settings"), "设置");
+        assert_eq!(text("zh-CN", "File"), "文件");
+        assert_eq!(text("zh-CN", "Quit"), "退出");
         assert_eq!(text("zh-CN", "untranslated"), "untranslated");
     }
 }

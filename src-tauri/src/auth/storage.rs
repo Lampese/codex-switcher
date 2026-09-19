@@ -404,8 +404,8 @@ fn load_accounts_from_path(path: &Path) -> Result<AccountsStore> {
 fn parse_existing_app_settings(content: &str) -> Result<AppSettings> {
     let raw: serde_json::Value =
         serde_json::from_str(content).context("Failed to parse settings JSON")?;
-    let had_language_preference = raw.get("ui_language_preference").is_some()
-        || raw.get("language").is_some();
+    let had_language_preference =
+        raw.get("ui_language_preference").is_some() || raw.get("language").is_some();
 
     let mut settings: AppSettings =
         serde_json::from_value(raw).context("Failed to decode app settings")?;
@@ -419,11 +419,26 @@ fn parse_existing_app_settings(content: &str) -> Result<AppSettings> {
     Ok(settings)
 }
 
+fn defaults_for_missing_settings(accounts_file_exists: bool) -> AppSettings {
+    let mut settings = AppSettings::default();
+    if accounts_file_exists {
+        settings.ui_language_preference = crate::types::UiLanguagePreference::English;
+    }
+    settings
+}
+
 pub fn load_app_settings() -> Result<AppSettings> {
     let path = get_settings_file()?;
 
     if !path.exists() {
-        return Ok(AppSettings::default());
+        // A settings file is not a reliable installation marker: older
+        // installs may already have an account store without ever having
+        // written settings. Keep those installs on the pre-localization
+        // English UI while preserving System default for genuinely new users.
+        let accounts_file_exists = get_accounts_file()
+            .map(|accounts| accounts.exists())
+            .unwrap_or(false);
+        return Ok(defaults_for_missing_settings(accounts_file_exists));
     }
 
     let content = fs::read_to_string(&path)
@@ -709,8 +724,9 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
 mod tests {
     use super::{
         acquire_mutation_lock_at, add_account_to_store, reconcile_active_projection,
-        sync_active_account_tokens, update_account_chatgpt_tokens_in_store, write_file_atomic,
-        write_file_atomic_with_pre_replace, parse_existing_app_settings,
+        defaults_for_missing_settings, parse_existing_app_settings, sync_active_account_tokens,
+        update_account_chatgpt_tokens_in_store, write_file_atomic,
+        write_file_atomic_with_pre_replace,
     };
     use crate::types::{
         AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData, UiLanguagePreference,
@@ -737,6 +753,22 @@ mod tests {
         assert_eq!(
             settings.ui_language_preference,
             UiLanguagePreference::SimplifiedChinese
+        );
+    }
+
+    #[test]
+    fn missing_settings_keep_system_for_new_install() {
+        assert_eq!(
+            defaults_for_missing_settings(false).ui_language_preference,
+            UiLanguagePreference::System
+        );
+    }
+
+    #[test]
+    fn missing_settings_keep_english_for_existing_install() {
+        assert_eq!(
+            defaults_for_missing_settings(true).ui_language_preference,
+            UiLanguagePreference::English
         );
     }
 
