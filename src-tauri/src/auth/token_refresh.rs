@@ -463,6 +463,17 @@ mod tests {
     }
 
     #[test]
+    fn parseable_access_token_within_five_minutes_requires_refresh() {
+        let now = 1_800_000_000;
+
+        assert!(should_refresh_proactively_at(
+            &jwt_with_exp(now + 5 * 60),
+            None,
+            now,
+        ));
+    }
+
+    #[test]
     fn unparseable_access_token_uses_recent_refresh_age() {
         let now = 1_800_000_000;
 
