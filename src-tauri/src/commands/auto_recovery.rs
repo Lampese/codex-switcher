@@ -195,11 +195,22 @@ pub fn find_active_sessions() -> Result<Vec<ActiveCodexSession>> {
         // Determine PID holding or associated with this session
         let pid = find_pid_for_session(&session_id, &path).unwrap_or(0);
         let rollout_path = locate_rollout_file(&home, &session_id);
-        let cwd = if pid > 0 {
-            get_process_cwd(pid)
-        } else {
-            None
-        }.or_else(|| rollout_path.as_deref().and_then(extract_cwd_from_rollout));
+
+        // Inspect rollout metadata: if this is a subagent (child thread of another session),
+        // skip it! Only top-level root sessions should be monitored and resumed as terminals.
+        let rollout_meta = rollout_path.as_deref().and_then(inspect_session_meta);
+        if let Some(ref meta) = rollout_meta {
+            if meta.parent_thread_id.is_some() {
+                // Subagent session - owned and managed by parent session, do not manage directly
+                continue;
+            }
+        }
+
+        // Canonical working directory: prefer rollout metadata, fallback to process cwd
+        let cwd = rollout_meta
+            .as_ref()
+            .and_then(|m| m.cwd.clone())
+            .or_else(|| if pid > 0 { get_process_cwd(pid) } else { None });
 
         let is_managed = pid > 0 && managed_pids.contains(&pid);
 
@@ -220,6 +231,66 @@ pub fn find_active_sessions() -> Result<Vec<ActiveCodexSession>> {
     }
 
     Ok(sessions)
+}
+
+/// Metadata extracted from session rollout file
+#[derive(Debug, Default)]
+struct SessionRolloutMeta {
+    parent_thread_id: Option<String>,
+    cwd: Option<String>,
+}
+
+/// Inspect the initial lines of a rollout to determine if it is a subagent and extract its true project cwd
+fn inspect_session_meta(rollout_path: &Path) -> Option<SessionRolloutMeta> {
+    use std::io::{BufRead, BufReader};
+    let file = fs::File::open(rollout_path).ok()?;
+    let reader = BufReader::new(file);
+
+    let mut parent_thread_id = None;
+    let mut cwd = None;
+
+    for line in reader.lines().take(50).filter_map(Result::ok) {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
+            let payload = val.get("payload");
+            if parent_thread_id.is_none() {
+                if let Some(pid) = payload
+                    .and_then(|p| p.get("parent_thread_id"))
+                    .and_then(|id| id.as_str())
+                    .filter(|id| !id.is_empty())
+                {
+                    parent_thread_id = Some(pid.to_string());
+                }
+            }
+
+            if cwd.is_none() {
+                if let Some(c) = payload
+                    .and_then(|p| p.get("cwd"))
+                    .or_else(|| payload.and_then(|p| p.get("thread_settings")).and_then(|ts| ts.get("cwd")))
+                    .or_else(|| {
+                        payload
+                            .and_then(|p| p.get("state"))
+                            .and_then(|s| s.get("environments"))
+                            .and_then(|e| e.get("environments"))
+                            .and_then(|e| e.get("local"))
+                            .and_then(|l| l.get("cwd"))
+                    })
+                    .and_then(|c| c.as_str())
+                    .filter(|c| !c.is_empty())
+                {
+                    cwd = Some(c.to_string());
+                }
+            }
+
+            if parent_thread_id.is_some() && cwd.is_some() {
+                break;
+            }
+        }
+    }
+
+    Some(SessionRolloutMeta {
+        parent_thread_id,
+        cwd,
+    })
 }
 
 /// Locate rollout jsonl file for a session ID in ~/.codex/sessions/
@@ -255,35 +326,6 @@ pub fn locate_rollout_file(codex_home: &Path, session_id: &str) -> Option<PathBu
                         }
                     }
                 }
-            }
-        }
-    }
-
-    None
-}
-
-/// Extract working directory from rollout jsonl file if process is no longer inspectable
-fn extract_cwd_from_rollout(rollout_path: &Path) -> Option<String> {
-    use std::io::{BufRead, BufReader};
-    let file = fs::File::open(rollout_path).ok()?;
-    let reader = BufReader::new(file);
-
-    for line in reader.lines().take(50).filter_map(Result::ok) {
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
-            if let Some(cwd) = val
-                .get("payload")
-                .and_then(|p| p.get("thread_settings"))
-                .and_then(|ts| ts.get("cwd"))
-                .and_then(|c| c.as_str())
-            {
-                return Some(cwd.to_string());
-            }
-            if let Some(cwd) = val
-                .get("payload")
-                .and_then(|p| p.get("cwd"))
-                .and_then(|c| c.as_str())
-            {
-                return Some(cwd.to_string());
             }
         }
     }
@@ -745,9 +787,14 @@ CODEX_BIN="$1"
 SESSION_ID="$2"
 CURRENT_PHRASE="$3"
 RESTART_FILE="$4"
+SESSION_CWD="$5"
 
 while true; do
-    "$CODEX_BIN" resume "$SESSION_ID" "$CURRENT_PHRASE"
+    if [ -n "$SESSION_CWD" ] && [ -d "$SESSION_CWD" ]; then
+        "$CODEX_BIN" resume -C "$SESSION_CWD" "$SESSION_ID" "$CURRENT_PHRASE"
+    else
+        "$CODEX_BIN" resume "$SESSION_ID" "$CURRENT_PHRASE"
+    fi
     if [ -f "$RESTART_FILE" ]; then
         if [ -s "$RESTART_FILE" ]; then
             CURRENT_PHRASE=$(cat "$RESTART_FILE" 2>/dev/null)
@@ -770,6 +817,7 @@ exec $SHELL
             let term_name = term_path.file_name().unwrap_or_default().to_string_lossy();
             let mut cmd = Command::new(&term_path);
 
+            let cwd_arg = cwd.unwrap_or("");
             let args_bundle = [
                 "sh",
                 "-c",
@@ -779,6 +827,7 @@ exec $SHELL
                 session_id,
                 phrase,
                 &restart_file_str,
+                cwd_arg,
             ];
 
             if term_name.contains("ghostty") {
