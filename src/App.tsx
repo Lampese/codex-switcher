@@ -636,9 +636,14 @@ function App() {
       const stop = await listen<{ message: string; event_type: string }>(
         "session-recovery-event",
         (event) => {
-          showWarmupToast(event.payload.message);
-          void loadAccounts();
-          void refreshUsage();
+          // Only show notification and reload account state when an actual switch occurred
+          if (
+            event.payload.event_type === "account_switched" ||
+            event.payload.event_type === "account_switched_queued"
+          ) {
+            showWarmupToast(event.payload.message);
+            void loadAccounts();
+          }
         }
       );
       if (disposed) stop();
@@ -648,7 +653,7 @@ function App() {
       disposed = true;
       unlisten?.();
     };
-  }, [loadAccounts, refreshUsage, showWarmupToast]);
+  }, [loadAccounts, showWarmupToast]);
 
   const formatWarmupError = useCallback((err: unknown) => {
     if (!err) return "Unknown error";
