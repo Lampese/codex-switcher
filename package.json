@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "test:desktop-reopen": "node --experimental-strip-types --test tests/desktopReopen.test.ts",
+    "test:browser-runtime": "node --experimental-strip-types --test tests/browserRuntime.test.ts",
     "test:close-preference": "node --experimental-strip-types --test tests/codexClosePreference.test.ts",
     "test:reset-credits": "node --experimental-strip-types --test tests/resetCredits.test.ts",
     "preview": "vite preview",
