@@ -12,13 +12,21 @@ use crate::types::{
 
 /// Get the official Codex home directory
 pub fn get_codex_home() -> Result<PathBuf> {
-    // Check for CODEX_HOME environment variable first
-    if let Ok(codex_home) = std::env::var("CODEX_HOME") {
-        return Ok(PathBuf::from(codex_home));
+    #[cfg(test)]
+    {
+        Ok(super::test_support::home_dir()?.join(".codex"))
     }
 
-    let home = dirs::home_dir().context("Could not find home directory")?;
-    Ok(home.join(".codex"))
+    #[cfg(not(test))]
+    {
+        // Check for CODEX_HOME environment variable first
+        if let Ok(codex_home) = std::env::var("CODEX_HOME") {
+            return Ok(PathBuf::from(codex_home));
+        }
+
+        let home = dirs::home_dir().context("Could not find home directory")?;
+        Ok(home.join(".codex"))
+    }
 }
 
 /// Get the path to the official auth.json file
