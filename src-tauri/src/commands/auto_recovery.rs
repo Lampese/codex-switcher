@@ -856,12 +856,10 @@ pub async fn check_and_recover_sessions() -> Result<Option<RecoveryEventNotifica
     let sessions = find_active_sessions()?;
 
     for session in sessions {
-        // If the session is healthy (actively executing or completed normally),
-        // clear its capacity retry counter so future errors start fresh.
+        // If the session has no error detected, skip it.
+        // Do NOT wipe capacity_retries here because during active turns (task_started),
+        // last_error is None, which would reset the retry counter prematurely!
         if session.last_error.is_none() {
-            if let Ok(mut tracker) = TRACKER.lock() {
-                tracker.capacity_retries.remove(&session.session_id);
-            }
             continue;
         }
 
@@ -876,6 +874,7 @@ pub async fn check_and_recover_sessions() -> Result<Option<RecoveryEventNotifica
                 }
 
                 let mut should_retry = false;
+                let mut should_escalate = false;
                 let mut attempt_number = 1;
 
                 {
@@ -887,7 +886,12 @@ pub async fn check_and_recover_sessions() -> Result<Option<RecoveryEventNotifica
                     let entry = tracker
                         .capacity_retries
                         .entry(session.session_id.clone())
-                        .or_insert((None, 0, Instant::now() - Duration::from_secs(60)));
+                        .or_insert((None, 0, Instant::now() - Duration::from_secs(300)));
+
+                    // If previous capacity attempt was long ago (>3 mins), start a fresh episode
+                    if entry.2.elapsed() > Duration::from_secs(180) {
+                        entry.1 = 0;
+                    }
 
                     let current_turn_id = error.turn_id.clone().or_else(|| Some("unknown_turn".to_string()));
 
@@ -910,11 +914,21 @@ pub async fn check_and_recover_sessions() -> Result<Option<RecoveryEventNotifica
                             entry.2 = Instant::now();
                             attempt_number = entry.1;
                             should_retry = true;
+                        } else if settings.auto_retry_capacity_escalate_to_switch {
+                            // Retries on this account exhausted; mark for escalation!
+                            should_escalate = true;
                         } else {
-                            // Consecutive retry limit reached
+                            // Consecutive retry limit reached without escalation
                             continue;
                         }
                     }
+                }
+
+                if should_escalate {
+                    if let Ok(mut t) = TRACKER.lock() {
+                        t.capacity_retries.remove(&session.session_id);
+                    }
+                    return handle_account_switch_for_session(&session, &settings).await;
                 }
 
                 if should_retry {
