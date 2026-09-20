@@ -387,7 +387,11 @@ pub fn check_rollout_for_errors(rollout_path: &Path, session_id: &str) -> Option
 
     for line in content.lines().rev() {
         let line = line.trim();
-        if !line.contains("\"task_complete\"") {
+        if line.is_empty() {
+            continue;
+        }
+
+        if !line.contains("\"task_started\"") && !line.contains("\"task_complete\"") {
             continue;
         }
 
@@ -398,48 +402,56 @@ pub fn check_rollout_for_errors(rollout_path: &Path, session_id: &str) -> Option
         let Some(payload) = json_val.get("payload") else {
             continue;
         };
-        if payload.get("type").and_then(|t| t.as_str()) != Some("task_complete") {
-            continue;
+
+        let event_type = payload.get("type").and_then(|t| t.as_str());
+
+        // If the newest turn event is `task_started`, the session is actively executing a turn.
+        // It is NOT in an error state.
+        if event_type == Some("task_started") {
+            return None;
         }
 
-        // If the latest task_complete succeeded without error, session is in a good state!
-        let Some(error_obj) = payload.get("error").filter(|e| !e.is_null()) else {
-            return None;
-        };
+        if event_type == Some("task_complete") {
+            // This is the completion event of the latest turn.
+            // If it succeeded without error, the session completed normally and is healthy.
+            let Some(error_obj) = payload.get("error").filter(|e| !e.is_null()) else {
+                return None;
+            };
 
-        let codex_error_info = error_obj.get("codex_error_info").and_then(|v| v.as_str());
-        let message = error_obj
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let turn_id = payload.get("turn_id").and_then(|v| v.as_str()).map(String::from);
+            let codex_error_info = error_obj.get("codex_error_info").and_then(|v| v.as_str());
+            let message = error_obj
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let turn_id = payload.get("turn_id").and_then(|v| v.as_str()).map(String::from);
 
-        let kind = match codex_error_info {
-            Some("usage_limit_exceeded") => Some(SessionErrorKind::UsageLimitExceeded),
-            Some("server_overloaded") => Some(SessionErrorKind::ServerOverloaded),
-            _ => {
-                if message.contains("usage limit") || message.contains("hit your usage limit") {
-                    Some(SessionErrorKind::UsageLimitExceeded)
-                } else if message.contains("Selected model is at capacity") {
-                    Some(SessionErrorKind::ServerOverloaded)
-                } else {
-                    None
+            let kind = match codex_error_info {
+                Some("usage_limit_exceeded") => Some(SessionErrorKind::UsageLimitExceeded),
+                Some("server_overloaded") => Some(SessionErrorKind::ServerOverloaded),
+                _ => {
+                    if message.contains("usage limit") || message.contains("hit your usage limit") {
+                        Some(SessionErrorKind::UsageLimitExceeded)
+                    } else if message.contains("Selected model is at capacity") {
+                        Some(SessionErrorKind::ServerOverloaded)
+                    } else {
+                        None
+                    }
                 }
-            }
-        };
+            };
 
-        if let Some(kind) = kind {
-            return Some(DetectedSessionError {
-                kind,
-                session_id: session_id.to_string(),
-                turn_id,
-                message,
-                detected_at: Utc::now(),
-            });
-        } else {
-            // Latest task completed with an error, but not one of the recoverable ones
-            return None;
+            if let Some(kind) = kind {
+                return Some(DetectedSessionError {
+                    kind,
+                    session_id: session_id.to_string(),
+                    turn_id,
+                    message,
+                    detected_at: Utc::now(),
+                });
+            } else {
+                // Latest task completed with some other unrecoverable error
+                return None;
+            }
         }
     }
 
@@ -633,6 +645,23 @@ pub async fn send_codex_queue_resume(session_id: &str, phrase: &str) -> Result<(
     Ok(())
 }
 
+/// Terminate a process cleanly with SIGTERM then SIGKILL
+pub fn terminate_process(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
+    }
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]).status();
+    }
+}
+
 /// Relaunch session inside user terminal emulator
 pub fn launch_session_in_terminal(
     session_id: &str,
@@ -732,6 +761,15 @@ pub async fn check_and_recover_sessions() -> Result<Option<RecoveryEventNotifica
     let sessions = find_active_sessions()?;
 
     for session in sessions {
+        // If the session is healthy (actively executing or completed normally),
+        // clear its capacity retry counter so future errors start fresh.
+        if session.last_error.is_none() {
+            if let Ok(mut tracker) = TRACKER.lock() {
+                tracker.capacity_retries.remove(&session.session_id);
+            }
+            continue;
+        }
+
         let Some(error) = &session.last_error else {
             continue;
         };
@@ -749,28 +787,38 @@ pub async fn check_and_recover_sessions() -> Result<Option<RecoveryEventNotifica
                     let mut tracker = TRACKER
                         .lock()
                         .map_err(|_| anyhow::anyhow!("Tracker poisoned"))?;
+                    
+                    // entry: (last_retried_turn_id, consecutive_attempts, last_attempt_time)
                     let entry = tracker
                         .capacity_retries
                         .entry(session.session_id.clone())
-                        .or_insert((error.turn_id.clone(), 0, Instant::now() - Duration::from_secs(60)));
+                        .or_insert((None, 0, Instant::now() - Duration::from_secs(60)));
 
-                    // If turn_id changed, reset count
-                    if entry.0 != error.turn_id {
-                        entry.0 = error.turn_id.clone();
-                        entry.1 = 0;
+                    let current_turn_id = error.turn_id.clone().or_else(|| Some("unknown_turn".to_string()));
+
+                    // If this exact turn error has ALREADY been sent to the queue, do NOT queue duplicate continue messages!
+                    if entry.0 == current_turn_id {
+                        continue;
                     }
 
+                    // Calculate delay for this consecutive attempt
                     let delay_needed = Duration::from_secs(
                         (settings.auto_retry_capacity_initial_delay_sec as u64)
                             .max(1)
                             * (entry.1 as u64 + 1),
                     );
 
-                    if entry.2.elapsed() >= delay_needed && entry.1 < settings.auto_retry_capacity_max_attempts {
-                        entry.1 += 1;
-                        entry.2 = Instant::now();
-                        attempt_number = entry.1;
-                        should_retry = true;
+                    if entry.2.elapsed() >= delay_needed {
+                        if entry.1 < settings.auto_retry_capacity_max_attempts {
+                            entry.0 = current_turn_id;
+                            entry.1 += 1;
+                            entry.2 = Instant::now();
+                            attempt_number = entry.1;
+                            should_retry = true;
+                        } else {
+                            // Consecutive retry limit reached
+                            continue;
+                        }
                     }
                 }
 
@@ -853,7 +901,17 @@ async fn handle_account_switch_for_session(
                 &settings.continue_phrase
             };
 
-            let _ = send_codex_queue_resume(&session.session_id, phrase).await;
+            // Terminate stale process that still holds old credentials in memory
+            if session.pid > 0 {
+                terminate_process(session.pid);
+            }
+
+            let _ = launch_session_in_terminal(
+                &session.session_id,
+                session.cwd.as_deref(),
+                phrase,
+                settings.preferred_terminal.as_deref(),
+            );
 
             if let Ok(mut tracker) = TRACKER.lock() {
                 let turn_key = session
@@ -867,10 +925,10 @@ async fn handle_account_switch_for_session(
             }
 
             let notification = RecoveryEventNotification {
-                event_type: "account_switched_queued".to_string(),
+                event_type: "account_switched".to_string(),
                 session_id: session.session_id.clone(),
                 message: format!(
-                    "Resumed session with '{phrase}' on newly active account (switched {}s ago)",
+                    "Relaunched session with '{phrase}' on newly active account (switched {}s ago)",
                     switch_time.elapsed().as_secs()
                 ),
                 timestamp: Utc::now(),
@@ -923,22 +981,20 @@ async fn handle_account_switch_for_session(
         &settings.continue_phrase
     };
 
-    // Try in-place recovery first: push continue via queue so active session picks up new auth.json
-    let queue_succeeded = if session.pid > 0 {
-        send_codex_queue_resume(&session.session_id, phrase).await.is_ok()
-    } else {
-        false
-    };
-
-    if !queue_succeeded {
-        // Fallback: if process is dead or queue failed, launch session in terminal
-        let _ = launch_session_in_terminal(
-            &session.session_id,
-            session.cwd.as_deref(),
-            phrase,
-            settings.preferred_terminal.as_deref(),
-        );
+    // Codex CLI caches JWT tokens in process memory (CachedAuth) for the entire lifetime
+    // of the process. In-place queue messages on an existing process will reuse the stale token
+    // and fail again. We must terminate the old process and relaunch with `codex resume`
+    // so the new process initializes fresh AuthManager from the newly written auth.json.
+    if session.pid > 0 {
+        terminate_process(session.pid);
     }
+
+    let _ = launch_session_in_terminal(
+        &session.session_id,
+        session.cwd.as_deref(),
+        phrase,
+        settings.preferred_terminal.as_deref(),
+    );
 
     // Mark handled and record switch timestamp for anti-cascade
     if let Ok(mut tracker) = TRACKER.lock() {
@@ -1145,5 +1201,61 @@ mod tests {
         );
 
         assert!(score_exp > score_fut, "Expiring/expired subscription should be utilized first");
+    }
+
+    #[test]
+    fn test_check_rollout_for_errors_lifecycle() {
+        use std::io::Write;
+
+        let temp_dir = std::env::temp_dir().join(format!("codex_test_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let rollout_file = temp_dir.join("rollout.jsonl");
+
+        // Case 1: Session has a task_complete with capacity error
+        {
+            let mut f = fs::File::create(&rollout_file).unwrap();
+            writeln!(f, r#"{{"type":"event_msg","payload":{{"type":"task_started","turn_id":"turn-1"}}}}"#).unwrap();
+            writeln!(f, r#"{{"type":"event_msg","payload":{{"type":"task_complete","turn_id":"turn-1","error":{{"message":"Selected model is at capacity. Please try a different model.","codex_error_info":"server_overloaded"}}}}}}"#).unwrap();
+        }
+
+        let detected = check_rollout_for_errors(&rollout_file, "sess-1");
+        assert!(detected.is_some());
+        let err = detected.unwrap();
+        assert_eq!(err.kind, SessionErrorKind::ServerOverloaded);
+        assert_eq!(err.turn_id.as_deref(), Some("turn-1"));
+
+        // Case 2: A new turn starts (task_started added) -> session is working, should return None!
+        {
+            let mut f = fs::OpenOptions::new().append(true).open(&rollout_file).unwrap();
+            writeln!(f, r#"{{"type":"event_msg","payload":{{"type":"task_started","turn_id":"turn-2"}}}}"#).unwrap();
+            writeln!(f, r#"{{"type":"event_msg","payload":{{"type":"item_completed","turn_id":"turn-2"}}}}"#).unwrap();
+        }
+
+        let detected = check_rollout_for_errors(&rollout_file, "sess-1");
+        assert!(detected.is_none(), "When a new turn is in progress, check_rollout_for_errors must return None");
+
+        // Case 3: The turn completes successfully (error: null) -> session healthy, should return None!
+        {
+            let mut f = fs::OpenOptions::new().append(true).open(&rollout_file).unwrap();
+            writeln!(f, r#"{{"type":"event_msg","payload":{{"type":"task_complete","turn_id":"turn-2","last_agent_message":"Done!","error":null}}}}"#).unwrap();
+        }
+
+        let detected = check_rollout_for_errors(&rollout_file, "sess-1");
+        assert!(detected.is_none(), "When latest task completed successfully, check_rollout_for_errors must return None");
+
+        // Case 4: Another turn hits usage limit
+        {
+            let mut f = fs::OpenOptions::new().append(true).open(&rollout_file).unwrap();
+            writeln!(f, r#"{{"type":"event_msg","payload":{{"type":"task_started","turn_id":"turn-3"}}}}"#).unwrap();
+            writeln!(f, r#"{{"type":"event_msg","payload":{{"type":"task_complete","turn_id":"turn-3","error":{{"message":"You've hit your usage limit","codex_error_info":"usage_limit_exceeded"}}}}}}"#).unwrap();
+        }
+
+        let detected = check_rollout_for_errors(&rollout_file, "sess-1");
+        assert!(detected.is_some());
+        let err = detected.unwrap();
+        assert_eq!(err.kind, SessionErrorKind::UsageLimitExceeded);
+        assert_eq!(err.turn_id.as_deref(), Some("turn-3"));
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }
