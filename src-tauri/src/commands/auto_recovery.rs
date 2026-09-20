@@ -662,6 +662,56 @@ pub fn terminate_process(pid: u32) {
     }
 }
 
+/// Send desktop notification (cross-platform helper)
+pub fn send_desktop_notification(title: &str, body: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = Command::new("notify-send")
+            .args(["-a", "Codex Switcher", "-i", "dialog-information", title, body])
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "display notification \"{}\" with title \"{}\"",
+            body.replace('"', "\\\""),
+            title.replace('"', "\\\"")
+        );
+        let _ = Command::new("osascript").args(["-e", &script]).spawn();
+    }
+}
+
+/// Helper to focus/raise the terminal window on Linux
+#[cfg(target_os = "linux")]
+fn focus_terminal_window(pid: u32) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+
+        // 1. Try wmctrl by matching PID
+        if let Ok(output) = Command::new("wmctrl").args(["-l", "-p"]).output() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 3 && parts[2] == pid.to_string() {
+                    let win_id = parts[0];
+                    let _ = Command::new("wmctrl").args(["-i", "-a", win_id]).status();
+                    return;
+                }
+            }
+        }
+
+        // 2. Fallback: try xdotool by PID
+        if let Ok(output) = Command::new("xdotool").args(["search", "--pid", &pid.to_string()]).output() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(win_id) = stdout.lines().last() {
+                if !win_id.trim().is_empty() {
+                    let _ = Command::new("xdotool").args(["windowactivate", win_id.trim()]).status();
+                }
+            }
+        }
+    });
+}
+
 /// Relaunch session inside user terminal emulator
 pub fn launch_session_in_terminal(
     session_id: &str,
@@ -670,12 +720,9 @@ pub fn launch_session_in_terminal(
     preferred_terminal: Option<&str>,
 ) -> Result<u32> {
     let codex_bin = find_codex_binary();
-    let codex_cmd = format!(
-        "{} resume {} {}",
-        escape_shell_arg(&codex_bin.to_string_lossy()),
-        escape_shell_arg(session_id),
-        escape_shell_arg(phrase)
-    );
+    let restart_file = std::env::temp_dir()
+        .join(format!("codex-switcher-restart-{}", session_id));
+    let restart_file_str = restart_file.to_string_lossy().to_string();
 
     let default_cwd = cwd
         .map(PathBuf::from)
@@ -693,35 +740,73 @@ pub fn launch_session_in_terminal(
             .or_else(|| which_cmd("gnome-terminal"))
             .or_else(|| which_cmd("x-terminal-emulator"));
 
+        let runner_script = r#"
+CODEX_BIN="$1"
+SESSION_ID="$2"
+CURRENT_PHRASE="$3"
+RESTART_FILE="$4"
+
+while true; do
+    "$CODEX_BIN" resume "$SESSION_ID" "$CURRENT_PHRASE"
+    if [ -f "$RESTART_FILE" ]; then
+        if [ -s "$RESTART_FILE" ]; then
+            CURRENT_PHRASE=$(cat "$RESTART_FILE" 2>/dev/null)
+        else
+            CURRENT_PHRASE="continue"
+        fi
+        rm -f "$RESTART_FILE"
+        printf "\n\033[1;36m========================================================\033[0m\n"
+        printf "\033[1;32m [Codex Switcher] Account switched. Resuming in-place...\033[0m\n"
+        printf "\033[1;36m========================================================\033[0m\n\n"
+        sleep 1
+        continue
+    fi
+    break
+done
+exec $SHELL
+"#;
+
         if let Some(term_path) = terminal {
             let term_name = term_path.file_name().unwrap_or_default().to_string_lossy();
             let mut cmd = Command::new(&term_path);
 
+            let args_bundle = [
+                "sh",
+                "-c",
+                runner_script,
+                "sh",
+                &codex_bin.to_string_lossy(),
+                session_id,
+                phrase,
+                &restart_file_str,
+            ];
+
             if term_name.contains("ghostty") {
                 cmd.arg(format!("--working-directory={}", default_cwd.display()))
                     .arg("-e")
-                    .args(["sh", "-c", &format!("{codex_cmd}; exec $SHELL")]);
+                    .args(args_bundle);
             } else if term_name.contains("kitty") {
                 cmd.arg("--directory")
                     .arg(&default_cwd)
-                    .args(["sh", "-c", &format!("{codex_cmd}; exec $SHELL")]);
+                    .args(args_bundle);
             } else if term_name.contains("alacritty") {
                 cmd.arg("--working-directory")
                     .arg(&default_cwd)
                     .arg("-e")
-                    .args(["sh", "-c", &format!("{codex_cmd}; exec $SHELL")]);
+                    .args(args_bundle);
             } else if term_name.contains("gnome-terminal") {
                 cmd.arg(format!("--working-directory={}", default_cwd.display()))
                     .arg("--")
-                    .args(["sh", "-c", &format!("{codex_cmd}; exec $SHELL")]);
+                    .args(args_bundle);
             } else {
                 cmd.current_dir(&default_cwd)
                     .arg("-e")
-                    .args(["sh", "-c", &format!("{codex_cmd}; exec $SHELL")]);
+                    .args(args_bundle);
             }
 
             let child = cmd.spawn().context("Failed to spawn terminal")?;
             let pid = child.id();
+            focus_terminal_window(pid);
             if let Ok(mut state) = TRACKER.lock() {
                 state.managed_pids.push(pid);
             }
@@ -732,9 +817,13 @@ pub fn launch_session_in_terminal(
     #[cfg(target_os = "macos")]
     {
         let script = format!(
-            "tell application \"Terminal\" to do script \"cd {} && {}; exit\"",
+            "tell application \"Terminal\" to do script \"cd {} && while true; do {} resume {} {}; if [ -f {} ]; then rm -f {}; sleep 1; continue; fi; break; done; exit\"",
             default_cwd.display(),
-            codex_cmd
+            codex_bin.to_string_lossy(),
+            session_id,
+            phrase,
+            restart_file_str,
+            restart_file_str
         );
         let mut cmd = Command::new("osascript");
         cmd.arg("-e").arg(script);
@@ -744,6 +833,12 @@ pub fn launch_session_in_terminal(
 
     #[cfg(windows)]
     {
+        let codex_cmd = format!(
+            "{} resume {} {}",
+            escape_shell_arg(&codex_bin.to_string_lossy()),
+            escape_shell_arg(session_id),
+            escape_shell_arg(phrase)
+        );
         use std::os::windows::process::CommandExt;
         let mut cmd = Command::new("cmd.exe");
         cmd.current_dir(&default_cwd);
@@ -901,16 +996,38 @@ async fn handle_account_switch_for_session(
                 &settings.continue_phrase
             };
 
+            let restart_file = std::env::temp_dir()
+                .join(format!("codex-switcher-restart-{}", session.session_id));
+            let _ = fs::write(&restart_file, phrase);
+
             // Terminate stale process that still holds old credentials in memory
             if session.pid > 0 {
                 terminate_process(session.pid);
             }
 
-            let _ = launch_session_in_terminal(
-                &session.session_id,
-                session.cwd.as_deref(),
-                phrase,
-                settings.preferred_terminal.as_deref(),
+            // Wait briefly to see if an existing terminal runner consumed the restart file
+            let mut consumed = false;
+            for _ in 0..12 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if !restart_file.exists() {
+                    consumed = true;
+                    break;
+                }
+            }
+
+            if !consumed {
+                let _ = fs::remove_file(&restart_file);
+                let _ = launch_session_in_terminal(
+                    &session.session_id,
+                    session.cwd.as_deref(),
+                    phrase,
+                    settings.preferred_terminal.as_deref(),
+                );
+            }
+
+            send_desktop_notification(
+                "Codex Session Reconnected",
+                &format!("Reconnected with '{phrase}' on newly active account"),
             );
 
             if let Ok(mut tracker) = TRACKER.lock() {
@@ -927,10 +1044,17 @@ async fn handle_account_switch_for_session(
             let notification = RecoveryEventNotification {
                 event_type: "account_switched".to_string(),
                 session_id: session.session_id.clone(),
-                message: format!(
-                    "Relaunched session with '{phrase}' on newly active account (switched {}s ago)",
-                    switch_time.elapsed().as_secs()
-                ),
+                message: if consumed {
+                    format!(
+                        "Resumed session in-place with '{phrase}' on newly active account (switched {}s ago)",
+                        switch_time.elapsed().as_secs()
+                    )
+                } else {
+                    format!(
+                        "Relaunched session with '{phrase}' on newly active account (switched {}s ago)",
+                        switch_time.elapsed().as_secs()
+                    )
+                },
                 timestamp: Utc::now(),
             };
 
@@ -981,6 +1105,10 @@ async fn handle_account_switch_for_session(
         &settings.continue_phrase
     };
 
+    let restart_file = std::env::temp_dir()
+        .join(format!("codex-switcher-restart-{}", session.session_id));
+    let _ = fs::write(&restart_file, phrase);
+
     // Codex CLI caches JWT tokens in process memory (CachedAuth) for the entire lifetime
     // of the process. In-place queue messages on an existing process will reuse the stale token
     // and fail again. We must terminate the old process and relaunch with `codex resume`
@@ -989,11 +1117,29 @@ async fn handle_account_switch_for_session(
         terminate_process(session.pid);
     }
 
-    let _ = launch_session_in_terminal(
-        &session.session_id,
-        session.cwd.as_deref(),
-        phrase,
-        settings.preferred_terminal.as_deref(),
+    // Check if an existing terminal runner consumed the restart file
+    let mut consumed = false;
+    for _ in 0..12 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if !restart_file.exists() {
+            consumed = true;
+            break;
+        }
+    }
+
+    if !consumed {
+        let _ = fs::remove_file(&restart_file);
+        let _ = launch_session_in_terminal(
+            &session.session_id,
+            session.cwd.as_deref(),
+            phrase,
+            settings.preferred_terminal.as_deref(),
+        );
+    }
+
+    send_desktop_notification(
+        "Codex Account Switched",
+        &format!("Switched to '{}'. Resuming session...", target.name),
     );
 
     // Mark handled and record switch timestamp for anti-cascade
@@ -1012,10 +1158,17 @@ async fn handle_account_switch_for_session(
     let notification = RecoveryEventNotification {
         event_type: "account_switched".to_string(),
         session_id: session.session_id.clone(),
-        message: format!(
-            "Switched to account '{}' and relaunched session with '{}'",
-            target.name, phrase
-        ),
+        message: if consumed {
+            format!(
+                "Switched to account '{}' and resumed session in-place with '{}'",
+                target.name, phrase
+            )
+        } else {
+            format!(
+                "Switched to account '{}' and relaunched session with '{}'",
+                target.name, phrase
+            )
+        },
         timestamp: Utc::now(),
     };
 
