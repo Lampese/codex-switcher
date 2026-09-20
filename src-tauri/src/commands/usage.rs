@@ -124,10 +124,15 @@ pub async fn warmup_account(account_id: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn warmup_all_accounts() -> Result<WarmupSummary, String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
-    let total_accounts = store.accounts.len();
+    let accounts: Vec<_> = store
+        .accounts
+        .into_iter()
+        .filter(|account| account.custom_provider.is_none())
+        .collect();
+    let total_accounts = accounts.len();
     let concurrency = total_accounts.min(10).max(1);
 
-    let results: Vec<(String, bool)> = stream::iter(store.accounts.into_iter())
+    let results: Vec<(String, bool)> = stream::iter(accounts.into_iter())
         .map(|account| async move {
             let account_id = account.id.clone();
             let failed = send_warmup(&account).await.is_err();

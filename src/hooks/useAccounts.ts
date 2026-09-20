@@ -5,6 +5,7 @@ import type {
   AccountWithUsage,
   WarmupSummary,
   ImportAccountsSummary,
+  CustomProvider,
 } from "../types";
 import { invokeBackend, isTauriRuntime, type FileSource } from "../lib/platform";
 
@@ -314,15 +315,16 @@ export function useAccounts() {
   );
 
   const importFromFile = useCallback(
-    async (source: FileSource, name: string) => {
+    async (source: FileSource, name: string, customProvider: CustomProvider | null = null) => {
       try {
         if (typeof source === "string") {
-          await invokeBackend<AccountInfo>("add_account_from_file", { path: source, name });
+          await invokeBackend<AccountInfo>("add_account_from_file", { path: source, name, customProvider });
         } else {
           const contents = await source.text();
           await invokeBackend<AccountInfo>("add_account_from_auth_json_text", {
             name,
             contents,
+            customProvider,
           });
         }
         const accountList = await loadAccounts();
@@ -345,6 +347,15 @@ export function useAccounts() {
       throw err;
     }
   }, []);
+
+  const addApiKey = useCallback(async (name: string, apiKey: string, customProvider: CustomProvider | null) => {
+    await invokeBackend<AccountInfo>("add_account_from_api_key", { name, apiKey, customProvider });
+    const accountList = await loadAccounts();
+    await refreshUsage(accountList);
+  }, [loadAccounts, refreshUsage]);
+
+  const loadProviderModels = useCallback((apiKey: string, baseUrl: string) =>
+    invokeBackend<string[]>("list_provider_models", { apiKey, baseUrl }), []);
 
   const completeOAuthLogin = useCallback(async () => {
     try {
@@ -486,6 +497,8 @@ export function useAccounts() {
     deleteAccount,
     renameAccount,
     importFromFile,
+    addApiKey,
+    loadProviderModels,
     exportAccountsSlimText,
     importAccountsSlimText,
     exportAccountsFullEncryptedFile,

@@ -65,7 +65,8 @@ type AutoWarmupLedger = Record<
     lastAutoWindowKind?: AutoWarmupWindowKind;
   }
 >;
-const appWindow = getCurrentWindow();
+// The web dashboard has no native window; resolve it only in desktop handlers.
+const appWindow = getCurrentWindow;
 const isMacOs =
   typeof navigator !== "undefined" &&
   /(Mac|iPhone|iPod|iPad)/i.test(navigator.userAgent);
@@ -179,6 +180,8 @@ function App() {
     deleteAccount,
     renameAccount,
     importFromFile,
+    addApiKey,
+    loadProviderModels,
     exportAccountsSlimText,
     importAccountsSlimText,
     startOAuthLogin,
@@ -388,14 +391,14 @@ function App() {
   const handleTitlebarDrag = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
       if (!isTauriRuntime() || event.button !== 0) return;
-      void appWindow.startDragging();
+      void appWindow().startDragging();
     },
     []
   );
 
   const handleTitlebarDoubleClick = useCallback(() => {
     if (!isTauriRuntime()) return;
-    void appWindow.toggleMaximize();
+    void appWindow().toggleMaximize();
   }, []);
 
   const toggleMask = (accountId: string) => {
@@ -526,7 +529,7 @@ function App() {
 
     const syncMaximizedState = async () => {
       try {
-        setIsWindowMaximized(await appWindow.isMaximized());
+        setIsWindowMaximized(await appWindow().isMaximized());
       } catch (err) {
         console.error("Failed to read window state:", err);
       }
@@ -534,7 +537,7 @@ function App() {
 
     void syncMaximizedState();
 
-    appWindow
+    appWindow()
       .onResized(() => {
         void syncMaximizedState();
       })
@@ -996,6 +999,7 @@ function App() {
 
     const checkAutoWarmup = () => {
       for (const account of accountsRef.current) {
+        if (account.custom_provider) continue;
         const autoEnabled =
           autoWarmupAllEnabled || autoWarmupAccountIdsRef.current.has(account.id);
         if (!autoEnabled || autoWarmupRunningIdsRef.current.has(account.id)) continue;
@@ -1024,7 +1028,7 @@ function App() {
   ]);
 
   const runTimedWarmup = useCallback(async () => {
-    const targets = getTimedWarmupTargets(accountsRef.current);
+    const targets = getTimedWarmupTargets(accountsRef.current).filter((account) => !account.custom_provider);
     if (targets.length === 0) return;
 
     setTimedWarmupRunning(true);
@@ -1354,11 +1358,11 @@ function App() {
             onDoubleClick={handleTitlebarDoubleClick}
             className={`h-full flex-1 select-none cursor-default ${isMacOs ? "ml-18 mr-2" : "mr-3"}`}
           />
-          {!isMacOs && (
+          {isTauriRuntime() && !isMacOs && (
             <div className="flex items-center gap-1">
               <button
                 onClick={() => {
-                  void appWindow.minimize();
+                  void appWindow().minimize();
                 }}
                 className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
                 title="Minimize"
@@ -1369,7 +1373,7 @@ function App() {
               </button>
               <button
                 onClick={() => {
-                  void appWindow.toggleMaximize();
+                  void appWindow().toggleMaximize();
                 }}
                 className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
                 title={isWindowMaximized ? "Restore" : "Maximize"}
@@ -1387,7 +1391,7 @@ function App() {
               </button>
               <button
                 onClick={() => {
-                  void appWindow.close();
+                  void appWindow().close();
                 }}
                 className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-red-500 hover:text-white dark:text-gray-400 dark:hover:bg-red-500 dark:hover:text-white"
                 title="Close"
@@ -2154,6 +2158,8 @@ function App() {
         isOpen={isAddModalOpen}
         onClose={() => setIsAddModalOpen(false)}
         onImportFile={importFromFile}
+        onAddApiKey={addApiKey}
+        onLoadModels={loadProviderModels}
         onStartOAuth={startOAuthLogin}
         onCompleteOAuth={completeOAuthLogin}
         onCancelOAuth={cancelOAuthLogin}
