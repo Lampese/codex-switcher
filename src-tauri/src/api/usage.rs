@@ -11,7 +11,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-use crate::auth::{ensure_chatgpt_tokens_fresh, refresh_chatgpt_tokens};
+use crate::auth::{
+    ensure_chatgpt_tokens_fresh, refresh_chatgpt_tokens_after_unauthorized,
+    should_refresh_after_provider_status,
+};
 use crate::types::{
     AuthData, CreditStatusDetails, RateLimitDetails, RateLimitStatusPayload, RateLimitWindow,
     StoredAccount, UsageInfo,
@@ -96,10 +99,24 @@ pub async fn warmup_account(account: &StoredAccount) -> Result<()> {
 pub async fn fetch_chatgpt_account_metadata(
     account: &StoredAccount,
 ) -> Result<ChatGptAccountMetadata> {
-    let (access_token, chatgpt_account_id) = extract_chatgpt_auth(account)?;
-    let response =
+    let fresh_account = ensure_chatgpt_tokens_fresh(account).await?;
+    let (access_token, chatgpt_account_id) = extract_chatgpt_auth(&fresh_account)?;
+    let mut selected_account_id = chatgpt_account_id.map(str::to_owned);
+    let rejected_access_token = access_token.to_string();
+    let mut response =
         send_chatgpt_get_request(CHATGPT_ACCOUNTS_CHECK_API, access_token, chatgpt_account_id)
             .await?;
+
+    if should_refresh_after_provider_status(response.status()) {
+        let refreshed_account =
+            refresh_chatgpt_tokens_after_unauthorized(&fresh_account, &rejected_access_token)
+                .await?;
+        let (retry_token, retry_account_id) = extract_chatgpt_auth(&refreshed_account)?;
+        selected_account_id = retry_account_id.map(str::to_owned);
+        response =
+            send_chatgpt_get_request(CHATGPT_ACCOUNTS_CHECK_API, retry_token, retry_account_id)
+                .await?;
+    }
 
     let status = response.status();
     if !status.is_success() {
@@ -119,7 +136,8 @@ pub async fn fetch_chatgpt_account_metadata(
         .await
         .context("Failed to parse accounts check response")?;
 
-    let selected_entry = chatgpt_account_id
+    let selected_entry = selected_account_id
+        .as_deref()
         .and_then(|account_id| payload.accounts.get(account_id))
         .or_else(|| payload.accounts.get("default"))
         .or_else(|| payload.accounts.values().next())
@@ -140,18 +158,18 @@ pub async fn fetch_chatgpt_account_metadata(
 async fn get_usage_with_chatgpt_auth(account: &StoredAccount) -> Result<UsageInfo> {
     let fresh_account = ensure_chatgpt_tokens_fresh(account).await?;
     let (access_token, chatgpt_account_id) = extract_chatgpt_auth(&fresh_account)?;
+    let rejected_access_token = access_token.to_string();
 
     let response = send_chatgpt_usage_request(access_token, chatgpt_account_id).await?;
 
-    // 401 means the token is genuinely expired — refresh and retry once.
-    // 403 is a Cloudflare challenge or permissions error; refreshing the token
-    // would burn the refresh token unnecessarily (refresh_token_reused error).
-    if response.status() == StatusCode::UNAUTHORIZED {
+    if should_refresh_after_provider_status(response.status()) {
         println!(
             "[Usage] Unauthorized for account {}, refreshing token and retrying once",
             fresh_account.name
         );
-        let refreshed_account = refresh_chatgpt_tokens(&fresh_account).await?;
+        let refreshed_account =
+            refresh_chatgpt_tokens_after_unauthorized(&fresh_account, &rejected_access_token)
+                .await?;
         let (retry_token, retry_account_id) = extract_chatgpt_auth(&refreshed_account)?;
         let retry_response = send_chatgpt_usage_request(retry_token, retry_account_id).await?;
         return parse_usage_response(
@@ -196,18 +214,18 @@ async fn parse_usage_response(
 async fn warmup_with_chatgpt_auth(account: &StoredAccount) -> Result<()> {
     let fresh_account = ensure_chatgpt_tokens_fresh(account).await?;
     let (access_token, chatgpt_account_id) = extract_chatgpt_auth(&fresh_account)?;
+    let rejected_access_token = access_token.to_string();
 
     let mut response = send_chatgpt_warmup_request(access_token, chatgpt_account_id, true).await?;
 
-    // Only refresh tokens on 401 (genuinely expired). A 403 is a Cloudflare
-    // challenge and does not indicate stale tokens — refreshing on 403 burns
-    // the refresh token and causes a refresh_token_reused error on the next call.
-    if response.status() == StatusCode::UNAUTHORIZED {
+    if should_refresh_after_provider_status(response.status()) {
         println!(
             "[Warmup] Unauthorized for account {}, refreshing token and retrying once",
             fresh_account.name
         );
-        let refreshed_account = refresh_chatgpt_tokens(&fresh_account).await?;
+        let refreshed_account =
+            refresh_chatgpt_tokens_after_unauthorized(&fresh_account, &rejected_access_token)
+                .await?;
         let (retry_token, retry_account_id) = extract_chatgpt_auth(&refreshed_account)?;
         response = send_chatgpt_warmup_request(retry_token, retry_account_id, true).await?;
     }
