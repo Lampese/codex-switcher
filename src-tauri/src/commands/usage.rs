@@ -82,7 +82,7 @@ pub async fn refresh_account_metadata(account_id: String) -> Result<AccountInfo,
                 .map_err(|_| "Account metadata cache is unavailable".to_string())?
                 .insert(account_id.clone(), live_metadata.clone());
 
-            (refreshed, Some(live_metadata))
+            (account, Some(live_metadata))
         }
     };
 
