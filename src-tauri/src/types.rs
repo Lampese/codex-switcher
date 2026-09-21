@@ -640,8 +640,8 @@ pub struct CreditStatusDetails {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_chatgpt_id_token_claims, AccountInfo, AppSettings, DockDisplayMode, StoredAccount,
-        TrayDisplayMode, UiLanguagePreference, is_simplified_chinese_locale,
+        is_simplified_chinese_locale, parse_chatgpt_id_token_claims, AccountInfo, AppSettings,
+        DockDisplayMode, StoredAccount, TrayDisplayMode, UiLanguagePreference,
     };
     use base64::Engine;
     use chrono::{TimeZone, Utc};

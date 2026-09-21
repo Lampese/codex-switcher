@@ -783,10 +783,9 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_mutation_lock_at, add_account_to_store, reconcile_active_projection,
-        defaults_for_missing_settings, fallback_app_settings, initial_settings_for_missing_file,
+        acquire_mutation_lock_at, add_account_to_store, initial_settings_for_missing_file,
         initialize_app_settings_at, initialize_app_settings_at_with_writer, load_app_settings_at,
-        parse_existing_app_settings, sync_active_account_tokens,
+        parse_existing_app_settings, reconcile_active_projection, sync_active_account_tokens,
         update_account_chatgpt_tokens_in_store, write_file_atomic,
         write_file_atomic_with_pre_replace,
     };
@@ -811,8 +810,7 @@ mod tests {
 
     #[test]
     fn legacy_explicit_language_is_preserved_as_preference() {
-        let settings =
-            parse_existing_app_settings(r#"{"language":"zh-CN"}"#).unwrap();
+        let settings = parse_existing_app_settings(r#"{"language":"zh-CN"}"#).unwrap();
         assert_eq!(
             settings.ui_language_preference,
             UiLanguagePreference::SimplifiedChinese
@@ -1319,11 +1317,11 @@ mod tests {
     fn rotated_refresh_token_survives_stale_runtime_reconciliation() {
         let old_generation = Utc.timestamp_opt(1_800_000_000, 0).single().unwrap();
         let rotated_generation = old_generation + Duration::seconds(1);
-        let mut account = account("A", "workspace-a", "old");
-        let account_id = account.id.clone();
-        account.last_refresh_at = Some(old_generation);
+        let mut current_account = account("A", "workspace-a", "old");
+        let account_id = current_account.id.clone();
+        current_account.last_refresh_at = Some(old_generation);
         let mut store = AccountsStore {
-            accounts: vec![account],
+            accounts: vec![current_account],
             active_account_id: Some(account_id.clone()),
             ..AccountsStore::default()
         };
@@ -1355,11 +1353,11 @@ mod tests {
     fn newer_runtime_generation_projects_tokens_to_the_active_store() {
         let stored_generation = Utc.timestamp_opt(1_800_000_000, 0).single().unwrap();
         let runtime_generation = stored_generation + Duration::seconds(1);
-        let mut account = account("A", "workspace-a", "old");
-        let account_id = account.id.clone();
-        account.last_refresh_at = Some(stored_generation);
+        let mut current_account = account("A", "workspace-a", "old");
+        let account_id = current_account.id.clone();
+        current_account.last_refresh_at = Some(stored_generation);
         let mut store = AccountsStore {
-            accounts: vec![account],
+            accounts: vec![current_account],
             active_account_id: Some(account_id.clone()),
             ..AccountsStore::default()
         };
