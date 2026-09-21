@@ -1,13 +1,13 @@
 //! Account-scoped usage statistics from the Codex profile endpoint.
 
 use chrono::{DateTime, Utc};
-use reqwest::{
-    header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT},
-    StatusCode,
-};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{ensure_chatgpt_tokens_fresh, load_accounts, refresh_chatgpt_tokens};
+use crate::auth::{
+    ensure_chatgpt_tokens_fresh, load_accounts, refresh_chatgpt_tokens_after_unauthorized,
+    should_refresh_after_provider_status,
+};
 use crate::types::{AuthData, AuthMode, StoredAccount};
 
 const CHATGPT_PROFILE_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/profiles/me";
@@ -206,10 +206,13 @@ pub async fn get_account_usage_stats(account_id: String) -> Result<AccountUsageS
 
 async fn fetch_profile_usage(account: &StoredAccount) -> anyhow::Result<AccountUsageStats> {
     let fresh_account = ensure_chatgpt_tokens_fresh(account).await?;
+    let rejected_access_token = extract_chatgpt_auth(&fresh_account)?.0.to_string();
     let mut response = send_profile_usage_request(&fresh_account).await?;
 
-    if response.status() == StatusCode::UNAUTHORIZED {
-        let refreshed_account = refresh_chatgpt_tokens(&fresh_account).await?;
+    if should_refresh_after_provider_status(response.status()) {
+        let refreshed_account =
+            refresh_chatgpt_tokens_after_unauthorized(&fresh_account, &rejected_access_token)
+                .await?;
         response = send_profile_usage_request(&refreshed_account).await?;
         return parse_profile_usage_with_reset_credits(&refreshed_account, response).await;
     }
@@ -259,15 +262,15 @@ async fn parse_profile_usage_response(
 
 async fn fetch_reset_credits(account: &StoredAccount) -> anyhow::Result<AccountResetCredits> {
     let (access_token, chatgpt_account_id) = extract_chatgpt_auth(account)?;
-    let client = reqwest::Client::new();
-    let response = client
-        .get(CHATGPT_RESET_CREDITS_URL)
-        .headers(build_reset_credits_headers(
-            access_token,
-            chatgpt_account_id,
-        )?)
-        .send()
-        .await?;
+    let rejected_access_token = access_token.to_string();
+    let mut response = send_reset_credits_request(access_token, chatgpt_account_id).await?;
+
+    if should_refresh_after_provider_status(response.status()) {
+        let refreshed =
+            refresh_chatgpt_tokens_after_unauthorized(account, &rejected_access_token).await?;
+        let (retry_token, retry_account_id) = extract_chatgpt_auth(&refreshed)?;
+        response = send_reset_credits_request(retry_token, retry_account_id).await?;
+    }
 
     let status = response.status();
     if !status.is_success() {
@@ -276,6 +279,21 @@ async fn fetch_reset_credits(account: &StoredAccount) -> anyhow::Result<AccountR
 
     let payload: ResetCreditsResponse = response.json().await?;
     Ok(map_reset_credits(payload, Utc::now()))
+}
+
+async fn send_reset_credits_request(
+    access_token: &str,
+    chatgpt_account_id: Option<&str>,
+) -> anyhow::Result<reqwest::Response> {
+    let client = reqwest::Client::new();
+    Ok(client
+        .get(CHATGPT_RESET_CREDITS_URL)
+        .headers(build_reset_credits_headers(
+            access_token,
+            chatgpt_account_id,
+        )?)
+        .send()
+        .await?)
 }
 
 fn map_profile_usage(account_id: &str, payload: ProfileUsageResponse) -> AccountUsageStats {
