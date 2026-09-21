@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (e.g., v1.0.0)'
+        description: 'Existing immutable version tag (e.g., v1.0.0)'
         required: true
         type: string
       release_note:
@@ -43,6 +43,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -71,12 +72,21 @@ jobs:
       - name: Determine tag
         id: tag
         shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ inputs.version }}" >> $GITHUB_OUTPUT
+            echo "tag=$INPUT_VERSION" >> "$GITHUB_OUTPUT"
           else
-            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Verify release source identity
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          node scripts/verify-release-source.mjs "$RELEASE_TAG"
 
       - name: Determine release note
         id: release_note
