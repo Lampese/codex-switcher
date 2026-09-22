@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import type { Update } from "@tauri-apps/plugin-updater";
 import { isTauriRuntime } from "../lib/platform";
+import { installUpdate, type UpdateInstallationStatus } from "../lib/updateInstallation";
 
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
@@ -8,8 +9,7 @@ type UpdateStatus =
   | { kind: "idle" }
   | { kind: "checking" }
   | { kind: "available"; update: Update }
-  | { kind: "downloading"; downloaded: number; total: number | null }
-  | { kind: "ready" }
+  | UpdateInstallationStatus
   | { kind: "error"; message: string };
 
 export function UpdateChecker() {
@@ -57,26 +57,7 @@ export function UpdateChecker() {
 
     try {
       if (!isTauriRuntime()) return;
-      let downloaded = 0;
-      let total: number | null = null;
-
-      await update.downloadAndInstall((event) => {
-        switch (event.event) {
-          case "Started":
-            total = event.data.contentLength ?? null;
-            setStatus({ kind: "downloading", downloaded: 0, total });
-            break;
-          case "Progress":
-            downloaded += event.data.chunkLength;
-            setStatus({ kind: "downloading", downloaded, total });
-            break;
-          case "Finished":
-            setStatus({ kind: "ready" });
-            break;
-        }
-      });
-
-      setStatus({ kind: "ready" });
+      await installUpdate(update, setStatus);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error("Update install failed:", err);
@@ -161,6 +142,12 @@ export function UpdateChecker() {
               />
             </div>
           </div>
+        )}
+
+        {status.kind === "installing" && (
+          <p className="text-sm font-medium text-gray-900 dark:text-gray-100" role="status">
+            Installing update. Complete any system authorization prompt...
+          </p>
         )}
 
         {status.kind === "ready" && (
