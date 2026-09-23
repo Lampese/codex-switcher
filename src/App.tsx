@@ -22,6 +22,7 @@ import {
   isTauriRuntime,
   invokeBackend,
 } from "./lib/platform";
+import { normalizeBackupPassphrase } from "./lib/backupPassphrase";
 import {
   applyTheme,
   readStoredTheme,
@@ -34,6 +35,7 @@ import {
 } from "./lib/autoWarmup";
 import {
   getAutoWarmupWindowKind,
+  type AutoWarmupWindowKind,
 } from "./lib/autoWarmupPolicy";
 import "./App.css";
 
@@ -48,6 +50,18 @@ interface SwitchAccountBlockedPayload {
 interface CloseBehaviorRequestedPayload {
   requestId?: number;
 }
+interface BackupPassphraseRequest {
+  title: string;
+  resolve: (value: string | null) => void;
+}
+type AutoWarmupLedger = Record<
+  string,
+  {
+    lastSuccessfulWarmupAt?: number;
+    lastAutoWindowKey?: string;
+    lastAutoWindowKind?: AutoWarmupWindowKind;
+  }
+>;
 const appWindow = getCurrentWindow();
 const isMacOs =
   typeof navigator !== "undefined" &&
@@ -102,6 +116,9 @@ function App() {
 
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isConfigModalOpen, setIsConfigModalOpen] = useState(false);
+  const [backupPassphraseRequest, setBackupPassphraseRequest] = useState<BackupPassphraseRequest | null>(null);
+  const [backupPassphrase, setBackupPassphrase] = useState("");
+  const [backupPassphraseError, setBackupPassphraseError] = useState<string | null>(null);
   const [configModalMode, setConfigModalMode] = useState<"slim_export" | "slim_import">(
     "slim_export"
   );
@@ -778,6 +795,34 @@ function App() {
     return `Timed: ${upcoming ?? timedWarmupTimes[0]}`;
   }, [timedWarmupEnabled, timedWarmupTimes]);
 
+  const requestBackupPassphrase = (title: string): Promise<string | null> =>
+    new Promise((resolve) => {
+      setBackupPassphrase("");
+      setBackupPassphraseError(null);
+      setBackupPassphraseRequest({ title, resolve });
+    });
+
+  const resolveBackupPassphrase = (value: string | null) => {
+    const request = backupPassphraseRequest;
+    if (!request) return;
+    if (value === null) {
+      setBackupPassphraseRequest(null);
+      setBackupPassphrase("");
+      setBackupPassphraseError(null);
+      request.resolve(null);
+      return;
+    }
+    const normalized = normalizeBackupPassphrase(value);
+    if (!normalized) {
+      setBackupPassphraseError("A passphrase is required.");
+      return;
+    }
+    setBackupPassphraseRequest(null);
+    setBackupPassphrase("");
+    setBackupPassphraseError(null);
+    request.resolve(normalized);
+  };
+
   const handleExportSlimText = async () => {
     setConfigModalMode("slim_export");
     setConfigModalError(null);
@@ -836,7 +881,9 @@ function App() {
   const handleExportFullFile = async () => {
     try {
       setIsExportingFull(true);
-      const exported = await exportFullBackupFile();
+      const exported = await exportFullBackupFile(() =>
+        requestBackupPassphrase("Create a passphrase for this full encrypted backup")
+      );
       if (!exported) return;
       showWarmupToast("Full encrypted file exported.");
     } catch (err) {
@@ -850,7 +897,9 @@ function App() {
   const handleImportFullFile = async () => {
     try {
       setIsImportingFull(true);
-      const summary = await importFullBackupFile();
+      const summary = await importFullBackupFile(() =>
+        requestBackupPassphrase("Enter the backup passphrase")
+      );
       if (!summary) return;
       const accountList = await loadAccounts();
       await refreshUsage(accountList);
@@ -1803,6 +1852,64 @@ function App() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {backupPassphraseRequest && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[60]">
+          <form
+            className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-md mx-4 shadow-xl"
+            onSubmit={(event) => {
+              event.preventDefault();
+              resolveBackupPassphrase(backupPassphrase);
+            }}
+          >
+            <div className="p-5 border-b border-gray-100 dark:border-gray-800">
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+                {backupPassphraseRequest.title}
+              </h2>
+            </div>
+            <div className="p-5 space-y-3">
+              <label htmlFor="backup-passphrase" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                Passphrase
+              </label>
+              <input
+                id="backup-passphrase"
+                type="password"
+                value={backupPassphrase}
+                onChange={(event) => {
+                  setBackupPassphrase(event.target.value);
+                  if (backupPassphraseError) setBackupPassphraseError(null);
+                }}
+                autoFocus
+                autoComplete="off"
+                className="w-full px-4 py-2.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 focus:outline-none focus:border-gray-400 dark:focus:border-gray-500 focus:ring-1 focus:ring-gray-400 dark:focus:ring-gray-500"
+              />
+              {backupPassphraseError && (
+                <p role="alert" className="text-sm text-red-600 dark:text-red-300">
+                  {backupPassphraseError}
+                </p>
+              )}
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                The passphrase is used only for this backup operation and is never saved.
+              </p>
+            </div>
+            <div className="flex justify-end gap-3 p-5 border-t border-gray-100 dark:border-gray-800">
+              <button
+                type="button"
+                onClick={() => resolveBackupPassphrase(null)}
+                className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors"
+              >
+                Continue
+              </button>
+            </div>
+          </form>
         </div>
       )}
 

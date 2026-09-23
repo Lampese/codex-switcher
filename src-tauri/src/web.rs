@@ -168,6 +168,12 @@ struct UploadAuthJsonArgs {
 struct UploadEncryptedArgs {
     #[serde(alias = "contents_base64")]
     contents_base64: String,
+    passphrase: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BackupPassphraseArgs {
+    passphrase: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -443,7 +449,9 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
             to_json(import_accounts_slim_text(args.payload).await?)
         }
         "export_accounts_full_encrypted_bytes" => {
-            let encoded = STANDARD.encode(export_accounts_full_encrypted_bytes().await?);
+            let args: BackupPassphraseArgs = parse_args(payload)?;
+            let encoded =
+                STANDARD.encode(export_accounts_full_encrypted_bytes(args.passphrase).await?);
             to_json(encoded)
         }
         "import_accounts_full_encrypted_bytes" => {
@@ -451,7 +459,7 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
             let bytes = STANDARD
                 .decode(args.contents_base64)
                 .map_err(|error| format!("Failed to decode uploaded backup: {error}"))?;
-            to_json(import_accounts_full_encrypted_bytes(bytes).await?)
+            to_json(import_accounts_full_encrypted_bytes(bytes, args.passphrase).await?)
         }
         "get_masked_account_ids" => to_json(get_masked_account_ids().await?),
         "set_masked_account_ids" => {

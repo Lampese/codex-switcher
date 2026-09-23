@@ -384,8 +384,10 @@ fn replace_file(from: &Path, to: &Path) -> Result<()> {
 
 /// Load the accounts store from disk
 pub fn load_accounts() -> Result<AccountsStore> {
-    let path = get_accounts_file()?;
+    load_accounts_from_path(&get_accounts_file()?)
+}
 
+fn load_accounts_from_path(path: &Path) -> Result<AccountsStore> {
     if !path.exists() {
         return Ok(AccountsStore::default());
     }
@@ -441,7 +443,10 @@ pub fn save_accounts(store: &AccountsStore) -> Result<()> {
 }
 
 fn save_accounts_unlocked(store: &AccountsStore) -> Result<()> {
-    let path = get_accounts_file()?;
+    save_accounts_unlocked_at(&get_accounts_file()?, store)
+}
+
+fn save_accounts_unlocked_at(path: &Path, store: &AccountsStore) -> Result<()> {
     let content = serde_json::to_vec_pretty(store).context("Failed to serialize accounts store")?;
     write_file_atomic(&path, &content)
 }
@@ -449,11 +454,33 @@ fn save_accounts_unlocked(store: &AccountsStore) -> Result<()> {
 /// Apply one logical account-store mutation and persist its resulting snapshot.
 /// This boundary owns the complete read-modify-write transaction.
 pub fn mutate_accounts<T>(mutate: impl FnOnce(&mut AccountsStore) -> Result<T>) -> Result<T> {
-    let _lock = acquire_mutation_lock("accounts.lock")?;
-    let mut store = load_accounts()?;
+    mutate_accounts_in_dir(&get_config_dir()?, mutate)
+}
+
+fn mutate_accounts_in_dir<T>(
+    config_dir: &Path,
+    mutate: impl FnOnce(&mut AccountsStore) -> Result<T>,
+) -> Result<T> {
+    fs::create_dir_all(config_dir).with_context(|| {
+        format!(
+            "Failed to create config directory: {}",
+            config_dir.display()
+        )
+    })?;
+    let _lock = acquire_mutation_lock_at(&config_dir.join("accounts.lock"))?;
+    let accounts_path = config_dir.join("accounts.json");
+    let mut store = load_accounts_from_path(&accounts_path)?;
     let result = mutate(&mut store)?;
-    save_accounts_unlocked(&store)?;
+    save_accounts_unlocked_at(&accounts_path, &store)?;
     Ok(result)
+}
+
+#[cfg(test)]
+pub(crate) fn mutate_accounts_at<T>(
+    config_dir: &Path,
+    mutate: impl FnOnce(&mut AccountsStore) -> Result<T>,
+) -> Result<T> {
+    mutate_accounts_in_dir(config_dir, mutate)
 }
 
 /// Add a new account to the store
