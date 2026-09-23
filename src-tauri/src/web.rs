@@ -26,6 +26,7 @@ const MAX_REQUEST_BODY_BYTES: usize = 2 * 1024 * 1024;
 #[derive(Debug, Clone)]
 struct WebAuth {
     secret: Option<String>,
+    expected_port: Option<u16>,
 }
 
 impl WebAuth {
@@ -42,11 +43,38 @@ impl WebAuth {
                 "Non-loopback web binding requires CODEX_SWITCHER_WEB_SECRET; use an encrypted tunnel or TLS for remote access"
             );
         }
-        Ok(Self { secret })
+        Ok(Self {
+            secret,
+            expected_port: None,
+        })
+    }
+
+    fn with_expected_port(mut self, expected_port: Option<u16>) -> Self {
+        self.expected_port = expected_port;
+        self
     }
 
     fn requires_auth(&self) -> bool {
         self.secret.is_some()
+    }
+
+    fn allows_host_header(&self, request: &Request) -> bool {
+        if self.secret.is_some() {
+            return true;
+        }
+
+        let mut hosts = request
+            .headers()
+            .iter()
+            .filter(|header| header.field.equiv("Host"));
+        let Some(host) = hosts.next() else {
+            return false;
+        };
+        if hosts.next().is_some() {
+            return false;
+        }
+
+        is_allowed_loopback_host_header(host.value.as_str(), self.expected_port)
     }
 }
 
@@ -57,6 +85,24 @@ fn is_loopback_host(host: &str) -> bool {
             .parse::<IpAddr>()
             .map(|address| address.is_loopback())
             .unwrap_or(false)
+}
+
+fn is_allowed_loopback_host_header(host_header: &str, expected_port: Option<u16>) -> bool {
+    let host_header = host_header.trim().to_ascii_lowercase();
+    ["localhost", "127.0.0.1", "[::1]"].iter().any(|host| {
+        if host_header == *host {
+            return true;
+        }
+
+        let Some(port_suffix) = host_header
+            .strip_prefix(*host)
+            .and_then(|suffix| suffix.strip_prefix(':'))
+        else {
+            return false;
+        };
+
+        expected_port.is_some_and(|port| port_suffix.parse::<u16>().ok() == Some(port))
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,6 +169,8 @@ pub fn run_lan_server(host: &str, port: u16) -> anyhow::Result<()> {
     let auth = WebAuth::from_host(host)?;
     let server = Server::http(&address)
         .map_err(|err| anyhow::anyhow!("Failed to bind HTTP server on {address}: {err}"))?;
+    let expected_port = server.server_addr().to_ip().map(|address| address.port());
+    let auth = auth.with_expected_port(expected_port);
     let runtime = Runtime::new().context("Failed to start async runtime")?;
     let dist_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -146,6 +194,15 @@ fn handle_request(
     dist_dir: &Path,
     auth: &WebAuth,
 ) -> anyhow::Result<()> {
+    if !auth.allows_host_header(&request) {
+        respond_json(
+            request,
+            StatusCode(403),
+            &json!({ "error": "Host header is not allowed" }),
+        )?;
+        return Ok(());
+    }
+
     let method = request.method().clone();
     let url = request.url().to_string();
 
@@ -557,5 +614,120 @@ mod tests {
 
         assert!(response.starts_with("HTTP/1.1 415"));
         assert!(response.contains("Content-Type must be application/json"));
+    }
+
+    fn send_http_request<F>(auth: WebAuth, dist_dir: PathBuf, build_request: F) -> String
+    where
+        F: FnOnce(u16) -> String,
+    {
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let address = server.server_addr().to_ip().unwrap();
+        let auth = auth.with_expected_port(Some(address.port()));
+        let worker = thread::spawn(move || {
+            let request = server.recv().unwrap();
+            let runtime = Runtime::new().unwrap();
+            handle_request(request, &runtime, &dist_dir, &auth).unwrap();
+        });
+
+        let request = build_request(address.port());
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        worker.join().unwrap();
+        response
+    }
+
+    fn test_dist_dir() -> PathBuf {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "codex-switcher-web-test-{}-{timestamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("index.html"), "loopback content").unwrap();
+        path
+    }
+
+    #[test]
+    fn secretless_loopback_http_accepts_only_loopback_hosts_and_the_bound_port() {
+        let dist_dir = test_dist_dir();
+        let auth = WebAuth::from_host_and_secret("127.0.0.1", None).unwrap();
+
+        for (host, include_port) in [
+            ("localhost", false),
+            ("127.0.0.1", false),
+            ("[::1]", false),
+            ("localhost", true),
+            ("127.0.0.1", true),
+            ("[::1]", true),
+        ] {
+            let response = send_http_request(auth.clone(), dist_dir.clone(), |port| {
+                let host = if include_port {
+                    format!("{host}:{port}")
+                } else {
+                    host.to_string()
+                };
+                format!("GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
+            });
+            assert!(
+                response.starts_with("HTTP/1.1 200"),
+                "Host={host}: {response}"
+            );
+            assert!(response.contains("loopback content"));
+        }
+
+        let wrong_port = send_http_request(auth.clone(), dist_dir.clone(), |port| {
+            format!(
+                "GET / HTTP/1.1\r\nHost: localhost:{}\r\nConnection: close\r\n\r\n",
+                port.wrapping_add(1)
+            )
+        });
+        assert!(wrong_port.starts_with("HTTP/1.1 403"));
+
+        fs::remove_dir_all(dist_dir).unwrap();
+    }
+
+    #[test]
+    fn secretless_loopback_http_rejects_an_attacker_host_before_api_or_static_content() {
+        let dist_dir = test_dist_dir();
+        let auth = WebAuth::from_host_and_secret("127.0.0.1", None).unwrap();
+
+        for path in ["/api/health", "/"] {
+            let response = send_http_request(auth.clone(), dist_dir.clone(), |_| {
+                format!(
+                    "GET {path} HTTP/1.1\r\nHost: attacker.example\r\nConnection: close\r\n\r\n"
+                )
+            });
+            assert!(response.starts_with("HTTP/1.1 403"), "{path}: {response}");
+            assert!(response.contains("Host header is not allowed"));
+            assert!(!response.contains("loopback content"));
+        }
+
+        fs::remove_dir_all(dist_dir).unwrap();
+    }
+
+    #[test]
+    fn authenticated_non_loopback_http_keeps_host_and_bearer_behavior() {
+        let dist_dir = test_dist_dir();
+        let auth = WebAuth::from_host_and_secret("0.0.0.0", Some("test-secret".into())).unwrap();
+
+        let authorized = send_http_request(auth.clone(), dist_dir.clone(), |_| {
+            "POST /api/invoke/not-a-command HTTP/1.1\r\nHost: attacker.example\r\nContent-Type: application/json\r\nAuthorization: Bearer test-secret\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_string()
+        });
+        assert!(authorized.starts_with("HTTP/1.1 400"), "{authorized}");
+        assert!(authorized.contains("Unsupported web command"));
+
+        let unauthorized = send_http_request(auth, dist_dir.clone(), |_| {
+            "POST /api/invoke/not-a-command HTTP/1.1\r\nHost: attacker.example\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_string()
+        });
+        assert!(unauthorized.starts_with("HTTP/1.1 401"), "{unauthorized}");
+
+        fs::remove_dir_all(dist_dir).unwrap();
     }
 }
