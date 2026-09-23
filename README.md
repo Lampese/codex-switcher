@@ -26,6 +26,10 @@
 - **Tray Display Modes** – Choose between the app icon with session percentage, a text-only hourly/weekly percentage display, or a hidden tray icon
 - **macOS Dock Control** – Keep Codex Switcher in the Dock or run it as a menu bar only app, with a first-close prompt and a tray fallback
 - **Rate-Limit Monitoring** – View real-time 5-hour session and weekly usage, reset timing, credits, and subscription expiry
+- **Auto-Retry on Model Capacity** – Automatically queue retries when OpenAI models are overloaded, with configurable backoff delays and optional escalation to account switching
+- **Zero-Downtime Session Auto-Switch** – Detect rate limit exhaustion in running sessions, auto-redeem banked reset credits in-place, or seamlessly rotate accounts and relaunch via terminal runner loops
+- **Smart Rotation Strategies** – Optimize quota rotation with Smart Balanced heuristics (FIFO reset credits, burn-before-reset weekly rollover, and Pro / Pro Lite tier reserves), Most Remaining Quota, or Round Robin
+- **Codex `/goal` Continuity** – Detect active or interrupted goal objectives from local SQLite state and automatically resume them using `/goal resume`
 - **Blocked Switch Recovery** – Detect running Codex sessions and offer a force-close flow before retrying the account switch
 - **Dual Login Mode** – Authenticate with ChatGPT OAuth or import existing `auth.json` files
 
