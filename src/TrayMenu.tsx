@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import type { AccountInfo, AccountUsageStats, DockDisplayMode, UsageInfo } from "./types";
+import type {
+  AccountInfo,
+  AccountUsageStats,
+  DockDisplayMode,
+  UsageInfo,
+  WarmupState,
+} from "./types";
 import { invokeBackend, isTauriRuntime } from "./lib/platform";
 import {
   applyTheme,
@@ -7,11 +13,6 @@ import {
   THEME_CHANGED_EVENT,
   type ThemeMode,
 } from "./lib/theme";
-import {
-  AUTO_WARMUP_ALL_CHANGED_EVENT,
-  readAutoWarmupAllEnabled,
-  writeAutoWarmupAllEnabled,
-} from "./lib/autoWarmup";
 
 const TRAY_REFRESH_EVENT = "tray-refresh";
 const ACCOUNTS_CHANGED_EVENT = "accounts-changed";
@@ -132,7 +133,7 @@ function TrayMenu() {
   const [usageById, setUsageById] = useState<Record<string, UsageInfo>>({});
   const [statsById, setStatsById] = useState<Record<string, AccountUsageStats>>({});
   const [refreshing, setRefreshing] = useState(false);
-  const [autoWarmupAllEnabled, setAutoWarmupAllEnabled] = useState(readAutoWarmupAllEnabled);
+  const [autoWarmupAllEnabled, setAutoWarmupAllEnabled] = useState(false);
   const [dockDisplayMode, setDockDisplayMode] = useState<DockDisplayMode | null>(null);
 
   // Fetch each account's rate-limit usage in parallel; rows fill in as they land.
@@ -221,8 +222,12 @@ function TrayMenu() {
   const load = useCallback(async () => {
     try {
       void loadDockDisplayMode();
-      const list = await invokeBackend<AccountInfo[]>("list_accounts");
+      const [list, warmupState] = await Promise.all([
+        invokeBackend<AccountInfo[]>("list_accounts"),
+        invokeBackend<WarmupState>("get_warmup_state"),
+      ]);
       setAccounts(list);
+      setAutoWarmupAllEnabled(warmupState.policy.auto_warmup_all_enabled);
       setUsageById((prev) => retainUsageForAccounts(prev, list));
       setError(null);
       void loadUsage(list); // Don't block the list render on the usage calls.
@@ -254,11 +259,9 @@ function TrayMenu() {
     const next = !autoWarmupAllEnabled;
     setAutoWarmupAllEnabled(next);
     try {
-      writeAutoWarmupAllEnabled(next);
-      if (isTauriRuntime()) {
-        const { emit } = await import("@tauri-apps/api/event");
-        await emit(AUTO_WARMUP_ALL_CHANGED_EVENT, next);
-      }
+      await invokeBackend("set_warmup_policy", {
+        auto_warmup_all_enabled: next,
+      });
     } catch (err) {
       setAutoWarmupAllEnabled(!next);
       setError(formatError(err));
@@ -288,13 +291,11 @@ function TrayMenu() {
     let unlistenRefresh: (() => void) | undefined;
     let unlistenChanged: (() => void) | undefined;
     let unlistenTheme: (() => void) | undefined;
-    let unlistenAutoWarmup: (() => void) | undefined;
 
     void (async () => {
       const { listen } = await import("@tauri-apps/api/event");
       unlistenRefresh = await listen(TRAY_REFRESH_EVENT, () => {
         syncThemeFromStorage();
-        setAutoWarmupAllEnabled(readAutoWarmupAllEnabled());
         void load();
       });
       unlistenChanged = await listen(ACCOUNTS_CHANGED_EVENT, () => void load());
@@ -303,21 +304,12 @@ function TrayMenu() {
           applyTheme(payload);
         }
       });
-      unlistenAutoWarmup = await listen<boolean>(
-        AUTO_WARMUP_ALL_CHANGED_EVENT,
-        ({ payload }) => {
-          if (typeof payload === "boolean") {
-            setAutoWarmupAllEnabled(payload);
-          }
-        }
-      );
     })();
 
     return () => {
       unlistenRefresh?.();
       unlistenChanged?.();
       unlistenTheme?.();
-      unlistenAutoWarmup?.();
     };
   }, [load]);
 

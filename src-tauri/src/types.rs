@@ -3,6 +3,7 @@
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 /// The main storage structure for all accounts
@@ -40,6 +41,45 @@ fn default_close_behavior_prompt_enabled() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WarmupPolicy {
+    pub auto_warmup_all_enabled: bool,
+    pub auto_warmup_account_ids: Vec<String>,
+    pub timed_warmup_enabled: bool,
+    pub timed_warmup_times: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WarmupPolicyPatch {
+    pub auto_warmup_all_enabled: Option<bool>,
+    pub auto_warmup_account_ids: Option<Vec<String>>,
+    pub timed_warmup_enabled: Option<bool>,
+    pub timed_warmup_times: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WarmupAccountLedger {
+    pub last_successful_warmup_at: Option<i64>,
+    pub last_auto_window_key: Option<String>,
+    pub last_auto_window_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WarmupLedger {
+    pub accounts: HashMap<String, WarmupAccountLedger>,
+    pub timed_successes: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WarmupState {
+    pub policy: WarmupPolicy,
+    pub ledger: WarmupLedger,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
@@ -47,6 +87,8 @@ pub struct AppSettings {
     pub dock_display_mode: DockDisplayMode,
     #[serde(default = "default_close_behavior_prompt_enabled")]
     pub close_behavior_prompt_enabled: bool,
+    pub warmup_policy: WarmupPolicy,
+    pub warmup_ledger: WarmupLedger,
 }
 
 impl Default for AppSettings {
@@ -55,6 +97,8 @@ impl Default for AppSettings {
             tray_display_mode: TrayDisplayMode::default(),
             dock_display_mode: DockDisplayMode::default(),
             close_behavior_prompt_enabled: true,
+            warmup_policy: WarmupPolicy::default(),
+            warmup_ledger: WarmupLedger::default(),
         }
     }
 }
@@ -92,6 +136,12 @@ pub struct StoredAccount {
     pub created_at: DateTime<Utc>,
     /// Last time this account was used
     pub last_used_at: Option<DateTime<Utc>>,
+    /// Last time these OAuth credentials were created or refreshed.
+    ///
+    /// This is intentionally separate from `last_used_at`: credential age is
+    /// an authentication policy signal, while account use is only activity.
+    #[serde(default)]
+    pub last_refresh_at: Option<DateTime<Utc>>,
 }
 
 impl StoredAccount {
@@ -133,6 +183,7 @@ impl StoredAccount {
             auth_data: AuthData::ApiKey { key: api_key },
             created_at: Utc::now(),
             last_used_at: None,
+            last_refresh_at: None,
         }
     }
 
@@ -146,6 +197,31 @@ impl StoredAccount {
         access_token: String,
         refresh_token: String,
         account_id: Option<String>,
+    ) -> Self {
+        Self::new_chatgpt_with_refresh_at(
+            name,
+            email,
+            plan_type,
+            subscription_expires_at,
+            id_token,
+            access_token,
+            refresh_token,
+            account_id,
+            Some(Utc::now()),
+        )
+    }
+
+    /// Create a ChatGPT OAuth account with an explicit credential age.
+    pub fn new_chatgpt_with_refresh_at(
+        name: String,
+        email: Option<String>,
+        plan_type: Option<String>,
+        subscription_expires_at: Option<DateTime<Utc>>,
+        id_token: String,
+        access_token: String,
+        refresh_token: String,
+        account_id: Option<String>,
+        last_refresh_at: Option<DateTime<Utc>>,
     ) -> Self {
         let name = Self::resolved_name(name, email.as_ref(), account_id.as_ref(), "ChatGPT");
         Self {
@@ -163,6 +239,7 @@ impl StoredAccount {
             },
             created_at: Utc::now(),
             last_used_at: None,
+            last_refresh_at,
         }
     }
 }

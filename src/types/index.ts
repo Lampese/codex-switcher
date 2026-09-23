@@ -117,6 +117,29 @@ export interface WarmupSummary {
   failed_account_ids: string[];
 }
 
+export interface WarmupPolicy {
+  auto_warmup_all_enabled: boolean;
+  auto_warmup_account_ids: string[];
+  timed_warmup_enabled: boolean;
+  timed_warmup_times: string[];
+}
+
+export interface WarmupAccountLedger {
+  last_successful_warmup_at?: number;
+  last_auto_window_key?: string;
+  last_auto_window_kind?: "session" | "weekly";
+}
+
+export interface WarmupLedger {
+  accounts: Record<string, WarmupAccountLedger>;
+  timed_successes: Record<string, string>;
+}
+
+export interface WarmupState {
+  policy: WarmupPolicy;
+  ledger: WarmupLedger;
+}
+
 export interface ImportAccountsSummary {
   total_in_payload: number;
   imported_count: number;
