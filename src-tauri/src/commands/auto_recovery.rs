@@ -512,41 +512,100 @@ pub fn calculate_account_score(
 ) -> f64 {
     let mut score = 0.0;
 
-    let used_percent = usage
-        .and_then(|u| u.primary_used_percent)
-        .unwrap_or(0.0);
+    let primary_used = usage.and_then(|u| u.primary_used_percent).unwrap_or(0.0);
+    let secondary_used = usage.and_then(|u| u.secondary_used_percent).unwrap_or(0.0);
 
-    // If completely full (>= 100%), penalize heavily unless no other choice exists
-    if used_percent >= 100.0 {
-        score -= 50000.0;
-    } else {
-        // Base remaining quota score (0 to 100 points)
-        score += (100.0 - used_percent).max(0.0);
-    }
+    let primary_left = (100.0 - primary_used).clamp(0.0, 100.0);
+    let secondary_left = (100.0 - secondary_used).clamp(0.0, 100.0);
 
-    // Evaluate available resets
-    let mut has_urgent_reset = false;
+    // Immediate remaining quota is constrained by the bottleneck of present session and weekly windows
+    let immediate_left = match (
+        usage.and_then(|u| u.primary_used_percent),
+        usage.and_then(|u| u.secondary_used_percent),
+    ) {
+        (Some(_), Some(_)) => primary_left.min(secondary_left),
+        (Some(_), None) => primary_left,
+        (None, Some(_)) => secondary_left,
+        (None, None) => 100.0,
+    };
+
+    // Evaluate available banked reset credits
+    let mut available_reset_count: u32 = 0;
     let mut closest_reset_days: Option<f64> = None;
+    let mut has_urgent_reset = false;
+
     if let Some(credits) = resets {
         for credit in &credits.credits {
             if credit.status.to_lowercase() != "available" {
                 continue;
             }
+            let mut is_valid = true;
+            let mut diff_days: Option<f64> = None;
             if let Some(exp_str) = credit.expires_at.as_deref() {
                 if let Ok(exp) = DateTime::parse_from_rfc3339(exp_str) {
                     let exp_utc = exp.with_timezone(&Utc);
                     let diff_secs = (exp_utc - now).num_seconds();
-                    if diff_secs > 0 {
-                        let diff_days = diff_secs as f64 / 86400.0;
-                        if diff_days <= warning_days as f64 {
-                            has_urgent_reset = true;
-                        }
-                        closest_reset_days = Some(
-                            closest_reset_days
-                                .map_or(diff_days, |current| current.min(diff_days)),
-                        );
+                    if diff_secs <= 0 {
+                        is_valid = false;
+                    } else {
+                        let days = diff_secs as f64 / 86400.0;
+                        diff_days = Some(days);
                     }
                 }
+            }
+            if is_valid {
+                available_reset_count += 1;
+                if let Some(days) = diff_days {
+                    if days <= warning_days as f64 {
+                        has_urgent_reset = true;
+                    }
+                    closest_reset_days = Some(
+                        closest_reset_days.map_or(days, |curr| curr.min(days)),
+                    );
+                }
+            }
+        }
+    }
+
+    // Each available reset credit is effectively +100% full quota (deferred full-limit)
+    let deferred_reset_quota = (available_reset_count as f64) * 100.0;
+    let total_effective_quota = immediate_left + deferred_reset_quota;
+
+    // Hard limit / exhausted check:
+    // If an account is completely exhausted in any of its active windows
+    // AND has no banked resets to restore it, penalize heavily (-50000)
+    let is_exhausted = match (
+        usage.and_then(|u| u.primary_used_percent),
+        usage.and_then(|u| u.secondary_used_percent),
+    ) {
+        (Some(p), Some(s)) => p >= 100.0 || s >= 100.0,
+        (Some(p), None) => p >= 100.0,
+        (None, Some(s)) => s >= 100.0,
+        (None, None) => false,
+    };
+    if is_exhausted && available_reset_count == 0 {
+        score -= 50000.0;
+    } else {
+        score += total_effective_quota;
+    }
+
+    // Evaluate weekly reset timing & quota pacing
+    if let Some(u) = usage {
+        if let Some(resets_at) = u.secondary_resets_at {
+            let diff_secs = resets_at - now.timestamp();
+            let reset_hours = diff_secs as f64 / 3600.0;
+
+            // Burn-before-reset: if weekly reset is in less than 24h and we still have >= 15% quota,
+            // prioritize burning it before it expires and is lost!
+            if reset_hours > 0.0 && reset_hours <= 24.0 && secondary_left >= 15.0 {
+                score += 3000.0 + (secondary_left * 30.0);
+            }
+
+            // Starvation guard: if an account has < 15% weekly quota remaining, no banked resets,
+            // and the weekly reset is still far away (> 48h), heavily penalize switching to it
+            // so we don't prematurely exhaust it for the rest of the week.
+            if available_reset_count == 0 && secondary_left < 15.0 && reset_hours > 48.0 {
+                score -= 15000.0;
             }
         }
     }
@@ -563,18 +622,43 @@ pub fn calculate_account_score(
         }
     }
 
+    // Banked resets bonus:
+    // Accounts with banked resets are highly valuable to use and burn first,
+    // especially since reset credits can expire.
+    let reset_bonus = if available_reset_count > 0 {
+        let base_bonus = (available_reset_count as f64) * 20000.0;
+        let urgency_bonus = if let Some(days) = closest_reset_days {
+            // Earlier expiry gets higher priority (FIFO)
+            (60.0 - days).max(0.0) * 100.0 + if has_urgent_reset { 10000.0 } else { 0.0 }
+        } else {
+            5000.0
+        };
+        base_bonus + urgency_bonus
+    } else {
+        0.0
+    };
+
+    // Plan tier reserve penalty:
+    // More expensive accounts ($100 Pro Lite, $200 ChatGPT Pro) should be held in reserve
+    // and spent after standard $20 Plus accounts, unless they have banked reset credits
+    // or upcoming weekly resets that should be burned first.
+    let tier_reserve_penalty = match account.plan_type.as_deref().map(|s| s.to_lowercase()).as_deref() {
+        Some("prolite") => 3000.0,
+        Some("pro") => 6000.0,
+        Some("enterprise") => 4000.0,
+        Some("team") => 2000.0,
+        _ => 0.0, // "plus", "free", "api_key", or unknown
+    };
+
     match strategy {
         AutoSwitchStrategy::SmartBalanced => {
-            // 1. Prioritize accounts with expiring reset credits so they don't go to waste
-            if has_urgent_reset {
-                if let Some(days) = closest_reset_days {
-                    score += 20000.0 + (warning_days as f64 - days).max(0.0) * 500.0;
-                } else {
-                    score += 20000.0;
-                }
-            }
+            // 1. Prioritize accounts with banked resets (so they get used and refreshed)
+            score += reset_bonus;
 
-            // 2. Prioritize subscriptions expiring soon or in grace period
+            // 2. Reserve penalty: keep expensive tiers (Pro Lite / Pro) behind Plus
+            score -= tier_reserve_penalty;
+
+            // 3. Prioritize subscriptions expiring soon or in grace period
             if sub_expired_or_urgent {
                 if let Some(days) = sub_diff_days {
                     if days <= 0.0 {
@@ -587,11 +671,12 @@ pub fn calculate_account_score(
             }
         }
         AutoSwitchStrategy::ResetsFirst => {
-            if let Some(days) = closest_reset_days {
-                score += 30000.0 - (days * 100.0);
-            } else if has_urgent_reset {
-                score += 25000.0;
+            if available_reset_count > 0 {
+                let expiry_component =
+                    closest_reset_days.map_or(0.0, |days| (60.0 - days).max(0.0) * 150.0);
+                score += (available_reset_count as f64) * 35000.0 + expiry_component;
             }
+            score -= tier_reserve_penalty;
         }
         AutoSwitchStrategy::ExpiringSubscriptionFirst => {
             if let Some(days) = sub_diff_days {
@@ -601,13 +686,18 @@ pub fn calculate_account_score(
                     score += 20000.0 - (days * 50.0);
                 }
             }
+            score -= tier_reserve_penalty;
         }
         AutoSwitchStrategy::MostRemainingQuota => {
-            // Primarily dictated by (100.0 - used_percent)
-            score *= 10.0;
+            // Dictated by total_effective_quota (immediate + 100% per banked reset)
+            score = total_effective_quota * 10.0;
+            if is_exhausted && available_reset_count == 0 {
+                score -= 50000.0;
+            }
+            score -= tier_reserve_penalty;
         }
         AutoSwitchStrategy::RoundRobin => {
-            // Neutral scoring, order handled by caller
+            // Neutral scoring, order handled by select_best_account
         }
     }
 
@@ -633,13 +723,23 @@ pub fn select_best_account(
     }
 
     if strategy == AutoSwitchStrategy::RoundRobin {
-        // Pick first candidate with available limit
+        // Pick first candidate with available limit or banked resets
         for candidate in &candidates {
-            let used = usage_map
-                .get(&candidate.id)
-                .and_then(|u| u.primary_used_percent)
-                .unwrap_or(0.0);
-            if used < 95.0 {
+            let u = usage_map.get(&candidate.id);
+            let resets = resets_map.get(&candidate.id);
+            let has_resets = resets.map_or(0, |r| {
+                r.credits
+                    .iter()
+                    .filter(|c| c.status.to_lowercase() == "available")
+                    .count()
+            }) > 0;
+            let primary_used = u.and_then(|u| u.primary_used_percent).unwrap_or(0.0);
+            let secondary_used = u.and_then(|u| u.secondary_used_percent).unwrap_or(0.0);
+
+            let primary_ok = primary_used < 95.0 || has_resets;
+            let secondary_ok = secondary_used < 95.0 || has_resets;
+
+            if primary_ok && secondary_ok {
                 return Some((*candidate).clone());
             }
         }
@@ -659,6 +759,71 @@ pub fn select_best_account(
 
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     scored.first().map(|(acc, _)| (*acc).clone())
+}
+
+/// Check if a Codex session has an active, paused, or usage-limited goal in ~/.codex/goals_*.sqlite.
+/// Unfinished goal statuses are: "active", "paused", "usage_limited", "blocked", "budget_limited".
+pub fn is_session_goal_active(session_id: &str) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let codex_dir = home.join(".codex");
+    let primary_db = codex_dir.join("goals_1.sqlite");
+
+    if primary_db.exists() && is_session_goal_active_in_db(&primary_db, session_id) {
+        return true;
+    }
+
+    // Check any other goals_*.sqlite in ~/.codex/ in case of future schema version bumps
+    if let Ok(entries) = fs::read_dir(&codex_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                if file_name.starts_with("goals_") && file_name.ends_with(".sqlite") && path != primary_db {
+                    if is_session_goal_active_in_db(&path, session_id) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Helper to query SQLite db for active goal status
+pub fn is_session_goal_active_in_db(db_path: &Path, session_id: &str) -> bool {
+    let conn = match rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    let query = "SELECT status FROM thread_goals WHERE thread_id = ?1";
+    let status: Result<String, _> = conn.query_row(query, rusqlite::params![session_id], |row| row.get(0));
+
+    match status {
+        Ok(s) => s != "complete",
+        Err(_) => false,
+    }
+}
+
+/// Resolve the resume phrase for a session:
+/// If the session has an active/unfinished goal, returns "/goal resume".
+/// Otherwise, returns the user-configured continue phrase (defaulting to "continue" if blank).
+pub fn resolve_session_resume_phrase(session_id: &str, user_continue_phrase: &str) -> String {
+    if !session_id.is_empty() && is_session_goal_active(session_id) {
+        "/goal resume".to_string()
+    } else {
+        let trimmed = user_continue_phrase.trim();
+        if trimmed.is_empty() {
+            "continue".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
 }
 
 /// Send resume message via codex queue command
@@ -981,13 +1146,9 @@ pub async fn check_and_recover_sessions() -> Result<Option<RecoveryEventNotifica
                 }
 
                 if should_retry {
-                    let phrase = if settings.continue_phrase.trim().is_empty() {
-                        "continue"
-                    } else {
-                        &settings.continue_phrase
-                    };
+                    let phrase = resolve_session_resume_phrase(&session.session_id, &settings.continue_phrase);
 
-                    send_codex_queue_resume(&session.session_id, phrase).await?;
+                    send_codex_queue_resume(&session.session_id, &phrase).await?;
 
                     let notification = RecoveryEventNotification {
                         event_type: "capacity_retry".to_string(),
@@ -1051,17 +1212,46 @@ async fn handle_account_switch_for_session(
         tracker.last_account_switch.clone()
     };
 
-    if let Some((switch_time, _)) = recent_switch {
+    if let Some((switch_time, target_id)) = recent_switch {
         if switch_time.elapsed() < Duration::from_secs(20) {
-            let phrase = if settings.continue_phrase.trim().is_empty() {
-                "continue"
-            } else {
-                &settings.continue_phrase
-            };
+            let phrase = resolve_session_resume_phrase(&session.session_id, &settings.continue_phrase);
+
+            // If the account was NOT changed (for example, limits were restored via reset credit on the same account),
+            // we do NOT need to terminate the process or launch a new terminal! The credentials in memory are still valid.
+            // We just queue the continue phrase to the existing running session.
+            let is_same_account = current_id.map(|id| id == target_id).unwrap_or(false);
+            if is_same_account {
+                let _ = send_codex_queue_resume(&session.session_id, &phrase).await;
+
+                if let Ok(mut tracker) = TRACKER.lock() {
+                    let turn_key = session
+                        .last_error
+                        .as_ref()
+                        .and_then(|e| e.turn_id.clone())
+                        .unwrap_or_else(|| "default".to_string());
+                    tracker
+                        .handled_usage_limits
+                        .insert(session.session_id.clone(), turn_key);
+                }
+
+                let notification = RecoveryEventNotification {
+                    event_type: "reset_credit_redeemed".to_string(),
+                    session_id: session.session_id.clone(),
+                    message: format!(
+                        "Resumed session in-place with '{phrase}' on refreshed account (reset credit redeemed {}s ago)",
+                        switch_time.elapsed().as_secs()
+                    ),
+                    timestamp: Utc::now(),
+                };
+                if let Ok(mut tracker) = TRACKER.lock() {
+                    tracker.last_event = Some(notification.clone());
+                }
+                return Ok(Some(notification));
+            }
 
             let restart_file = std::env::temp_dir()
                 .join(format!("codex-switcher-restart-{}", session.session_id));
-            let _ = fs::write(&restart_file, phrase);
+            let _ = fs::write(&restart_file, &phrase);
 
             // Terminate stale process that still holds old credentials in memory
             if session.pid > 0 {
@@ -1083,7 +1273,7 @@ async fn handle_account_switch_for_session(
                 let _ = launch_session_in_terminal(
                     &session.session_id,
                     session.cwd.as_deref(),
-                    phrase,
+                    &phrase,
                     settings.preferred_terminal.as_deref(),
                 );
             }
@@ -1125,6 +1315,101 @@ async fn handle_account_switch_for_session(
         }
     }
 
+    // If auto_redeem_reset_credits is enabled, check if the currently active account has available reset credits
+    if settings.auto_redeem_reset_credits {
+        if let Some(curr_acc_id) = current_id {
+            if let Some(curr_acc) = store.accounts.iter().find(|a| a.id == curr_acc_id) {
+                if let Ok(stats) =
+                    crate::commands::account_stats::get_account_usage_stats(curr_acc.id.clone())
+                        .await
+                {
+                    if let Some(resets) = stats.reset_credits {
+                        let mut available_credits: Vec<_> = resets
+                            .credits
+                            .into_iter()
+                            .filter(|c| c.status.to_lowercase() == "available")
+                            .collect();
+
+                        // Sort by earliest expires_at (FIFO)
+                        available_credits.sort_by(|a, b| match (&a.expires_at, &b.expires_at) {
+                            (Some(ea), Some(eb)) => ea.cmp(eb),
+                            (Some(_), None) => std::cmp::Ordering::Less,
+                            (None, Some(_)) => std::cmp::Ordering::Greater,
+                            (None, None) => std::cmp::Ordering::Equal,
+                        });
+
+                        if let Some(credit_to_redeem) = available_credits.first() {
+                            println!(
+                                "[AutoRecovery] Attempting auto-redeem of reset credit {} for account {}",
+                                credit_to_redeem.id, curr_acc.name
+                            );
+                            if let Ok(()) = crate::commands::account_stats::redeem_reset_credit(
+                                curr_acc,
+                                &credit_to_redeem.id,
+                            )
+                            .await
+                            {
+                                println!(
+                                    "[AutoRecovery] Successfully redeemed reset credit for account {}",
+                                    curr_acc.name
+                                );
+
+                                let phrase = resolve_session_resume_phrase(&session.session_id, &settings.continue_phrase);
+
+                                // Resume existing session in-place via codex queue.
+                                // IMPORTANT: Do NOT terminate the process and do NOT launch a new terminal!
+                                // The credentials in memory are still valid, and limits are restored at OpenAI.
+                                let _ = send_codex_queue_resume(&session.session_id, &phrase).await;
+
+                                send_desktop_notification(
+                                    "Reset Credit Redeemed",
+                                    &format!(
+                                        "Auto-redeemed 1 reset credit for '{}'. Limits restored to 100%.",
+                                        curr_acc.name
+                                    ),
+                                );
+
+                                if let Ok(mut tracker) = TRACKER.lock() {
+                                    let turn_key = session
+                                        .last_error
+                                        .as_ref()
+                                        .and_then(|e| e.turn_id.clone())
+                                        .unwrap_or_else(|| "default".to_string());
+                                    tracker
+                                        .handled_usage_limits
+                                        .insert(session.session_id.clone(), turn_key);
+                                    // Update last_account_switch with curr_acc.id so other concurrent sessions
+                                    // don't immediately trigger a cascade switch to another account!
+                                    tracker.last_account_switch = Some((Instant::now(), curr_acc.id.clone()));
+                                }
+
+                                let notification = RecoveryEventNotification {
+                                    event_type: "reset_credit_redeemed".to_string(),
+                                    session_id: session.session_id.clone(),
+                                    message: format!(
+                                        "Auto-redeemed reset credit on active account '{}' (limits refreshed). Resumed session in-place.",
+                                        curr_acc.name
+                                    ),
+                                    timestamp: Utc::now(),
+                                };
+
+                                if let Ok(mut tracker) = TRACKER.lock() {
+                                    tracker.last_event = Some(notification.clone());
+                                }
+
+                                return Ok(Some(notification));
+                            } else {
+                                eprintln!(
+                                    "[AutoRecovery] Failed to auto-redeem reset credit, falling back to account switch"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Fetch usage and stats cache
     let mut usage_map = HashMap::new();
     let mut resets_map = HashMap::new();
@@ -1162,15 +1447,11 @@ async fn handle_account_switch_for_session(
         let _ = fs::write(&accounts_path, content);
     }
 
-    let phrase = if settings.continue_phrase.trim().is_empty() {
-        "continue"
-    } else {
-        &settings.continue_phrase
-    };
+    let phrase = resolve_session_resume_phrase(&session.session_id, &settings.continue_phrase);
 
     let restart_file = std::env::temp_dir()
         .join(format!("codex-switcher-restart-{}", session.session_id));
-    let _ = fs::write(&restart_file, phrase);
+    let _ = fs::write(&restart_file, &phrase);
 
     // Codex CLI caches JWT tokens in process memory (CachedAuth) for the entire lifetime
     // of the process. In-place queue messages on an existing process will reuse the stale token
@@ -1195,7 +1476,7 @@ async fn handle_account_switch_for_session(
         let _ = launch_session_in_terminal(
             &session.session_id,
             session.cwd.as_deref(),
-            phrase,
+            &phrase,
             settings.preferred_terminal.as_deref(),
         );
     }
@@ -1279,8 +1560,16 @@ pub async fn launch_codex_session(
     prompt: Option<String>,
 ) -> Result<u32, String> {
     let settings = load_app_settings().unwrap_or_default();
-    let phrase = prompt.unwrap_or_else(|| settings.continue_phrase);
     let s_id = session_id.unwrap_or_else(|| "".to_string());
+    let phrase = prompt.unwrap_or_else(|| {
+        if !s_id.is_empty() {
+            resolve_session_resume_phrase(&s_id, &settings.continue_phrase)
+        } else if settings.continue_phrase.trim().is_empty() {
+            "continue".to_string()
+        } else {
+            settings.continue_phrase.trim().to_string()
+        }
+    });
 
     launch_session_in_terminal(
         &s_id,
@@ -1306,6 +1595,7 @@ pub async fn save_auto_recovery_settings(
     auto_retry_capacity_escalate_to_switch: bool,
     auto_switch_limit_enabled: bool,
     auto_switch_strategy: AutoSwitchStrategy,
+    auto_redeem_reset_credits: bool,
     continue_phrase: String,
     reset_credit_warning_days: u32,
     preferred_terminal: Option<String>,
@@ -1317,6 +1607,7 @@ pub async fn save_auto_recovery_settings(
     settings.auto_retry_capacity_escalate_to_switch = auto_retry_capacity_escalate_to_switch;
     settings.auto_switch_limit_enabled = auto_switch_limit_enabled;
     settings.auto_switch_strategy = auto_switch_strategy;
+    settings.auto_redeem_reset_credits = auto_redeem_reset_credits;
     settings.continue_phrase = if continue_phrase.trim().is_empty() {
         "continue".to_string()
     } else {
@@ -1335,7 +1626,7 @@ mod tests {
     use chrono::{Duration as ChronoDuration, TimeZone};
 
     fn make_test_account(id: &str, name: &str, expires_at: Option<DateTime<Utc>>) -> StoredAccount {
-        StoredAccount::new_chatgpt(
+        let mut acc = StoredAccount::new_chatgpt(
             name.into(),
             Some(format!("{name}@example.com")),
             Some("plus".into()),
@@ -1344,7 +1635,9 @@ mod tests {
             "access".into(),
             "refresh".into(),
             Some(id.into()),
-        )
+        );
+        acc.id = id.into();
+        acc
     }
 
     #[test]
@@ -1420,6 +1713,677 @@ mod tests {
     }
 
     #[test]
+    fn test_smart_balanced_prioritizes_account_with_banked_reset_over_fresh_account() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 23, 14, 0, 0).unwrap();
+        // Account with 7% left but with 1 banked reset
+        let acc_with_reset = make_test_account("acc1", "WithReset", None);
+        let usage_with_reset = UsageInfo {
+            account_id: "acc1".into(),
+            plan_type: Some("plus".into()),
+            primary_used_percent: Some(0.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: Some(now.timestamp() + 18000),
+            secondary_used_percent: Some(93.0), // 7% left
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 104 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        };
+        let resets = AccountResetCredits {
+            available_count: 1,
+            next_expires_at: Some((now + ChronoDuration::days(29)).to_rfc3339()),
+            credits: vec![crate::commands::account_stats::AccountResetCredit {
+                id: "rc1".into(),
+                reset_type: "standard".into(),
+                status: "available".into(),
+                granted_at: None,
+                expires_at: Some((now + ChronoDuration::days(29)).to_rfc3339()),
+                redeem_started_at: None,
+                redeemed_at: None,
+                title: None,
+                description: None,
+            }],
+        };
+
+        // Account with 84% left but NO banked resets
+        let acc_fresh = make_test_account("acc2", "Fresh", None);
+        let usage_fresh = UsageInfo {
+            account_id: "acc2".into(),
+            plan_type: Some("plus".into()),
+            primary_used_percent: Some(0.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: Some(now.timestamp() + 18000),
+            secondary_used_percent: Some(16.0), // 84% left
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 160 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        };
+
+        let score_reset = calculate_account_score(
+            &acc_with_reset,
+            AutoSwitchStrategy::SmartBalanced,
+            Some(&usage_with_reset),
+            Some(&resets),
+            3,
+            now,
+        );
+
+        let score_fresh = calculate_account_score(
+            &acc_fresh,
+            AutoSwitchStrategy::SmartBalanced,
+            Some(&usage_fresh),
+            None,
+            3,
+            now,
+        );
+
+        assert!(
+            score_reset > score_fresh,
+            "Account with banked reset should be prioritized to burn and reset first (score_reset={score_reset}, score_fresh={score_fresh})"
+        );
+    }
+
+    #[test]
+    fn test_starvation_guard_penalizes_low_quota_without_resets() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 23, 14, 0, 0).unwrap();
+        // Account with 7% left and NO banked resets (reset in 104h)
+        let acc_starving = make_test_account("acc1", "Starving", None);
+        let usage_starving = UsageInfo {
+            account_id: "acc1".into(),
+            plan_type: Some("plus".into()),
+            primary_used_percent: Some(0.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: Some(now.timestamp() + 18000),
+            secondary_used_percent: Some(93.0), // 7% left
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 104 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        };
+
+        // Fresh account with 84% left (reset in 160h)
+        let acc_fresh = make_test_account("acc2", "Fresh", None);
+        let usage_fresh = UsageInfo {
+            account_id: "acc2".into(),
+            plan_type: Some("plus".into()),
+            primary_used_percent: Some(0.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: Some(now.timestamp() + 18000),
+            secondary_used_percent: Some(16.0), // 84% left
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 160 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        };
+
+        let score_starving = calculate_account_score(
+            &acc_starving,
+            AutoSwitchStrategy::SmartBalanced,
+            Some(&usage_starving),
+            None,
+            3,
+            now,
+        );
+
+        let score_fresh = calculate_account_score(
+            &acc_fresh,
+            AutoSwitchStrategy::SmartBalanced,
+            Some(&usage_fresh),
+            None,
+            3,
+            now,
+        );
+
+        assert!(
+            score_fresh > score_starving,
+            "Starving account without resets should be heavily penalized against fresh account (score_fresh={score_fresh}, score_starving={score_starving})"
+        );
+    }
+
+    #[test]
+    fn test_burn_before_reset_prioritizes_expiring_weekly_quota() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 23, 14, 0, 0).unwrap();
+        // Account expiring in 10 hours with 50% left
+        let acc_soon = make_test_account("acc1", "SoonReset", None);
+        let usage_soon = UsageInfo {
+            account_id: "acc1".into(),
+            plan_type: Some("plus".into()),
+            primary_used_percent: Some(0.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: Some(now.timestamp() + 18000),
+            secondary_used_percent: Some(50.0), // 50% left
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 10 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        };
+
+        // Account expiring in 120 hours with same 50% left
+        let acc_later = make_test_account("acc2", "LaterReset", None);
+        let usage_later = UsageInfo {
+            account_id: "acc2".into(),
+            plan_type: Some("plus".into()),
+            primary_used_percent: Some(0.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: Some(now.timestamp() + 18000),
+            secondary_used_percent: Some(50.0), // 50% left
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 120 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        };
+
+        let score_soon = calculate_account_score(
+            &acc_soon,
+            AutoSwitchStrategy::SmartBalanced,
+            Some(&usage_soon),
+            None,
+            3,
+            now,
+        );
+
+        let score_later = calculate_account_score(
+            &acc_later,
+            AutoSwitchStrategy::SmartBalanced,
+            Some(&usage_later),
+            None,
+            3,
+            now,
+        );
+
+        assert!(
+            score_soon > score_later,
+            "Account with weekly reset in <24h should have burn-before-reset priority (score_soon={score_soon}, score_later={score_later})"
+        );
+    }
+
+    #[test]
+    fn test_screenshot_scenario_selects_account_with_banked_reset() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 23, 14, 0, 0).unwrap();
+
+        // Exact accounts from user's screenshot
+        let active_acc = make_test_account("acc_active", "rjandjf", Some(now + ChronoDuration::days(26)));
+        let top_left = make_test_account("acc_tl", "lqslhdcghu", Some(now + ChronoDuration::days(25)));
+        let bottom_left = make_test_account("acc_bl", "rqmboyj", Some(now + ChronoDuration::days(25)));
+        let bottom_right = make_test_account("acc_br", "sonyamcmillan", Some(now + ChronoDuration::days(27)));
+
+        let accounts = vec![active_acc.clone(), top_left.clone(), bottom_left.clone(), bottom_right.clone()];
+
+        let mut usage_map = HashMap::new();
+        let mut resets_map = HashMap::new();
+
+        // Top-left: 84% weekly left, 161h to reset, 0 resets
+        usage_map.insert("acc_tl".into(), UsageInfo {
+            account_id: "acc_tl".into(),
+            plan_type: Some("plus".into()),
+            primary_used_percent: Some(0.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: Some(now.timestamp() + 18000),
+            secondary_used_percent: Some(16.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 161 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        });
+
+        // Bottom-left: 7% weekly left, 104h to reset, 1 banked reset (expires in 29d)
+        usage_map.insert("acc_bl".into(), UsageInfo {
+            account_id: "acc_bl".into(),
+            plan_type: Some("plus".into()),
+            primary_used_percent: Some(0.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: Some(now.timestamp() + 18000),
+            secondary_used_percent: Some(93.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 104 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        });
+        resets_map.insert("acc_bl".into(), AccountResetCredits {
+            available_count: 1,
+            next_expires_at: Some((now + ChronoDuration::days(29)).to_rfc3339()),
+            credits: vec![crate::commands::account_stats::AccountResetCredit {
+                id: "rc_bl".into(),
+                reset_type: "standard".into(),
+                status: "available".into(),
+                granted_at: None,
+                expires_at: Some((now + ChronoDuration::days(29)).to_rfc3339()),
+                redeem_started_at: None,
+                redeemed_at: None,
+                title: None,
+                description: None,
+            }],
+        });
+
+        // Bottom-right: 84% weekly left, 159h to reset, 0 resets
+        usage_map.insert("acc_br".into(), UsageInfo {
+            account_id: "acc_br".into(),
+            plan_type: Some("plus".into()),
+            primary_used_percent: Some(0.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: Some(now.timestamp() + 18000),
+            secondary_used_percent: Some(16.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 159 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        });
+
+        let selected = select_best_account(
+            &accounts,
+            Some("acc_active"),
+            AutoSwitchStrategy::SmartBalanced,
+            &usage_map,
+            &resets_map,
+            3,
+        );
+
+        assert!(selected.is_some());
+        let target = selected.unwrap();
+        assert_eq!(
+            target.id, "acc_bl",
+            "Must choose Bottom-Left (acc_bl) because it has a banked reset to burn and redeem first!"
+        );
+    }
+
+    #[test]
+    fn test_screenshot_scenario_avoids_starving_account_when_no_resets() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 23, 14, 0, 0).unwrap();
+
+        let active_acc = make_test_account("acc_active", "rjandjf", None);
+        let top_left = make_test_account("acc_tl", "lqslhdcghu", None);
+        let bottom_left = make_test_account("acc_bl", "rqmboyj", None);
+        let bottom_right = make_test_account("acc_br", "sonyamcmillan", None);
+
+        let accounts = vec![active_acc.clone(), top_left.clone(), bottom_left.clone(), bottom_right.clone()];
+
+        let mut usage_map = HashMap::new();
+        let resets_map = HashMap::new(); // NO resets for any account!
+
+        // Top-left: 84% weekly left, 161h to reset
+        usage_map.insert("acc_tl".into(), UsageInfo {
+            account_id: "acc_tl".into(),
+            plan_type: Some("plus".into()),
+            primary_used_percent: Some(0.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: Some(now.timestamp() + 18000),
+            secondary_used_percent: Some(16.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 161 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        });
+
+        // Bottom-left: 7% weekly left, 104h to reset, NO resets!
+        usage_map.insert("acc_bl".into(), UsageInfo {
+            account_id: "acc_bl".into(),
+            plan_type: Some("plus".into()),
+            primary_used_percent: Some(0.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: Some(now.timestamp() + 18000),
+            secondary_used_percent: Some(93.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 104 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        });
+
+        // Bottom-right: 84% weekly left, 159h to reset
+        usage_map.insert("acc_br".into(), UsageInfo {
+            account_id: "acc_br".into(),
+            plan_type: Some("plus".into()),
+            primary_used_percent: Some(0.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: Some(now.timestamp() + 18000),
+            secondary_used_percent: Some(16.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 159 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        });
+
+        let selected = select_best_account(
+            &accounts,
+            Some("acc_active"),
+            AutoSwitchStrategy::SmartBalanced,
+            &usage_map,
+            &resets_map,
+            3,
+        );
+
+        assert!(selected.is_some());
+        let target = selected.unwrap();
+        assert_ne!(
+            target.id, "acc_bl",
+            "Must NOT choose starving Bottom-Left (acc_bl) when it has 0 resets and reset is >48h away!"
+        );
+        assert!(
+            target.id == "acc_tl" || target.id == "acc_br",
+            "Must choose one of the fresh accounts (acc_tl or acc_br)"
+        );
+    }
+
+    #[test]
+    fn test_fifo_expiry_prioritizes_soonest_expiring_credit() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 23, 14, 0, 0).unwrap();
+
+        let acc_urgent = make_test_account("acc1", "UrgentCredit", None);
+        let acc_distant = make_test_account("acc2", "DistantCredit", None);
+
+        let resets_urgent = AccountResetCredits {
+            available_count: 1,
+            next_expires_at: Some((now + ChronoDuration::days(2)).to_rfc3339()),
+            credits: vec![crate::commands::account_stats::AccountResetCredit {
+                id: "rc_urgent".into(),
+                reset_type: "standard".into(),
+                status: "available".into(),
+                granted_at: None,
+                expires_at: Some((now + ChronoDuration::days(2)).to_rfc3339()),
+                redeem_started_at: None,
+                redeemed_at: None,
+                title: None,
+                description: None,
+            }],
+        };
+
+        let resets_distant = AccountResetCredits {
+            available_count: 1,
+            next_expires_at: Some((now + ChronoDuration::days(25)).to_rfc3339()),
+            credits: vec![crate::commands::account_stats::AccountResetCredit {
+                id: "rc_distant".into(),
+                reset_type: "standard".into(),
+                status: "available".into(),
+                granted_at: None,
+                expires_at: Some((now + ChronoDuration::days(25)).to_rfc3339()),
+                redeem_started_at: None,
+                redeemed_at: None,
+                title: None,
+                description: None,
+            }],
+        };
+
+        let score_urgent = calculate_account_score(
+            &acc_urgent,
+            AutoSwitchStrategy::SmartBalanced,
+            None,
+            Some(&resets_urgent),
+            3,
+            now,
+        );
+
+        let score_distant = calculate_account_score(
+            &acc_distant,
+            AutoSwitchStrategy::SmartBalanced,
+            None,
+            Some(&resets_distant),
+            3,
+            now,
+        );
+
+        assert!(
+            score_urgent > score_distant,
+            "Reset credit expiring in 2 days must score higher than credit expiring in 25 days (FIFO)"
+        );
+    }
+
+    #[test]
+    fn test_exhausted_weekly_without_resets_is_heavily_penalized() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 23, 14, 0, 0).unwrap();
+
+        // 0% session used, but 100% weekly used (completely locked out)
+        let acc_exhausted = make_test_account("acc1", "WeeklyExhausted", None);
+        let usage_exhausted = UsageInfo {
+            account_id: "acc1".into(),
+            plan_type: Some("plus".into()),
+            primary_used_percent: Some(0.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: Some(now.timestamp() + 18000),
+            secondary_used_percent: Some(100.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 72 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        };
+
+        let score = calculate_account_score(
+            &acc_exhausted,
+            AutoSwitchStrategy::SmartBalanced,
+            Some(&usage_exhausted),
+            None,
+            3,
+            now,
+        );
+
+        assert!(
+            score < -40000.0,
+            "Account with 100% weekly usage and no resets must receive severe penalty (score={score})"
+        );
+    }
+
+    #[test]
+    fn test_exhausted_weekly_with_banked_reset_is_not_penalized() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 23, 14, 0, 0).unwrap();
+
+        let acc_with_reset = make_test_account("acc1", "CanReset", None);
+        let usage_exhausted = UsageInfo {
+            account_id: "acc1".into(),
+            plan_type: Some("plus".into()),
+            primary_used_percent: Some(0.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: Some(now.timestamp() + 18000),
+            secondary_used_percent: Some(100.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 72 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        };
+        let resets = AccountResetCredits {
+            available_count: 1,
+            next_expires_at: Some((now + ChronoDuration::days(10)).to_rfc3339()),
+            credits: vec![crate::commands::account_stats::AccountResetCredit {
+                id: "rc1".into(),
+                reset_type: "standard".into(),
+                status: "available".into(),
+                granted_at: None,
+                expires_at: Some((now + ChronoDuration::days(10)).to_rfc3339()),
+                redeem_started_at: None,
+                redeemed_at: None,
+                title: None,
+                description: None,
+            }],
+        };
+
+        let score = calculate_account_score(
+            &acc_with_reset,
+            AutoSwitchStrategy::SmartBalanced,
+            Some(&usage_exhausted),
+            Some(&resets),
+            3,
+            now,
+        );
+
+        assert!(
+            score > 0.0,
+            "Account with 100% weekly usage but having banked reset must NOT be penalized (score={score})"
+        );
+    }
+
+    #[test]
+    fn test_most_remaining_quota_includes_banked_resets() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 23, 14, 0, 0).unwrap();
+
+        // Account A: 10% left, but 2 banked resets -> 210% effective
+        let acc_a = make_test_account("acc1", "LowWithTwoResets", None);
+        let usage_a = UsageInfo {
+            account_id: "acc1".into(),
+            plan_type: Some("plus".into()),
+            primary_used_percent: Some(0.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: Some(now.timestamp() + 18000),
+            secondary_used_percent: Some(90.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 72 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        };
+        let resets_a = AccountResetCredits {
+            available_count: 2,
+            next_expires_at: Some((now + ChronoDuration::days(10)).to_rfc3339()),
+            credits: vec![
+                crate::commands::account_stats::AccountResetCredit {
+                    id: "rc1".into(),
+                    reset_type: "standard".into(),
+                    status: "available".into(),
+                    granted_at: None,
+                    expires_at: Some((now + ChronoDuration::days(10)).to_rfc3339()),
+                    redeem_started_at: None,
+                    redeemed_at: None,
+                    title: None,
+                    description: None,
+                },
+                crate::commands::account_stats::AccountResetCredit {
+                    id: "rc2".into(),
+                    reset_type: "standard".into(),
+                    status: "available".into(),
+                    granted_at: None,
+                    expires_at: Some((now + ChronoDuration::days(20)).to_rfc3339()),
+                    redeem_started_at: None,
+                    redeemed_at: None,
+                    title: None,
+                    description: None,
+                },
+            ],
+        };
+
+        // Account B: 90% left, 0 banked resets -> 90% effective
+        let acc_b = make_test_account("acc2", "HighNoResets", None);
+        let usage_b = UsageInfo {
+            account_id: "acc2".into(),
+            plan_type: Some("plus".into()),
+            primary_used_percent: Some(0.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: Some(now.timestamp() + 18000),
+            secondary_used_percent: Some(10.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 72 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        };
+
+        let score_a = calculate_account_score(
+            &acc_a,
+            AutoSwitchStrategy::MostRemainingQuota,
+            Some(&usage_a),
+            Some(&resets_a),
+            3,
+            now,
+        );
+
+        let score_b = calculate_account_score(
+            &acc_b,
+            AutoSwitchStrategy::MostRemainingQuota,
+            Some(&usage_b),
+            None,
+            3,
+            now,
+        );
+
+        assert!(
+            score_a > score_b,
+            "Account A with 2 banked resets (210% effective) must beat Account B (90% effective) under MostRemainingQuota"
+        );
+    }
+
+    #[test]
+    fn test_round_robin_skips_exhausted_weekly_accounts_unless_banked_resets() {
+        let acc1 = make_test_account("acc1", "LockedWeekly", None);
+        let acc2 = make_test_account("acc2", "HealthyWeekly", None);
+
+        let mut usage_map = HashMap::new();
+        let resets_map = HashMap::new();
+
+        // acc1: 99% weekly used, 0 resets -> should be skipped!
+        usage_map.insert("acc1".into(), UsageInfo {
+            account_id: "acc1".into(),
+            plan_type: Some("plus".into()),
+            primary_used_percent: Some(0.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: None,
+            secondary_used_percent: Some(99.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: None,
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        });
+
+        // acc2: 20% weekly used -> healthy!
+        usage_map.insert("acc2".into(), UsageInfo {
+            account_id: "acc2".into(),
+            plan_type: Some("plus".into()),
+            primary_used_percent: Some(0.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: None,
+            secondary_used_percent: Some(20.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: None,
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        });
+
+        let selected = select_best_account(
+            &[acc1.clone(), acc2.clone()],
+            None,
+            AutoSwitchStrategy::RoundRobin,
+            &usage_map,
+            &resets_map,
+            3,
+        );
+
+        assert_eq!(
+            selected.unwrap().id,
+            "acc2",
+            "RoundRobin must skip acc1 because its weekly quota is 99% exhausted and it has no resets"
+        );
+    }
+
+    #[test]
     fn test_check_rollout_for_errors_lifecycle() {
         use std::io::Write;
 
@@ -1474,4 +2438,331 @@ mod tests {
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
+
+    fn make_test_account_with_plan(id: &str, name: &str, plan: &str, expires_at: Option<DateTime<Utc>>) -> StoredAccount {
+        let mut acc = make_test_account(id, name, expires_at);
+        acc.plan_type = Some(plan.into());
+        acc
+    }
+
+    #[test]
+    fn test_tier_priority_healthy_plus_beats_prolite_and_pro() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 23, 12, 0, 0).unwrap();
+        let acc_plus = make_test_account_with_plan("acc_plus", "PlusAcc", "plus", None);
+        let acc_prolite = make_test_account_with_plan("acc_prolite", "ProLiteAcc", "prolite", None);
+        let acc_pro = make_test_account_with_plan("acc_pro", "ProAcc", "pro", None);
+
+        let usage_healthy = UsageInfo {
+            account_id: "any".into(),
+            plan_type: None,
+            primary_used_percent: Some(0.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: Some(now.timestamp() + 5 * 3600),
+            secondary_used_percent: Some(0.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 120 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        };
+
+        let score_plus = calculate_account_score(&acc_plus, AutoSwitchStrategy::SmartBalanced, Some(&usage_healthy), None, 3, now);
+        let score_prolite = calculate_account_score(&acc_prolite, AutoSwitchStrategy::SmartBalanced, Some(&usage_healthy), None, 3, now);
+        let score_pro = calculate_account_score(&acc_pro, AutoSwitchStrategy::SmartBalanced, Some(&usage_healthy), None, 3, now);
+
+        assert!(
+            score_plus > score_prolite,
+            "Plus account ({score_plus}) must have higher score than Pro Lite ({score_prolite}) to preserve expensive tier"
+        );
+        assert!(
+            score_prolite > score_pro,
+            "Pro Lite account ({score_prolite}) must have higher score than $200 Pro ({score_pro}) to preserve most expensive tier"
+        );
+    }
+
+    #[test]
+    fn test_tier_priority_prolite_beats_pro_when_plus_exhausted() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 23, 12, 0, 0).unwrap();
+        let acc_plus = make_test_account_with_plan("acc_plus", "PlusAcc", "plus", None);
+        let acc_prolite = make_test_account_with_plan("acc_prolite", "ProLiteAcc", "prolite", None);
+        let acc_pro = make_test_account_with_plan("acc_pro", "ProAcc", "pro", None);
+
+        let mut usage_map = HashMap::new();
+        let resets_map = HashMap::new();
+
+        // Plus is exhausted (100% 5h limit used)
+        usage_map.insert("acc_plus".into(), UsageInfo {
+            account_id: "acc_plus".into(),
+            plan_type: Some("plus".into()),
+            primary_used_percent: Some(100.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: Some(now.timestamp() + 3600),
+            secondary_used_percent: Some(50.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 72 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        });
+
+        // Pro Lite has 80% left on weekly limit (no 5h limit)
+        usage_map.insert("acc_prolite".into(), UsageInfo {
+            account_id: "acc_prolite".into(),
+            plan_type: Some("prolite".into()),
+            primary_used_percent: None,
+            primary_window_minutes: None,
+            primary_resets_at: None,
+            secondary_used_percent: Some(20.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 158 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        });
+
+        // Pro has 80% left on weekly limit
+        usage_map.insert("acc_pro".into(), UsageInfo {
+            account_id: "acc_pro".into(),
+            plan_type: Some("pro".into()),
+            primary_used_percent: None,
+            primary_window_minutes: None,
+            primary_resets_at: None,
+            secondary_used_percent: Some(20.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 158 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        });
+
+        let selected = select_best_account(
+            &[acc_plus, acc_prolite, acc_pro],
+            None,
+            AutoSwitchStrategy::SmartBalanced,
+            &usage_map,
+            &resets_map,
+            3,
+        );
+
+        assert_eq!(
+            selected.unwrap().id,
+            "acc_prolite",
+            "When Plus accounts are exhausted, Pro Lite should be chosen as the next reserve before $200 Pro"
+        );
+    }
+
+    #[test]
+    fn test_tier_priority_prolite_with_banked_reset_beats_healthy_plus() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 23, 12, 0, 0).unwrap();
+        let acc_plus = make_test_account_with_plan("acc_plus", "PlusAcc", "plus", None);
+        let acc_prolite = make_test_account_with_plan("acc_prolite", "ProLiteAcc", "prolite", None);
+
+        let usage_plus = UsageInfo {
+            account_id: "acc_plus".into(),
+            plan_type: Some("plus".into()),
+            primary_used_percent: Some(0.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: Some(now.timestamp() + 5 * 3600),
+            secondary_used_percent: Some(0.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 120 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        };
+
+        let usage_prolite = UsageInfo {
+            account_id: "acc_prolite".into(),
+            plan_type: Some("prolite".into()),
+            primary_used_percent: None,
+            primary_window_minutes: None,
+            primary_resets_at: None,
+            secondary_used_percent: Some(20.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 120 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        };
+
+        let resets_prolite = AccountResetCredits {
+            available_count: 1,
+            next_expires_at: Some((now + ChronoDuration::days(10)).to_rfc3339()),
+            credits: vec![crate::commands::account_stats::AccountResetCredit {
+                id: "rc_prolite".into(),
+                reset_type: "standard".into(),
+                status: "available".into(),
+                granted_at: None,
+                expires_at: Some((now + ChronoDuration::days(10)).to_rfc3339()),
+                redeem_started_at: None,
+                redeemed_at: None,
+                title: None,
+                description: None,
+            }],
+        };
+
+        let score_plus = calculate_account_score(&acc_plus, AutoSwitchStrategy::SmartBalanced, Some(&usage_plus), None, 3, now);
+        let score_prolite = calculate_account_score(&acc_prolite, AutoSwitchStrategy::SmartBalanced, Some(&usage_prolite), Some(&resets_prolite), 3, now);
+
+        assert!(
+            score_prolite > score_plus,
+            "Pro Lite with banked reset ({score_prolite}) must beat healthy Plus ({score_plus}) so banked reset is utilized"
+        );
+    }
+
+    #[test]
+    fn test_tier_priority_prolite_with_expiring_weekly_burns_before_plus() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 23, 12, 0, 0).unwrap();
+        let acc_plus = make_test_account_with_plan("acc_plus", "PlusAcc", "plus", None);
+        let acc_prolite = make_test_account_with_plan("acc_prolite", "ProLiteAcc", "prolite", None);
+
+        // Plus reset in 5 days (distant)
+        let usage_plus = UsageInfo {
+            account_id: "acc_plus".into(),
+            plan_type: Some("plus".into()),
+            primary_used_percent: Some(0.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: Some(now.timestamp() + 5 * 3600),
+            secondary_used_percent: Some(0.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 120 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        };
+
+        // Pro Lite weekly reset in 8 hours with 80% quota left -> burn before reset!
+        let usage_prolite = UsageInfo {
+            account_id: "acc_prolite".into(),
+            plan_type: Some("prolite".into()),
+            primary_used_percent: None,
+            primary_window_minutes: None,
+            primary_resets_at: None,
+            secondary_used_percent: Some(20.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 8 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        };
+
+        let score_plus = calculate_account_score(&acc_plus, AutoSwitchStrategy::SmartBalanced, Some(&usage_plus), None, 3, now);
+        let score_prolite = calculate_account_score(&acc_prolite, AutoSwitchStrategy::SmartBalanced, Some(&usage_prolite), None, 3, now);
+
+        assert!(
+            score_prolite > score_plus,
+            "Pro Lite with expiring weekly reset ({score_prolite}) must beat healthy Plus ({score_plus}) to burn quota before week rollover"
+        );
+    }
+
+    #[test]
+    fn test_weekly_only_prolite_account_quota_calculation() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 23, 12, 0, 0).unwrap();
+        let acc_prolite = make_test_account_with_plan("acc_prolite", "ProLiteAcc", "prolite", None);
+
+        // Pro Lite screenshot case: primary is None, secondary is 20% used (80% left)
+        let usage_prolite = UsageInfo {
+            account_id: "acc_prolite".into(),
+            plan_type: Some("prolite".into()),
+            primary_used_percent: None,
+            primary_window_minutes: None,
+            primary_resets_at: None,
+            secondary_used_percent: Some(20.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 158 * 3600),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        };
+
+        let score = calculate_account_score(&acc_prolite, AutoSwitchStrategy::SmartBalanced, Some(&usage_prolite), None, 3, now);
+
+        // Immediate left is 80, tier penalty is -3000 -> score is 80 - 3000 = -2920
+        assert_eq!(score, 80.0 - 3000.0);
+    }
+
+    #[test]
+    fn test_goal_resume_phrase_detection_in_db() {
+        let temp_dir = std::env::temp_dir().join(format!("test_goal_db_{}", uuid::Uuid::new_v4()));
+        let _ = fs::create_dir_all(&temp_dir);
+        let db_path = temp_dir.join("goals_1.sqlite");
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE thread_goals (
+                thread_id TEXT PRIMARY KEY NOT NULL,
+                goal_id TEXT NOT NULL,
+                objective TEXT NOT NULL,
+                status TEXT NOT NULL
+            );",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO thread_goals (thread_id, goal_id, objective, status) VALUES
+                ('thread_active', 'g1', 'obj1', 'active'),
+                ('thread_paused', 'g2', 'obj2', 'paused'),
+                ('thread_usage_limited', 'g3', 'obj3', 'usage_limited'),
+                ('thread_blocked', 'g4', 'obj4', 'blocked'),
+                ('thread_complete', 'g5', 'obj5', 'complete');",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        // Active/paused/usage_limited/blocked goals must evaluate to true
+        assert!(is_session_goal_active_in_db(&db_path, "thread_active"));
+        assert!(is_session_goal_active_in_db(&db_path, "thread_paused"));
+        assert!(is_session_goal_active_in_db(&db_path, "thread_usage_limited"));
+        assert!(is_session_goal_active_in_db(&db_path, "thread_blocked"));
+
+        // Completed goal or non-existent thread must evaluate to false
+        assert!(!is_session_goal_active_in_db(&db_path, "thread_complete"));
+        assert!(!is_session_goal_active_in_db(&db_path, "thread_non_existent"));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_resolve_session_resume_phrase_fallback() {
+        // Without an active goal, returns custom phrase or default "continue"
+        assert_eq!(
+            resolve_session_resume_phrase("non_existent_thread_xyz", "продолжи"),
+            "продолжи"
+        );
+        assert_eq!(
+            resolve_session_resume_phrase("non_existent_thread_xyz", "   "),
+            "continue"
+        );
+        assert_eq!(
+            resolve_session_resume_phrase("", "продолжи"),
+            "продолжи"
+        );
+    }
+
+    #[test]
+    fn test_live_user_goal_session_resumes_with_goal_resume() {
+        // If the user's ~/.codex/goals_1.sqlite is present, verify session 01a0c723-3f3b-7bd2-98df-e40f26a4d278
+        if let Some(home) = dirs::home_dir() {
+            let db_path = home.join(".codex").join("goals_1.sqlite");
+            if db_path.exists() {
+                let phrase = resolve_session_resume_phrase("01a0c723-3f3b-7bd2-98df-e40f26a4d278", "продолжи");
+                assert_eq!(
+                    phrase, "/goal resume",
+                    "Session with status usage_limited in thread_goals must resume with '/goal resume' instead of continue phrase"
+                );
+            }
+        }
+    }
 }
+

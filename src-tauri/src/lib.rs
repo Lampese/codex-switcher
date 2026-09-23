@@ -25,6 +25,12 @@ use tauri::Emitter;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = tauri::Manager::get_webview_window(app, "main") {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
@@ -104,6 +110,7 @@ pub fn run() {
             // Usage
             get_usage,
             get_account_usage_stats,
+            commands::redeem_account_reset_credit,
             refresh_account_metadata,
             refresh_all_accounts_usage,
             warmup_account,

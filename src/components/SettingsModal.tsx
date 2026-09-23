@@ -100,6 +100,7 @@ export function SettingsModal({
         autoRetryCapacityEscalateToSwitch: next.auto_retry_capacity_escalate_to_switch,
         autoSwitchLimitEnabled: next.auto_switch_limit_enabled,
         autoSwitchStrategy: next.auto_switch_strategy,
+        autoRedeemResetCredits: next.auto_redeem_reset_credits ?? false,
         continuePhrase: next.continue_phrase,
         resetCreditWarningDays: next.reset_credit_warning_days,
         preferredTerminal: next.preferred_terminal,
@@ -171,7 +172,7 @@ export function SettingsModal({
               <label className="flex items-center gap-2 cursor-pointer text-sm font-medium text-gray-900 dark:text-gray-100">
                 <input
                   type="checkbox"
-                  checked={appSettings?.auto_retry_capacity_enabled ?? true}
+                  checked={appSettings?.auto_retry_capacity_enabled ?? false}
                   disabled={saving || !appSettings}
                   onChange={(e) => void updateAutoRecovery({ auto_retry_capacity_enabled: e.target.checked })}
                   className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
@@ -182,7 +183,7 @@ export function SettingsModal({
                 Automatically sends queue messages to resume sessions paused by OpenAI capacity limits.
               </p>
 
-              {(appSettings?.auto_retry_capacity_enabled ?? true) && (
+              {(appSettings?.auto_retry_capacity_enabled ?? false) && (
                 <div className="pt-2 pl-6 space-y-2 border-t border-gray-200/60 dark:border-gray-700/60 text-xs">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-gray-700 dark:text-gray-300">Max retry attempts:</span>
@@ -211,7 +212,7 @@ export function SettingsModal({
                   <label className="flex items-center gap-2 cursor-pointer text-xs text-gray-700 dark:text-gray-300 pt-1">
                     <input
                       type="checkbox"
-                      checked={appSettings?.auto_retry_capacity_escalate_to_switch ?? true}
+                      checked={appSettings?.auto_retry_capacity_escalate_to_switch ?? false}
                       disabled={saving || !appSettings}
                       onChange={(e) => void updateAutoRecovery({ auto_retry_capacity_escalate_to_switch: e.target.checked })}
                       className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
@@ -227,7 +228,7 @@ export function SettingsModal({
               <label className="flex items-center gap-2 cursor-pointer text-sm font-medium text-gray-900 dark:text-gray-100">
                 <input
                   type="checkbox"
-                  checked={appSettings?.auto_switch_limit_enabled ?? true}
+                  checked={appSettings?.auto_switch_limit_enabled ?? false}
                   disabled={saving || !appSettings}
                   onChange={(e) => void updateAutoRecovery({ auto_switch_limit_enabled: e.target.checked })}
                   className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
@@ -238,8 +239,8 @@ export function SettingsModal({
                 When a session hits its usage limit, terminates the stuck session, switches credentials, and relaunches in terminal.
               </p>
 
-              {(appSettings?.auto_switch_limit_enabled ?? true) && (
-                <div className="pt-2 pl-6 space-y-2 border-t border-gray-200/60 dark:border-gray-700/60 text-xs">
+              {(appSettings?.auto_switch_limit_enabled ?? false) && (
+                <div className="pt-2 pl-6 space-y-3 border-t border-gray-200/60 dark:border-gray-700/60 text-xs">
                   <div>
                     <label className="block text-gray-700 dark:text-gray-300 mb-1">Switching Strategy:</label>
                     <select
@@ -248,12 +249,28 @@ export function SettingsModal({
                       onChange={(e) => void updateAutoRecovery({ auto_switch_strategy: e.target.value as AutoSwitchStrategy })}
                       className={selectClassName}
                     >
-                      <option value="smart_balanced">Smart Balanced (Urgent Resets & Expiring First)</option>
-                      <option value="resets_first">Expiring Resets First</option>
+                      <option value="smart_balanced">Smart Balanced (Banked Resets, Weekly Pacing & Expiring First)</option>
+                      <option value="resets_first">Banked Resets First</option>
                       <option value="expiring_subscription_first">Expiring Subscription First</option>
-                      <option value="most_remaining_quota">Most Remaining Quota</option>
+                      <option value="most_remaining_quota">Most Remaining Quota (Effective Capacity)</option>
                       <option value="round_robin">Round Robin</option>
                     </select>
+                  </div>
+
+                  <div className="pt-1">
+                    <label className="flex items-center gap-2 cursor-pointer font-medium text-gray-900 dark:text-gray-100">
+                      <input
+                        type="checkbox"
+                        checked={appSettings?.auto_redeem_reset_credits ?? false}
+                        disabled={saving || !appSettings}
+                        onChange={(e) => void updateAutoRecovery({ auto_redeem_reset_credits: e.target.checked })}
+                        className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                      />
+                      Auto-redeem banked reset credits before switching
+                    </label>
+                    <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5 pl-5">
+                      When the active account hits its limit, automatically consumes an available reset credit to restore 100% quota before switching accounts.
+                    </p>
                   </div>
                 </div>
               )}

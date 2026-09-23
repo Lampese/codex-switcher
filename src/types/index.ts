@@ -140,6 +140,7 @@ export interface AppSettings {
   auto_retry_capacity_escalate_to_switch: boolean;
   auto_switch_limit_enabled: boolean;
   auto_switch_strategy: AutoSwitchStrategy;
+  auto_redeem_reset_credits: boolean;
   continue_phrase: string;
   reset_credit_warning_days: number;
   preferred_terminal: string | null;

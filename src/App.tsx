@@ -639,10 +639,15 @@ function App() {
           // Only show notification and reload account state when an actual switch occurred
           if (
             event.payload.event_type === "account_switched" ||
-            event.payload.event_type === "account_switched_queued"
+            event.payload.event_type === "account_switched_queued" ||
+            event.payload.event_type === "reset_credit_redeemed"
           ) {
             showWarmupToast(event.payload.message);
-            void loadAccounts();
+            void loadAccounts(true).then((accountList) => {
+              if (accountList && accountList.length > 0) {
+                void refreshUsage(accountList);
+              }
+            });
           }
         }
       );
@@ -653,7 +658,7 @@ function App() {
       disposed = true;
       unlisten?.();
     };
-  }, [loadAccounts, showWarmupToast]);
+  }, [loadAccounts, refreshUsage, showWarmupToast]);
 
   const formatWarmupError = useCallback((err: unknown) => {
     if (!err) return "Unknown error";

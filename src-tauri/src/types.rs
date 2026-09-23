@@ -60,6 +60,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_false() -> bool {
+    false
+}
+
 fn default_max_attempts() -> u32 {
     3
 }
@@ -95,6 +99,8 @@ pub struct AppSettings {
     pub auto_switch_limit_enabled: bool,
     #[serde(default)]
     pub auto_switch_strategy: AutoSwitchStrategy,
+    #[serde(default = "default_false")]
+    pub auto_redeem_reset_credits: bool,
     #[serde(default = "default_continue_phrase")]
     pub continue_phrase: String,
     #[serde(default = "default_reset_credit_warning_days")]
@@ -109,12 +115,13 @@ impl Default for AppSettings {
             tray_display_mode: TrayDisplayMode::default(),
             dock_display_mode: DockDisplayMode::default(),
             close_behavior_prompt_enabled: true,
-            auto_retry_capacity_enabled: true,
+            auto_retry_capacity_enabled: false,
             auto_retry_capacity_max_attempts: 3,
             auto_retry_capacity_initial_delay_sec: 5,
-            auto_retry_capacity_escalate_to_switch: true,
-            auto_switch_limit_enabled: true,
+            auto_retry_capacity_escalate_to_switch: false,
+            auto_switch_limit_enabled: false,
             auto_switch_strategy: AutoSwitchStrategy::default(),
+            auto_redeem_reset_credits: false,
             continue_phrase: default_continue_phrase(),
             reset_credit_warning_days: 3,
             preferred_terminal: None,

@@ -198,13 +198,16 @@ export function AccountCard({
   };
 
   const planDisplay = account.plan_type
-    ? account.plan_type.charAt(0).toUpperCase() + account.plan_type.slice(1)
+    ? account.plan_type.toLowerCase() === "prolite"
+      ? "Pro Lite"
+      : account.plan_type.charAt(0).toUpperCase() + account.plan_type.slice(1)
     : account.auth_mode === "api_key"
       ? "API Key"
       : "Unknown";
 
   const planColors: Record<string, string> = {
-    pro: "bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-700",
+    pro: "bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-900/30 dark:text-purple-300 dark:border-purple-700",
+    prolite: "bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-700",
     plus: "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-300 dark:border-emerald-700",
     team: "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-700",
     enterprise: "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-700",
@@ -348,6 +351,11 @@ export function AccountCard({
             compact={compactResetCredits}
             resetCredits={resetCredits}
             warningDays={resetCreditWarningDays}
+            accountId={account.id}
+            onRedeemed={() => {
+              void loadResetCredits();
+              onRefresh();
+            }}
           />
         </div>
       </div>

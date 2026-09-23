@@ -5,6 +5,7 @@ import {
   getAvailableResetCredits,
   getResetCreditsTone,
 } from "../lib/resetCredits";
+import { invokeBackend } from "../lib/platform";
 
 function formatExpiryDetail(expiresAt: string | null): string {
   const expiry = formatResetCreditDateTime(expiresAt);
@@ -16,12 +17,18 @@ export function ResetCreditsMenu({
   compact,
   resetCredits,
   warningDays = 3,
+  accountId,
+  onRedeemed,
 }: {
   compact: boolean;
   resetCredits: AccountResetCredits | null;
   warningDays?: number;
+  accountId?: string;
+  onRedeemed?: () => void;
 }) {
   const [isOpen, setIsOpen] = useState(false);
+  const [redeemingId, setRedeemingId] = useState<string | null>(null);
+  const [redeemError, setRedeemError] = useState<string | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const popupId = useId();
@@ -64,7 +71,23 @@ export function ResetCreditsMenu({
 
   useEffect(() => {
     setIsOpen(false);
+    setRedeemError(null);
   }, [resetCredits]);
+
+  const handleRedeem = async (creditId: string) => {
+    if (!accountId) return;
+    setRedeemingId(creditId);
+    setRedeemError(null);
+    try {
+      await invokeBackend("redeem_account_reset_credit", { accountId, creditId });
+      onRedeemed?.();
+      setIsOpen(false);
+    } catch (err) {
+      setRedeemError(String(err));
+    } finally {
+      setRedeemingId(null);
+    }
+  };
 
   if (count === 0) return null;
 
@@ -117,7 +140,7 @@ export function ResetCreditsMenu({
           id={popupId}
           role="dialog"
           aria-label="Reset credit expiry details"
-          className="absolute right-0 top-full z-30 mt-2 w-80 max-w-[calc(100vw-3rem)] overflow-hidden rounded-xl border border-gray-200 bg-white text-left shadow-xl dark:border-gray-700 dark:bg-gray-900"
+          className="absolute right-0 top-full z-30 mt-2 w-84 max-w-[calc(100vw-3rem)] overflow-hidden rounded-xl border border-gray-200 bg-white text-left shadow-xl dark:border-gray-700 dark:bg-gray-900"
         >
           <div className="flex items-center justify-between border-b border-gray-100 px-3 py-2.5 dark:border-gray-800">
             <span className="text-xs font-semibold text-gray-900 dark:text-gray-100">
@@ -131,22 +154,40 @@ export function ResetCreditsMenu({
             {availableCredits.map((credit, index) => (
               <div
                 key={credit.id}
-                className="flex items-start gap-2.5 px-3 py-2.5 text-xs"
+                className="flex items-center justify-between gap-2.5 px-3 py-2.5 text-xs border-b border-gray-50 dark:border-gray-800/40 last:border-none"
               >
-                <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full font-semibold ${tone.badge}`}>
-                  {index + 1}
-                </span>
-                <div className="min-w-0">
-                  <div className="truncate font-medium text-gray-800 dark:text-gray-200">
-                    {credit.title?.trim() || `Reset ${index + 1}`}
-                  </div>
-                  <div className="mt-0.5 text-[11px] text-gray-500 dark:text-gray-400">
-                    {formatExpiryDetail(credit.expires_at)}
+                <div className="flex items-start gap-2.5 min-w-0">
+                  <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full font-semibold ${tone.badge}`}>
+                    {index + 1}
+                  </span>
+                  <div className="min-w-0">
+                    <div className="truncate font-medium text-gray-800 dark:text-gray-200">
+                      {credit.title?.trim() || `Reset ${index + 1}`}
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-gray-500 dark:text-gray-400">
+                      {formatExpiryDetail(credit.expires_at)}
+                    </div>
                   </div>
                 </div>
+
+                {accountId && (
+                  <button
+                    type="button"
+                    disabled={redeemingId !== null}
+                    onClick={() => void handleRedeem(credit.id)}
+                    className="shrink-0 rounded px-2.5 py-1 text-[11px] font-medium text-sky-700 bg-sky-50 hover:bg-sky-100 border border-sky-200 dark:bg-sky-950/60 dark:text-sky-300 dark:border-sky-800 dark:hover:bg-sky-900 transition-colors disabled:opacity-50"
+                  >
+                    {redeemingId === credit.id ? "Redeeming..." : "Use Reset"}
+                  </button>
+                )}
               </div>
             ))}
           </div>
+          {redeemError && (
+            <div className="border-t border-red-200 bg-red-50/90 px-3 py-2 text-[11px] text-red-600 dark:border-red-900/60 dark:bg-red-950/60 dark:text-red-300">
+              {redeemError}
+            </div>
+          )}
           <div className="border-t border-gray-100 px-3 py-2 text-[10px] text-gray-400 dark:border-gray-800 dark:text-gray-500">
             Times shown in your local time
           </div>
