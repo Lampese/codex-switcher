@@ -2,6 +2,9 @@ import type { ImportAccountsSummary } from "../types";
 
 export type FileSource = string | File;
 
+const WEB_SECRET_STORAGE_KEY = "codex-switcher-web-secret";
+let webAuthSecret: string | null | undefined;
+
 export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -15,11 +18,14 @@ export async function invokeBackend<T>(
     return invoke<T>(command, args);
   }
 
-  const response = await fetch(`/api/invoke/${command}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(args ?? {}),
-  });
+  let response = await fetchWebCommand(command, args);
+
+  if (response.status === 401) {
+    const secret = promptForWebSecret();
+    if (secret) {
+      response = await fetchWebCommand(command, args);
+    }
+  }
 
   const payload = await readJsonResponse(response);
   if (!response.ok) {
@@ -31,6 +37,47 @@ export async function invokeBackend<T>(
   }
 
   return payload as T;
+}
+
+async function fetchWebCommand(
+  command: string,
+  args?: Record<string, unknown>
+): Promise<Response> {
+  const headers = new Headers({ "Content-Type": "application/json" });
+  const secret = getWebAuthSecret();
+  if (secret) headers.set("Authorization", `Bearer ${secret}`);
+
+  return fetch(`/api/invoke/${command}`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(args ?? {}),
+  });
+}
+
+function getWebAuthSecret(): string | null {
+  if (webAuthSecret !== undefined) return webAuthSecret;
+
+  try {
+    webAuthSecret = window.sessionStorage.getItem(WEB_SECRET_STORAGE_KEY);
+  } catch {
+    webAuthSecret = null;
+  }
+  return webAuthSecret;
+}
+
+function promptForWebSecret(): string | null {
+  if (typeof window === "undefined") return null;
+  const entered = window.prompt("Enter the Codex Switcher web secret");
+  const secret = entered?.trim() || null;
+  webAuthSecret = secret;
+  if (secret) {
+    try {
+      window.sessionStorage.setItem(WEB_SECRET_STORAGE_KEY, secret);
+    } catch {
+      // Session storage can be unavailable in privacy-restricted browsers.
+    }
+  }
+  return secret;
 }
 
 export async function openExternalUrl(url: string): Promise<void> {
