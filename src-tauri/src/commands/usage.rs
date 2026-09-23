@@ -1,14 +1,10 @@
 //! Usage query Tauri commands
 
 use crate::api::usage::{
-    fetch_chatgpt_account_metadata, get_account_usage, refresh_all_usage,
-    warmup_account as send_warmup, ChatGptAccountMetadata,
+    fetch_chatgpt_account_metadata, get_account_usage, refresh_all_usage, ChatGptAccountMetadata,
 };
-use crate::auth::{
-    ensure_chatgpt_tokens_fresh, get_account, load_accounts, update_account_metadata,
-};
+use crate::auth::{get_account, load_accounts, update_account_metadata};
 use crate::types::{AccountInfo, AuthData, UsageInfo, WarmupSummary};
-use futures::{stream, StreamExt};
 use std::{
     collections::HashMap,
     sync::{LazyLock, Mutex},
@@ -66,10 +62,7 @@ pub async fn refresh_account_metadata(account_id: String) -> Result<AccountInfo,
     let (updated, live_metadata) = match &account.auth_data {
         AuthData::ApiKey { .. } => (account, None),
         AuthData::ChatGPT { .. } => {
-            let refreshed = ensure_chatgpt_tokens_fresh(&account)
-                .await
-                .map_err(|e| e.to_string())?;
-            let live_metadata = fetch_chatgpt_account_metadata(&refreshed)
+            let live_metadata = fetch_chatgpt_account_metadata(&account)
                 .await
                 .map_err(|e| e.to_string())?;
 
@@ -87,7 +80,7 @@ pub async fn refresh_account_metadata(account_id: String) -> Result<AccountInfo,
                 .map_err(|_| "Account metadata cache is unavailable".to_string())?
                 .insert(account_id.clone(), live_metadata.clone());
 
-            (refreshed, Some(live_metadata))
+            (account, Some(live_metadata))
         }
     };
 
@@ -117,35 +110,16 @@ pub async fn warmup_account(account_id: String) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Account not found: {account_id}"))?;
 
-    send_warmup(&account).await.map_err(|e| e.to_string())
+    crate::warmup_scheduler::run_manual_account(&account)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Send minimal warm-up requests for all accounts
 #[tauri::command]
 pub async fn warmup_all_accounts() -> Result<WarmupSummary, String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
-    let total_accounts = store.accounts.len();
-    let concurrency = total_accounts.min(10).max(1);
-
-    let results: Vec<(String, bool)> = stream::iter(store.accounts.into_iter())
-        .map(|account| async move {
-            let account_id = account.id.clone();
-            let failed = send_warmup(&account).await.is_err();
-            (account_id, failed)
-        })
-        .buffer_unordered(concurrency)
-        .collect()
-        .await;
-
-    let failed_account_ids = results
-        .into_iter()
-        .filter_map(|(account_id, failed)| failed.then_some(account_id))
-        .collect::<Vec<_>>();
-
-    let warmed_accounts = total_accounts.saturating_sub(failed_account_ids.len());
-    Ok(WarmupSummary {
-        total_accounts,
-        warmed_accounts,
-        failed_account_ids,
-    })
+    crate::warmup_scheduler::run_manual_all(store.accounts)
+        .await
+        .map_err(|e| e.to_string())
 }

@@ -1,12 +1,14 @@
 //! Account management Tauri commands
 
+use crate::auth::storage::acquire_auth_operation_lock;
 use crate::auth::{
     add_account, create_chatgpt_account_from_refresh_token, ensure_chatgpt_tokens_fresh_locked,
-    get_active_account, import_from_auth_json, import_from_auth_json_contents, load_accounts,
-    read_current_auth, remove_account, save_accounts, set_active_account, switch_to_account,
-    sync_active_account_tokens, touch_account, AUTH_OPERATION_LOCK,
+    import_from_auth_json, import_from_auth_json_contents, load_accounts, mutate_accounts,
+    read_current_auth, reconcile_active_projection, remove_account, switch_to_account,
 };
-use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
+use crate::types::{
+    AccountInfo, AccountsStore, AuthData, AuthDotJson, ImportAccountsSummary, StoredAccount,
+};
 
 use super::process::ensure_codex_not_running;
 
@@ -37,7 +39,8 @@ const SLIM_AUTH_API_KEY: u8 = 0;
 const SLIM_AUTH_CHATGPT: u8 = 1;
 
 const FULL_FILE_MAGIC: &[u8; 4] = b"CSWF";
-const FULL_FILE_VERSION: u8 = 1;
+const FULL_FILE_VERSION_V1: u8 = 1;
+const FULL_FILE_VERSION_V2: u8 = 2;
 const FULL_SALT_LEN: usize = 16;
 const FULL_NONCE_LEN: usize = 24;
 const FULL_KDF_ITERATIONS: u32 = 210_000;
@@ -69,10 +72,24 @@ struct SlimAccountPayload {
     refresh_token: Option<String>,
 }
 
+fn load_reconciled_accounts() -> Result<AccountsStore, String> {
+    let auth = read_current_auth().map_err(|e| e.to_string())?;
+
+    load_reconciled_accounts_from_auth(auth.as_ref())
+}
+
+fn load_reconciled_accounts_from_auth(auth: Option<&AuthDotJson>) -> Result<AccountsStore, String> {
+    mutate_accounts(|store| {
+        reconcile_active_projection(store, auth);
+        Ok(store.clone())
+    })
+    .map_err(|e| e.to_string())
+}
+
 /// List all accounts with their info
 #[tauri::command]
 pub async fn list_accounts() -> Result<Vec<AccountInfo>, String> {
-    let store = load_accounts().map_err(|e| e.to_string())?;
+    let store = load_reconciled_accounts()?;
     let active_id = store.active_account_id.as_deref();
 
     let accounts: Vec<AccountInfo> = store
@@ -91,16 +108,20 @@ pub async fn list_accounts() -> Result<Vec<AccountInfo>, String> {
 /// Get the currently active account
 #[tauri::command]
 pub async fn get_active_account_info() -> Result<Option<AccountInfo>, String> {
-    let store = load_accounts().map_err(|e| e.to_string())?;
-    let active_id = store.active_account_id.as_deref();
-
-    if let Some(active) = get_active_account().map_err(|e| e.to_string())? {
-        let mut info = AccountInfo::from_stored(&active, active_id);
-        super::usage::apply_cached_account_metadata(&mut info);
-        Ok(Some(info))
-    } else {
-        Ok(None)
-    }
+    let store = load_reconciled_accounts()?;
+    let Some(active_id) = store.active_account_id.as_deref() else {
+        return Ok(None);
+    };
+    let Some(active) = store
+        .accounts
+        .iter()
+        .find(|account| account.id == active_id)
+    else {
+        return Ok(None);
+    };
+    let mut info = AccountInfo::from_stored(active, Some(active_id));
+    super::usage::apply_cached_account_metadata(&mut info);
+    Ok(Some(info))
 }
 
 /// Add an account from an auth.json file
@@ -112,7 +133,7 @@ pub async fn add_account_from_file(path: String, name: String) -> Result<Account
     // Add to storage
     let stored = add_account(account).map_err(|e| e.to_string())?;
 
-    let store = load_accounts().map_err(|e| e.to_string())?;
+    let store = load_reconciled_accounts()?;
     let active_id = store.active_account_id.as_deref();
 
     Ok(AccountInfo::from_stored(&stored, active_id))
@@ -126,7 +147,7 @@ pub async fn add_account_from_auth_json_text(
     let account = import_from_auth_json_contents(&contents, name).map_err(|e| e.to_string())?;
     let stored = add_account(account).map_err(|e| e.to_string())?;
 
-    let store = load_accounts().map_err(|e| e.to_string())?;
+    let store = load_reconciled_accounts()?;
     let active_id = store.active_account_id.as_deref();
 
     Ok(AccountInfo::from_stored(&stored, active_id))
@@ -139,13 +160,16 @@ pub async fn switch_account(account_id: String) -> Result<(), String> {
 }
 
 pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
-    let _auth_guard = AUTH_OPERATION_LOCK.lock().await;
-    let mut store = load_accounts().map_err(|e| e.to_string())?;
+    let _auth_guard = acquire_auth_operation_lock()
+        .await
+        .map_err(|e| e.to_string())?;
+    let store = load_reconciled_accounts()?;
 
-    let target_index = store
+    let target = store
         .accounts
         .iter()
-        .position(|account| account.id == account_id)
+        .find(|account| account.id == account_id)
+        .cloned()
         .ok_or_else(|| format!("Account not found: {account_id}"))?;
 
     if store.active_account_id.as_deref() == Some(account_id) {
@@ -154,29 +178,28 @@ pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
 
     ensure_codex_not_running()?;
 
-    // ChatGPT rotates single-use refresh tokens. Preserve the latest token
-    // before replacing auth.json, otherwise switching back restores a stale one.
-    if let Some(auth) = read_current_auth().map_err(|e| e.to_string())? {
-        if sync_active_account_tokens(&mut store, &auth) {
-            save_accounts(&store).map_err(|e| e.to_string())?;
-        }
-    }
-
-    let account = ensure_chatgpt_tokens_fresh_locked(&store.accounts[target_index])
+    let account = ensure_chatgpt_tokens_fresh_locked(&target)
         .await
         .map_err(|e| e.to_string())?;
 
-    // Write to ~/.codex/auth.json
+    // Runtime auth is the semantic authority. Only project active state after
+    // the runtime transition succeeds.
     switch_to_account(&account).map_err(|e| e.to_string())?;
 
-    // Update the active account in our store
-    set_active_account(account_id).map_err(|e| e.to_string())?;
+    mutate_accounts(|latest| {
+        let stored = latest
+            .accounts
+            .iter_mut()
+            .find(|stored| stored.id == account_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("Account disappeared during activation: {account_id}")
+            })?;
+        stored.last_used_at = Some(chrono::Utc::now());
+        latest.active_account_id = Some(account_id.to_string());
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
 
-    // Update last_used_at
-    touch_account(account_id).map_err(|e| e.to_string())?;
-
-    // Restart Antigravity background process if it is running
-    // This allows it to pick up the new authorization file seamlessly
     if let Ok(pids) = find_antigravity_processes() {
         for pid in pids {
             #[cfg(unix)]
@@ -201,6 +224,10 @@ pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
 /// Remove an account
 #[tauri::command]
 pub async fn delete_account(account_id: String) -> Result<(), String> {
+    let _auth_guard = acquire_auth_operation_lock()
+        .await
+        .map_err(|e| e.to_string())?;
+    let _ = load_reconciled_accounts()?;
     remove_account(&account_id).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -239,8 +266,8 @@ pub async fn import_accounts_slim_text(payload: String) -> Result<ImportAccounts
         })?;
     validate_imported_store(&imported).map_err(|e| format!("{e:#}"))?;
 
-    let (merged, summary) = merge_accounts_store(current, imported);
-    save_accounts(&merged).map_err(|e| e.to_string())?;
+    let summary = mutate_accounts(|latest| merge_imported_store(latest, imported))
+        .map_err(|e| e.to_string())?;
     Ok(ImportAccountsSummary {
         total_in_payload,
         imported_count: summary.imported_count,
@@ -250,48 +277,52 @@ pub async fn import_accounts_slim_text(payload: String) -> Result<ImportAccounts
 
 /// Export full account config as an encrypted file.
 #[tauri::command]
-pub async fn export_accounts_full_encrypted_file(path: String) -> Result<(), String> {
+pub async fn export_accounts_full_encrypted_file(
+    path: String,
+    passphrase: Option<String>,
+) -> Result<(), String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
-    let encrypted =
-        encode_full_encrypted_store(&store, FULL_PRESET_PASSPHRASE).map_err(|e| e.to_string())?;
+    let passphrase = export_backup_key(passphrase.as_deref())?;
+    let encrypted = encode_full_encrypted_store(&store, passphrase, FULL_FILE_VERSION_V2)
+        .map_err(|e| e.to_string())?;
     write_encrypted_file(&path, &encrypted).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 /// Export full account config as encrypted bytes for browser clients.
-pub async fn export_accounts_full_encrypted_bytes() -> Result<Vec<u8>, String> {
+pub async fn export_accounts_full_encrypted_bytes(
+    passphrase: Option<String>,
+) -> Result<Vec<u8>, String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
-    encode_full_encrypted_store(&store, FULL_PRESET_PASSPHRASE).map_err(|e| e.to_string())
+    let passphrase = export_backup_key(passphrase.as_deref())?;
+    encode_full_encrypted_store(&store, passphrase, FULL_FILE_VERSION_V2).map_err(|e| e.to_string())
 }
 
 /// Import full account config from an encrypted file, skipping existing accounts.
 #[tauri::command]
 pub async fn import_accounts_full_encrypted_file(
     path: String,
+    passphrase: Option<String>,
 ) -> Result<ImportAccountsSummary, String> {
     let encrypted = read_encrypted_file(&path).map_err(|e| e.to_string())?;
-    let imported = decode_full_encrypted_store(&encrypted, FULL_PRESET_PASSPHRASE)
-        .map_err(|e| e.to_string())?;
+    let passphrase = import_backup_key(&encrypted, passphrase.as_deref())?;
+    let imported =
+        decode_full_encrypted_store(&encrypted, passphrase).map_err(|e| e.to_string())?;
     validate_imported_store(&imported).map_err(|e| e.to_string())?;
 
-    let current = load_accounts().map_err(|e| e.to_string())?;
-    let (merged, summary) = merge_accounts_store(current, imported);
-    save_accounts(&merged).map_err(|e| e.to_string())?;
-    Ok(summary)
+    mutate_accounts(|latest| merge_imported_store(latest, imported)).map_err(|e| e.to_string())
 }
 
 /// Import full account config from encrypted bytes uploaded through the browser UI.
 pub async fn import_accounts_full_encrypted_bytes(
     bytes: Vec<u8>,
+    passphrase: Option<String>,
 ) -> Result<ImportAccountsSummary, String> {
-    let imported =
-        decode_full_encrypted_store(&bytes, FULL_PRESET_PASSPHRASE).map_err(|e| e.to_string())?;
+    let passphrase = import_backup_key(&bytes, passphrase.as_deref())?;
+    let imported = decode_full_encrypted_store(&bytes, passphrase).map_err(|e| e.to_string())?;
     validate_imported_store(&imported).map_err(|e| e.to_string())?;
 
-    let current = load_accounts().map_err(|e| e.to_string())?;
-    let (merged, summary) = merge_accounts_store(current, imported);
-    save_accounts(&merged).map_err(|e| e.to_string())?;
-    Ok(summary)
+    mutate_accounts(|latest| merge_imported_store(latest, imported)).map_err(|e| e.to_string())
 }
 
 /// Find all running Antigravity codex assistant processes
@@ -487,7 +518,7 @@ async fn build_store_from_slim_payload(
     payload: SlimPayload,
     existing_names: &HashSet<String>,
 ) -> anyhow::Result<AccountsStore> {
-    let active_name = payload.active_name;
+    let _active_name = payload.active_name;
     let import_candidates: Vec<SlimAccountPayload> = payload
         .accounts
         .into_iter()
@@ -495,23 +526,11 @@ async fn build_store_from_slim_payload(
         .collect();
 
     let accounts = restore_slim_accounts(import_candidates).await?;
-    let mut active_account_id = None;
-
-    if let Some(active) = active_name {
-        active_account_id = accounts
-            .iter()
-            .find(|account| account.name == active)
-            .map(|account| account.id.clone());
-    }
-
-    if active_account_id.is_none() {
-        active_account_id = accounts.first().map(|a| a.id.clone());
-    }
 
     Ok(AccountsStore {
         version: 1,
         accounts,
-        active_account_id,
+        active_account_id: None,
         masked_account_ids: Vec::new(),
     })
 }
@@ -556,7 +575,11 @@ async fn restore_slim_accounts(
     Ok(restored)
 }
 
-fn encode_full_encrypted_store(store: &AccountsStore, passphrase: &str) -> anyhow::Result<Vec<u8>> {
+fn encode_full_encrypted_store(
+    store: &AccountsStore,
+    passphrase: &str,
+    version: u8,
+) -> anyhow::Result<Vec<u8>> {
     let json = serde_json::to_vec(store).context("Failed to serialize account store")?;
     let compressed = compress_bytes(&json).context("Failed to compress account store")?;
 
@@ -574,7 +597,7 @@ fn encode_full_encrypted_store(store: &AccountsStore, passphrase: &str) -> anyho
 
     let mut out = Vec::with_capacity(4 + 1 + FULL_SALT_LEN + FULL_NONCE_LEN + ciphertext.len());
     out.extend_from_slice(FULL_FILE_MAGIC);
-    out.push(FULL_FILE_VERSION);
+    out.push(version);
     out.extend_from_slice(&salt);
     out.extend_from_slice(&nonce);
     out.extend_from_slice(&ciphertext);
@@ -600,7 +623,7 @@ fn decode_full_encrypted_store(
     }
 
     let version = file_bytes[4];
-    if version != FULL_FILE_VERSION {
+    if !matches!(version, FULL_FILE_VERSION_V1 | FULL_FILE_VERSION_V2) {
         anyhow::bail!("Unsupported encrypted file version: {version}");
     }
 
@@ -627,6 +650,33 @@ fn decode_full_encrypted_store(
         serde_json::from_slice(&json).context("Failed to parse decrypted account payload")?;
 
     Ok(store)
+}
+
+fn export_backup_key(passphrase: Option<&str>) -> Result<&str, String> {
+    passphrase
+        .filter(|value| !value.is_empty() && !value.trim().is_empty())
+        .ok_or_else(|| "A passphrase is required for full backup export".to_string())
+}
+
+fn import_backup_key<'a>(
+    file_bytes: &[u8],
+    passphrase: Option<&'a str>,
+) -> Result<&'a str, String> {
+    if file_bytes.len() < 5 || &file_bytes[..4] != FULL_FILE_MAGIC {
+        return Err("Encrypted file header is invalid".to_string());
+    }
+
+    let version = file_bytes
+        .get(4)
+        .copied()
+        .ok_or_else(|| "Encrypted file is invalid or truncated".to_string())?;
+    match version {
+        FULL_FILE_VERSION_V1 => Ok(FULL_PRESET_PASSPHRASE),
+        FULL_FILE_VERSION_V2 => passphrase
+            .filter(|value| !value.is_empty() && !value.trim().is_empty())
+            .ok_or_else(|| "A passphrase is required for this backup".to_string()),
+        _ => Err(format!("Unsupported encrypted file version: {version}")),
+    }
 }
 
 fn derive_encryption_key(passphrase: &str, salt: &[u8]) -> [u8; 32] {
@@ -710,7 +760,6 @@ fn merge_accounts_store(
     imported: AccountsStore,
 ) -> (AccountsStore, ImportAccountsSummary) {
     let imported_version = imported.version;
-    let imported_active_id = imported.active_account_id;
     let total_in_payload = imported.accounts.len();
     let mut imported_count = 0usize;
     let mut existing_ids: HashSet<String> = current.accounts.iter().map(|a| a.id.clone()).collect();
@@ -729,22 +778,9 @@ fn merge_accounts_store(
 
     current.version = current.version.max(imported_version).max(1);
 
-    let current_active_is_valid = current
+    current.active_account_id = current
         .active_account_id
-        .as_ref()
-        .is_some_and(|id| current.accounts.iter().any(|a| &a.id == id));
-
-    if !current_active_is_valid {
-        if let Some(imported_active) = imported_active_id {
-            if current.accounts.iter().any(|a| a.id == imported_active) {
-                current.active_account_id = Some(imported_active);
-            } else {
-                current.active_account_id = current.accounts.first().map(|a| a.id.clone());
-            }
-        } else {
-            current.active_account_id = current.accounts.first().map(|a| a.id.clone());
-        }
-    }
+        .filter(|id| current.accounts.iter().any(|account| &account.id == id));
 
     (
         current,
@@ -754,6 +790,15 @@ fn merge_accounts_store(
             skipped_count: total_in_payload.saturating_sub(imported_count),
         },
     )
+}
+
+fn merge_imported_store(
+    latest: &mut AccountsStore,
+    imported: AccountsStore,
+) -> anyhow::Result<ImportAccountsSummary> {
+    let (merged, summary) = merge_accounts_store(latest.clone(), imported);
+    *latest = merged;
+    Ok(summary)
 }
 
 /// Get the list of masked account IDs
@@ -766,4 +811,318 @@ pub async fn get_masked_account_ids() -> Result<Vec<String>, String> {
 #[tauri::command]
 pub async fn set_masked_account_ids(ids: Vec<String>) -> Result<(), String> {
     crate::auth::storage::set_masked_account_ids(ids).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod activation_tests {
+    use super::{load_reconciled_accounts_from_auth, merge_accounts_store};
+    use crate::auth::storage::{mutate_accounts, save_accounts, with_test_config_dir};
+    use crate::types::{AccountsStore, AuthDotJson, StoredAccount, TokenData};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn import_does_not_replace_runtime_active_projection() {
+        let current_account = StoredAccount::new_api_key("Current".into(), "key-current".into());
+        let current_id = current_account.id.clone();
+        let imported_account = StoredAccount::new_api_key("Imported".into(), "key-imported".into());
+        let imported_id = imported_account.id.clone();
+
+        let current = AccountsStore {
+            accounts: vec![current_account],
+            active_account_id: Some(current_id.clone()),
+            ..AccountsStore::default()
+        };
+        let imported = AccountsStore {
+            accounts: vec![imported_account],
+            active_account_id: Some(imported_id),
+            ..AccountsStore::default()
+        };
+
+        let (merged, _) = merge_accounts_store(current, imported);
+
+        assert_eq!(
+            merged.active_account_id.as_deref(),
+            Some(current_id.as_str())
+        );
+    }
+
+    #[test]
+    fn import_cannot_invent_active_projection_when_current_projection_is_empty() {
+        let imported_account = StoredAccount::new_api_key("Imported".into(), "key-imported".into());
+        let imported_id = imported_account.id.clone();
+        let imported = AccountsStore {
+            accounts: vec![imported_account],
+            active_account_id: Some(imported_id),
+            ..AccountsStore::default()
+        };
+
+        let (merged, _) = merge_accounts_store(AccountsStore::default(), imported);
+
+        assert!(merged.active_account_id.is_none());
+    }
+
+    #[test]
+    fn reconciliation_transaction_preserves_unrelated_latest_state() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "codex-switcher-reconciliation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let current_account = StoredAccount::new_chatgpt(
+            "Current".into(),
+            None,
+            None,
+            None,
+            "id-current".into(),
+            "access-current".into(),
+            "refresh-current".into(),
+            Some("workspace-current".into()),
+        );
+        let current_id = current_account.id.clone();
+        let initial_store = AccountsStore {
+            accounts: vec![current_account],
+            active_account_id: Some(current_id.clone()),
+            ..AccountsStore::default()
+        };
+        let live_auth = AuthDotJson {
+            openai_api_key: None,
+            tokens: Some(TokenData {
+                id_token: "id-live".into(),
+                access_token: "access-live".into(),
+                refresh_token: "refresh-live".into(),
+                account_id: Some("workspace-current".into()),
+            }),
+            last_refresh: None,
+        };
+
+        with_test_config_dir(config_dir.clone(), || {
+            save_accounts(&initial_store).unwrap();
+        });
+
+        let (writer_ready_tx, writer_ready_rx) = mpsc::channel();
+        let (release_writer_tx, release_writer_rx) = mpsc::channel();
+        let writer_config_dir = config_dir.clone();
+        let writer = thread::spawn(move || {
+            with_test_config_dir(writer_config_dir, || {
+                mutate_accounts(|latest| {
+                    writer_ready_tx.send(()).unwrap();
+                    release_writer_rx
+                        .recv_timeout(Duration::from_secs(2))
+                        .unwrap();
+                    latest.masked_account_ids.push("concurrent-state".into());
+                    Ok(())
+                })
+                .unwrap();
+            });
+        });
+        writer_ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+
+        let reconcile_config_dir = config_dir.clone();
+        let reconcile = thread::spawn(move || {
+            with_test_config_dir(reconcile_config_dir, || {
+                load_reconciled_accounts_from_auth(Some(&live_auth))
+            })
+        });
+
+        thread::sleep(Duration::from_millis(100));
+        release_writer_tx.send(()).unwrap();
+
+        let reconciled = reconcile.join().unwrap().unwrap();
+        writer.join().unwrap();
+
+        assert_eq!(
+            reconciled.active_account_id.as_deref(),
+            Some(current_id.as_str())
+        );
+        assert_eq!(reconciled.masked_account_ids, vec!["concurrent-state"]);
+
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod full_backup_tests {
+    use super::*;
+    use crate::auth::storage::mutate_accounts_at;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    fn sample_store() -> AccountsStore {
+        let account = StoredAccount::new_api_key("backup account".into(), "api-key".into());
+        AccountsStore {
+            version: 1,
+            active_account_id: Some(account.id.clone()),
+            accounts: vec![account],
+            masked_account_ids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn v2_round_trip_rejects_wrong_or_corrupted_ciphertext() {
+        let store = sample_store();
+        let passphrase = "  correct horse  ";
+        let first = encode_full_encrypted_store(&store, passphrase, FULL_FILE_VERSION_V2).unwrap();
+        let second = encode_full_encrypted_store(&store, passphrase, FULL_FILE_VERSION_V2).unwrap();
+
+        assert_eq!(first[4], FULL_FILE_VERSION_V2);
+        assert_ne!(&first[5..5 + FULL_SALT_LEN], &second[5..5 + FULL_SALT_LEN]);
+        assert_ne!(
+            &first[5 + FULL_SALT_LEN..5 + FULL_SALT_LEN + FULL_NONCE_LEN],
+            &second[5 + FULL_SALT_LEN..5 + FULL_SALT_LEN + FULL_NONCE_LEN]
+        );
+
+        let decoded_passphrase = import_backup_key(&first, Some(passphrase)).unwrap();
+        assert_eq!(decoded_passphrase, passphrase);
+        let decoded = decode_full_encrypted_store(&first, decoded_passphrase).unwrap();
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap(),
+            serde_json::to_value(&store).unwrap()
+        );
+
+        let wrong = decode_full_encrypted_store(&first, "wrong passphrase").unwrap_err();
+        assert!(wrong.to_string().contains("wrong passphrase"));
+
+        let mut corrupted = first.clone();
+        *corrupted.last_mut().unwrap() ^= 1;
+        assert!(decode_full_encrypted_store(&corrupted, passphrase).is_err());
+
+        assert_eq!(export_backup_key(Some(passphrase)).unwrap(), passphrase);
+        assert_eq!(
+            import_backup_key(&first, Some(passphrase)).unwrap(),
+            passphrase
+        );
+    }
+
+    #[test]
+    fn v1_remains_import_compatible_but_is_not_exportable() {
+        let store = sample_store();
+        assert!(export_backup_key(None).is_err());
+        assert!(export_backup_key(Some("  ")).is_err());
+
+        let legacy =
+            encode_full_encrypted_store(&store, FULL_PRESET_PASSPHRASE, FULL_FILE_VERSION_V1)
+                .unwrap();
+        let passphrase = import_backup_key(&legacy, None).unwrap();
+        let decoded = decode_full_encrypted_store(&legacy, passphrase).unwrap();
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap(),
+            serde_json::to_value(&store).unwrap()
+        );
+    }
+
+    #[test]
+    fn full_import_does_not_claim_or_replace_runtime_active_projection() {
+        let current_account = StoredAccount::new_api_key("current".into(), "current-key".into());
+        let current_id = current_account.id.clone();
+        let imported_account = StoredAccount::new_api_key("imported".into(), "imported-key".into());
+        let imported_id = imported_account.id.clone();
+        let imported = AccountsStore {
+            active_account_id: Some(imported_id),
+            accounts: vec![imported_account],
+            ..AccountsStore::default()
+        };
+
+        let current = AccountsStore {
+            active_account_id: Some(current_id.clone()),
+            accounts: vec![current_account],
+            ..AccountsStore::default()
+        };
+        let (merged, _) = merge_accounts_store(current, imported.clone());
+        assert_eq!(
+            merged.active_account_id.as_deref(),
+            Some(current_id.as_str())
+        );
+
+        let (merged, _) = merge_accounts_store(AccountsStore::default(), imported.clone());
+        assert!(merged.active_account_id.is_none());
+
+        let current = AccountsStore {
+            active_account_id: Some("missing-local-account".into()),
+            ..AccountsStore::default()
+        };
+        let (merged, _) = merge_accounts_store(current, imported);
+        assert!(merged.active_account_id.is_none());
+    }
+
+    #[test]
+    fn full_import_transaction_preserves_unrelated_latest_store_update() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "codex-switcher-full-import-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let initial_account = StoredAccount::new_api_key("initial".into(), "initial-key".into());
+        let latest_account = StoredAccount::new_api_key("latest".into(), "latest-key".into());
+        let latest_account_id = latest_account.id.clone();
+        let imported_account = StoredAccount::new_api_key("imported".into(), "imported-key".into());
+
+        mutate_accounts_at(&config_dir, |store| {
+            *store = AccountsStore {
+                active_account_id: Some(initial_account.id.clone()),
+                accounts: vec![initial_account.clone()],
+                ..AccountsStore::default()
+            };
+            Ok(())
+        })
+        .unwrap();
+
+        let imported = AccountsStore {
+            active_account_id: Some(imported_account.id.clone()),
+            accounts: vec![imported_account.clone()],
+            ..AccountsStore::default()
+        };
+        let encoded =
+            encode_full_encrypted_store(&imported, "test passphrase", FULL_FILE_VERSION_V2)
+                .unwrap();
+        let imported = decode_full_encrypted_store(&encoded, "test passphrase").unwrap();
+        validate_imported_store(&imported).unwrap();
+
+        let (writer_started_tx, writer_started_rx) = mpsc::channel();
+        let (release_writer_tx, release_writer_rx) = mpsc::channel();
+        let writer_dir = config_dir.clone();
+        let writer = thread::spawn(move || {
+            mutate_accounts_at(&writer_dir, |latest| {
+                writer_started_tx.send(()).unwrap();
+                release_writer_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap();
+                latest.accounts.push(latest_account.clone());
+                Ok(())
+            })
+        });
+
+        writer_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+
+        let importer_dir = config_dir.clone();
+        let importer = thread::spawn(move || {
+            mutate_accounts_at(&importer_dir, |latest| {
+                merge_imported_store(latest, imported)
+            })
+        });
+
+        release_writer_tx.send(()).unwrap();
+        writer.join().unwrap().unwrap();
+        importer.join().unwrap().unwrap();
+
+        let final_store = mutate_accounts_at(&config_dir, |latest| Ok(latest.clone())).unwrap();
+        assert!(final_store
+            .accounts
+            .iter()
+            .any(|account| account.id == latest_account_id));
+        assert!(final_store
+            .accounts
+            .iter()
+            .any(|account| account.id == imported_account.id));
+        assert_eq!(
+            final_store.active_account_id.as_deref(),
+            Some(initial_account.id.as_str())
+        );
+
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
 }

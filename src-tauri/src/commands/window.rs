@@ -5,11 +5,14 @@ use std::{
     time::Duration,
 };
 
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::{
-    auth::{load_app_settings, save_app_settings},
-    types::{DockDisplayMode, TrayDisplayMode, UsageInfo},
+    auth::{load_app_settings, mutate_app_settings},
+    types::{
+        resolve_desktop_language, DockDisplayMode, TrayDisplayMode, UiLanguagePreference,
+        UsageInfo, WarmupPolicy, WarmupPolicyPatch, WarmupState,
+    },
 };
 
 /// Label of the borderless tray popup window.
@@ -103,6 +106,8 @@ pub fn quit_app(app: AppHandle) {
 pub struct DisplaySettings {
     tray_display_mode: TrayDisplayMode,
     dock_display_mode: Option<DockDisplayMode>,
+    ui_language_preference: UiLanguagePreference,
+    resolved_language: String,
 }
 
 #[tauri::command]
@@ -115,6 +120,66 @@ pub fn get_display_settings() -> Result<DisplaySettings, String> {
         } else {
             None
         },
+        ui_language_preference: settings.ui_language_preference,
+        resolved_language: resolve_desktop_language(settings.ui_language_preference).to_string(),
+    })
+}
+
+#[tauri::command]
+pub fn get_warmup_policy() -> Result<WarmupPolicy, String> {
+    Ok(load_app_settings()
+        .map_err(|error| error.to_string())?
+        .warmup_policy)
+}
+
+#[tauri::command]
+pub fn get_warmup_state() -> Result<WarmupState, String> {
+    crate::warmup_scheduler::get_state().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn set_warmup_policy(patch: WarmupPolicyPatch) -> Result<(), String> {
+    crate::warmup_scheduler::set_policy(patch).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn set_language(app: AppHandle, language: String) -> Result<DisplaySettings, String> {
+    let preference = match language.as_str() {
+        "system" => UiLanguagePreference::System,
+        "en-US" => UiLanguagePreference::English,
+        "zh-CN" => UiLanguagePreference::SimplifiedChinese,
+        _ => return Err(format!("Unsupported language preference: {language}")),
+    };
+
+    let settings = mutate_app_settings(|settings| {
+        settings.ui_language_preference = preference;
+        Ok(settings.clone())
+    })
+    .map_err(|error| error.to_string())?;
+    #[cfg(desktop)]
+    {
+        if let Err(error) = crate::app_menu::refresh_without_notification(&app) {
+            // The settings write is the semantic commit point. A native menu
+            // projection failure must not make React report that persistence
+            // failed; notify webviews to reconcile the authoritative settings.
+            eprintln!("Failed to refresh native app menu after language change: {error}");
+        }
+        crate::tray::refresh(&app);
+        // Notify only after both native projections have had their chance to
+        // reconcile. The persisted AppSettings remains the authority.
+        let _ = app.emit("app-settings-changed", ());
+    }
+    #[cfg(not(desktop))]
+    let _ = &app;
+    Ok(DisplaySettings {
+        tray_display_mode: settings.tray_display_mode,
+        dock_display_mode: if cfg!(target_os = "macos") {
+            Some(settings.dock_display_mode)
+        } else {
+            None
+        },
+        ui_language_preference: settings.ui_language_preference,
+        resolved_language: resolve_desktop_language(settings.ui_language_preference).to_string(),
     })
 }
 
@@ -173,11 +238,14 @@ pub fn complete_close_behavior(
 ) -> Result<Option<DockDisplayMode>, String> {
     #[cfg(target_os = "macos")]
     {
-        let mut settings = crate::app_menu::set_dock_display_mode(&app, mode)
+        let settings = crate::app_menu::set_dock_display_mode(&app, mode)
             .map_err(|error| error.to_string())?;
         if dont_ask_again {
-            settings.close_behavior_prompt_enabled = false;
-            save_app_settings(&settings).map_err(|error| error.to_string())?;
+            mutate_app_settings(|settings| {
+                settings.close_behavior_prompt_enabled = false;
+                Ok(())
+            })
+            .map_err(|error| error.to_string())?;
         }
         hide_main_window(&app);
         Ok(Some(settings.dock_display_mode))

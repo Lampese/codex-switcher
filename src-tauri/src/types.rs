@@ -3,6 +3,7 @@
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 /// The main storage structure for all accounts
@@ -40,6 +41,112 @@ fn default_close_behavior_prompt_enabled() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WarmupPolicy {
+    pub auto_warmup_all_enabled: bool,
+    pub auto_warmup_account_ids: Vec<String>,
+    pub timed_warmup_enabled: bool,
+    pub timed_warmup_times: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WarmupPolicyPatch {
+    pub auto_warmup_all_enabled: Option<bool>,
+    pub auto_warmup_account_ids: Option<Vec<String>>,
+    pub timed_warmup_enabled: Option<bool>,
+    pub timed_warmup_times: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WarmupAccountLedger {
+    pub last_successful_warmup_at: Option<i64>,
+    pub last_auto_window_key: Option<String>,
+    pub last_auto_window_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WarmupLedger {
+    pub accounts: HashMap<String, WarmupAccountLedger>,
+    pub timed_successes: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WarmupState {
+    pub policy: WarmupPolicy,
+    pub ledger: WarmupLedger,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiLanguagePreference {
+    #[default]
+    #[serde(rename = "system")]
+    System,
+    #[serde(rename = "en-US", alias = "en-us")]
+    English,
+    #[serde(
+        rename = "zh-CN",
+        alias = "zh-cn",
+        alias = "zh-Hans",
+        alias = "zh-hans",
+        alias = "zh-SG",
+        alias = "zh-sg"
+    )]
+    SimplifiedChinese,
+}
+
+impl UiLanguagePreference {
+    pub fn resolved(self, system_locale: Option<&str>) -> &'static str {
+        match self {
+            Self::English => "en-US",
+            Self::SimplifiedChinese => "zh-CN",
+            Self::System => {
+                if is_simplified_chinese_locale(system_locale) {
+                    "zh-CN"
+                } else {
+                    "en-US"
+                }
+            }
+        }
+    }
+}
+
+pub fn is_simplified_chinese_locale(locale: Option<&str>) -> bool {
+    let Some(locale) = locale else {
+        return false;
+    };
+    let normalized = locale.replace('_', "-").to_ascii_lowercase();
+    let subtags: Vec<&str> = normalized.split('-').collect();
+    if subtags.first().copied() != Some("zh") {
+        return false;
+    }
+
+    let script = subtags.iter().skip(1).find(|subtag| subtag.len() == 4);
+    let region = subtags.iter().skip(1).find(|subtag| {
+        (subtag.len() == 2
+            && subtag
+                .chars()
+                .all(|character| character.is_ascii_lowercase()))
+            || (subtag.len() == 3 && subtag.chars().all(|character| character.is_ascii_digit()))
+    });
+
+    if matches!(script.copied(), Some("hant"))
+        || matches!(region.copied(), Some("tw" | "hk" | "mo"))
+    {
+        return false;
+    }
+
+    matches!(script.copied(), Some("hans")) || matches!(region.copied(), Some("cn" | "sg"))
+}
+
+pub fn resolve_desktop_language(preference: UiLanguagePreference) -> &'static str {
+    let system_locale = sys_locale::get_locale();
+    preference.resolved(system_locale.as_deref())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
@@ -47,6 +154,10 @@ pub struct AppSettings {
     pub dock_display_mode: DockDisplayMode,
     #[serde(default = "default_close_behavior_prompt_enabled")]
     pub close_behavior_prompt_enabled: bool,
+    pub warmup_policy: WarmupPolicy,
+    pub warmup_ledger: WarmupLedger,
+    #[serde(default, alias = "language")]
+    pub ui_language_preference: UiLanguagePreference,
 }
 
 impl Default for AppSettings {
@@ -55,6 +166,9 @@ impl Default for AppSettings {
             tray_display_mode: TrayDisplayMode::default(),
             dock_display_mode: DockDisplayMode::default(),
             close_behavior_prompt_enabled: true,
+            warmup_policy: WarmupPolicy::default(),
+            warmup_ledger: WarmupLedger::default(),
+            ui_language_preference: UiLanguagePreference::System,
         }
     }
 }
@@ -92,6 +206,12 @@ pub struct StoredAccount {
     pub created_at: DateTime<Utc>,
     /// Last time this account was used
     pub last_used_at: Option<DateTime<Utc>>,
+    /// Last time these OAuth credentials were created or refreshed.
+    ///
+    /// This is intentionally separate from `last_used_at`: credential age is
+    /// an authentication policy signal, while account use is only activity.
+    #[serde(default)]
+    pub last_refresh_at: Option<DateTime<Utc>>,
 }
 
 impl StoredAccount {
@@ -133,6 +253,7 @@ impl StoredAccount {
             auth_data: AuthData::ApiKey { key: api_key },
             created_at: Utc::now(),
             last_used_at: None,
+            last_refresh_at: None,
         }
     }
 
@@ -146,6 +267,31 @@ impl StoredAccount {
         access_token: String,
         refresh_token: String,
         account_id: Option<String>,
+    ) -> Self {
+        Self::new_chatgpt_with_refresh_at(
+            name,
+            email,
+            plan_type,
+            subscription_expires_at,
+            id_token,
+            access_token,
+            refresh_token,
+            account_id,
+            Some(Utc::now()),
+        )
+    }
+
+    /// Create a ChatGPT OAuth account with an explicit credential age.
+    pub fn new_chatgpt_with_refresh_at(
+        name: String,
+        email: Option<String>,
+        plan_type: Option<String>,
+        subscription_expires_at: Option<DateTime<Utc>>,
+        id_token: String,
+        access_token: String,
+        refresh_token: String,
+        account_id: Option<String>,
+        last_refresh_at: Option<DateTime<Utc>>,
     ) -> Self {
         let name = Self::resolved_name(name, email.as_ref(), account_id.as_ref(), "ChatGPT");
         Self {
@@ -163,6 +309,7 @@ impl StoredAccount {
             },
             created_at: Utc::now(),
             last_used_at: None,
+            last_refresh_at,
         }
     }
 }
@@ -493,8 +640,8 @@ pub struct CreditStatusDetails {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_chatgpt_id_token_claims, AccountInfo, AppSettings, DockDisplayMode, StoredAccount,
-        TrayDisplayMode,
+        is_simplified_chinese_locale, parse_chatgpt_id_token_claims, AccountInfo, AppSettings,
+        DockDisplayMode, StoredAccount, TrayDisplayMode, UiLanguagePreference,
     };
     use base64::Engine;
     use chrono::{TimeZone, Utc};
@@ -538,6 +685,45 @@ mod tests {
     }
 
     #[test]
+    fn simplified_chinese_locale_resolution_excludes_traditional_chinese() {
+        assert!(is_simplified_chinese_locale(Some("zh-CN")));
+        assert!(is_simplified_chinese_locale(Some("zh_Hans_CN")));
+        assert!(is_simplified_chinese_locale(Some("zh-Hans-SG")));
+        assert!(is_simplified_chinese_locale(Some("zh-SG")));
+        assert!(is_simplified_chinese_locale(Some("zh_CN")));
+        assert!(is_simplified_chinese_locale(Some("zh-CN-u-nu-hanidec")));
+        assert!(is_simplified_chinese_locale(Some("zh-SG-x-foo")));
+        assert!(!is_simplified_chinese_locale(Some("zh-TW")));
+        assert!(!is_simplified_chinese_locale(Some("zh-HK")));
+        assert!(!is_simplified_chinese_locale(Some("zh-MO")));
+        assert!(!is_simplified_chinese_locale(Some("zh-Hant")));
+        assert!(!is_simplified_chinese_locale(Some("zh-Hant-TW")));
+        assert!(!is_simplified_chinese_locale(Some("zh")));
+        assert!(!is_simplified_chinese_locale(Some("fr-FR")));
+    }
+
+    #[test]
+    fn system_language_preference_resolves_with_english_fallback() {
+        assert_eq!(
+            UiLanguagePreference::System.resolved(Some("zh-CN")),
+            "zh-CN"
+        );
+        assert_eq!(
+            UiLanguagePreference::System.resolved(Some("zh-TW")),
+            "en-US"
+        );
+        assert_eq!(UiLanguagePreference::System.resolved(None), "en-US");
+        assert_eq!(
+            UiLanguagePreference::English.resolved(Some("zh-CN")),
+            "en-US"
+        );
+        assert_eq!(
+            UiLanguagePreference::SimplifiedChinese.resolved(Some("en-US")),
+            "zh-CN"
+        );
+    }
+
+    #[test]
     fn app_settings_default_missing_dock_display_mode_to_show_in_dock() {
         let settings: AppSettings =
             serde_json::from_str(r#"{"tray_display_mode":"active_usage_text"}"#).unwrap();
@@ -545,5 +731,24 @@ mod tests {
         assert_eq!(settings.tray_display_mode, TrayDisplayMode::ActiveUsageText);
         assert_eq!(settings.dock_display_mode, DockDisplayMode::ShowInDock);
         assert!(settings.close_behavior_prompt_enabled);
+        assert_eq!(
+            settings.ui_language_preference,
+            UiLanguagePreference::System
+        );
+    }
+
+    #[test]
+    fn language_preference_round_trips_as_a_persisted_preference() {
+        let settings = AppSettings {
+            ui_language_preference: UiLanguagePreference::SimplifiedChinese,
+            ..Default::default()
+        };
+        let encoded = serde_json::to_string(&settings).unwrap();
+        let decoded: AppSettings = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(
+            decoded.ui_language_preference,
+            UiLanguagePreference::SimplifiedChinese
+        );
     }
 }

@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import type { AccountInfo, AccountUsageStats, DockDisplayMode, UsageInfo } from "./types";
+import type {
+  AccountInfo,
+  AccountUsageStats,
+  DockDisplayMode,
+  UsageInfo,
+  WarmupState,
+} from "./types";
 import { invokeBackend, isTauriRuntime } from "./lib/platform";
 import {
   applyTheme,
@@ -7,11 +13,7 @@ import {
   THEME_CHANGED_EVENT,
   type ThemeMode,
 } from "./lib/theme";
-import {
-  AUTO_WARMUP_ALL_CHANGED_EVENT,
-  readAutoWarmupAllEnabled,
-  writeAutoWarmupAllEnabled,
-} from "./lib/autoWarmup";
+import { useI18n } from "./lib/i18n";
 
 const TRAY_REFRESH_EVENT = "tray-refresh";
 const ACCOUNTS_CHANGED_EVENT = "accounts-changed";
@@ -125,6 +127,7 @@ function retainUsageForAccounts(
 }
 
 function TrayMenu() {
+  const { t } = useI18n();
   const [accounts, setAccounts] = useState<AccountInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
@@ -132,7 +135,7 @@ function TrayMenu() {
   const [usageById, setUsageById] = useState<Record<string, UsageInfo>>({});
   const [statsById, setStatsById] = useState<Record<string, AccountUsageStats>>({});
   const [refreshing, setRefreshing] = useState(false);
-  const [autoWarmupAllEnabled, setAutoWarmupAllEnabled] = useState(readAutoWarmupAllEnabled);
+  const [autoWarmupAllEnabled, setAutoWarmupAllEnabled] = useState(false);
   const [dockDisplayMode, setDockDisplayMode] = useState<DockDisplayMode | null>(null);
 
   // Fetch each account's rate-limit usage in parallel; rows fill in as they land.
@@ -221,8 +224,12 @@ function TrayMenu() {
   const load = useCallback(async () => {
     try {
       void loadDockDisplayMode();
-      const list = await invokeBackend<AccountInfo[]>("list_accounts");
+      const [list, warmupState] = await Promise.all([
+        invokeBackend<AccountInfo[]>("list_accounts"),
+        invokeBackend<WarmupState>("get_warmup_state"),
+      ]);
       setAccounts(list);
+      setAutoWarmupAllEnabled(warmupState.policy.auto_warmup_all_enabled);
       setUsageById((prev) => retainUsageForAccounts(prev, list));
       setError(null);
       void loadUsage(list); // Don't block the list render on the usage calls.
@@ -254,11 +261,9 @@ function TrayMenu() {
     const next = !autoWarmupAllEnabled;
     setAutoWarmupAllEnabled(next);
     try {
-      writeAutoWarmupAllEnabled(next);
-      if (isTauriRuntime()) {
-        const { emit } = await import("@tauri-apps/api/event");
-        await emit(AUTO_WARMUP_ALL_CHANGED_EVENT, next);
-      }
+      await invokeBackend("set_warmup_policy", {
+        auto_warmup_all_enabled: next,
+      });
     } catch (err) {
       setAutoWarmupAllEnabled(!next);
       setError(formatError(err));
@@ -288,13 +293,11 @@ function TrayMenu() {
     let unlistenRefresh: (() => void) | undefined;
     let unlistenChanged: (() => void) | undefined;
     let unlistenTheme: (() => void) | undefined;
-    let unlistenAutoWarmup: (() => void) | undefined;
 
     void (async () => {
       const { listen } = await import("@tauri-apps/api/event");
       unlistenRefresh = await listen(TRAY_REFRESH_EVENT, () => {
         syncThemeFromStorage();
-        setAutoWarmupAllEnabled(readAutoWarmupAllEnabled());
         void load();
       });
       unlistenChanged = await listen(ACCOUNTS_CHANGED_EVENT, () => void load());
@@ -303,21 +306,12 @@ function TrayMenu() {
           applyTheme(payload);
         }
       });
-      unlistenAutoWarmup = await listen<boolean>(
-        AUTO_WARMUP_ALL_CHANGED_EVENT,
-        ({ payload }) => {
-          if (typeof payload === "boolean") {
-            setAutoWarmupAllEnabled(payload);
-          }
-        }
-      );
     })();
 
     return () => {
       unlistenRefresh?.();
       unlistenChanged?.();
       unlistenTheme?.();
-      unlistenAutoWarmup?.();
     };
   }, [load]);
 
@@ -359,14 +353,14 @@ function TrayMenu() {
         <div className="flex h-6 w-6 items-center justify-center rounded-md bg-black text-xs font-bold text-white">
           C
         </div>
-        <span className="text-sm font-semibold">Codex Switcher</span>
+        <span className="text-sm font-semibold">{t("common.codex.switcher")}</span>
         <button
           onClick={() => void handleAutoWarmupToggle()}
           disabled={accounts.length === 0}
           title={
             autoWarmupAllEnabled
-              ? "Disable auto warm-up for all accounts"
-              : "Enable auto warm-up for all accounts"
+              ? t("tray.disable.auto.warm.up.for.all.accounts")
+              : t("tray.enable.auto.warm.up.for.all.accounts")
           }
           className={`ml-auto rounded-md px-2 py-1 text-[11px] font-semibold transition-colors disabled:opacity-50 ${
             autoWarmupAllEnabled
@@ -374,12 +368,12 @@ function TrayMenu() {
               : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
           }`}
         >
-          Auto: {autoWarmupAllEnabled ? "on" : "off"}
+          {t("common.auto")}: {autoWarmupAllEnabled ? t("common.on") : t("common.off")}
         </button>
         <button
           onClick={() => void handleRefresh()}
           disabled={refreshing}
-          title="Refresh usage"
+          title={t("common.refresh.usage")}
           className="flex h-6 w-6 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 disabled:opacity-50 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
         >
           <span className={`text-base leading-none ${refreshing ? "inline-block animate-spin" : ""}`}>
@@ -391,11 +385,11 @@ function TrayMenu() {
       <div className="flex-1 overflow-y-auto p-1.5">
         {loading ? (
           <div className="px-2 py-6 text-center text-xs text-gray-500 dark:text-gray-400">
-            Loading...
+            {t("tray.loading")}
           </div>
         ) : accounts.length === 0 ? (
           <div className="px-2 py-6 text-center text-xs text-gray-500 dark:text-gray-400">
-            No accounts configured
+            {t("tray.no.accounts.configured")}
           </div>
         ) : (
           accounts.map((account) => {
@@ -406,16 +400,19 @@ function TrayMenu() {
               usage && !usage.error
                 ? ([
                     {
-                      label: "Session",
+                      kind: "session" as const,
+                      label: t("tray.session"),
                       used: usage.primary_used_percent,
                       resetAt: usage.primary_resets_at,
                     },
                     {
-                      label: "Weekly",
+                      kind: "weekly" as const,
+                      label: t("tray.weekly"),
                       used: usage.secondary_used_percent,
                       resetAt: usage.secondary_resets_at,
                     },
                   ].filter((w) => w.used != null) as {
+                    kind: "session" | "weekly";
                     label: string;
                     used: number;
                     resetAt: number | null;
@@ -451,7 +448,7 @@ function TrayMenu() {
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-1.5">
                     <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                      {account.name}
+                      <span>{account.name}</span>
                     </span>
                     {plan && (
                       <span className="shrink-0 rounded bg-gray-200 px-1.5 py-0.5 text-[10px] font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200">
@@ -465,9 +462,9 @@ function TrayMenu() {
                         const remaining = Math.max(0, 100 - w.used);
                         const tone = remainingTone(remaining);
                         const reset = formatResetAt(w.resetAt);
-                        const exactReset = formatExactResetTime(w.resetAt, w.label === "Weekly");
+                        const exactReset = formatExactResetTime(w.resetAt, w.kind === "weekly");
                         return (
-                          <span key={w.label} className="block">
+                          <span key={w.kind} className="block">
                             <span className="flex items-center gap-1">
                               <span className="text-[11px] font-medium text-gray-700 dark:text-gray-200">
                                 {w.label}
@@ -484,11 +481,13 @@ function TrayMenu() {
                             </span>
                             <span className="mt-0.5 flex justify-between text-[11px] text-gray-500 dark:text-gray-400">
                               <span className={tone.text}>
-                                {remaining.toFixed(0)}% left
+                                {t("tray.remaining.percent", {
+                                  value: remaining.toFixed(0),
+                                })}
                               </span>
                               {reset && (
                                 <span className="shrink-0 whitespace-nowrap">
-                                  {reset === "now" ? "Resets now" : `Resets in ${reset}`}
+                                  {reset === "now" ? t("tray.resets.now") : t("tray.resets.in.value", { value: reset })}
                                   {exactReset && ` • ${exactReset}`}
                                 </span>
                               )}
@@ -499,7 +498,7 @@ function TrayMenu() {
                     </span>
                   ) : usage?.error ? (
                     <span className="block truncate text-xs text-red-500 dark:text-red-400">
-                      Usage unavailable
+                      {t("tray.usage.unavailable")}
                     </span>
                   ) : account.email ? (
                     <span className="block truncate text-xs text-gray-500 dark:text-gray-400">
@@ -512,13 +511,13 @@ function TrayMenu() {
                         <span className="block font-medium text-gray-900 dark:text-gray-100">
                           {formatTokens(sumDailyTokens(stats, 1))}
                         </span>
-                        <span>today</span>
+                        <span>{t("tray.today")}</span>
                       </span>
                       <span className="rounded-md bg-white px-2 py-1 text-[11px] text-gray-600 shadow-sm dark:bg-gray-950 dark:text-gray-300">
                         <span className="block font-medium text-gray-900 dark:text-gray-100">
                           {formatTokens(sumDailyTokens(stats, 7))}
                         </span>
-                        <span>last 7 days</span>
+                        <span>{t("tray.last.7.days")}</span>
                       </span>
                     </span>
                   )}
@@ -541,7 +540,7 @@ function TrayMenu() {
       {dockDisplayMode && (
         <div className="flex items-center gap-1 border-t border-gray-100 px-1.5 py-1.5 dark:border-gray-800">
           <span className="px-1.5 text-[11px] font-medium text-gray-500 dark:text-gray-400">
-            Dock
+            {t("tray.dock")}
           </span>
           <button
             onClick={() => void handleDockDisplayMode("show_in_dock")}
@@ -551,7 +550,7 @@ function TrayMenu() {
                 : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
             }`}
           >
-            Show
+            {t("tray.show")}
           </button>
           <button
             onClick={() => void handleDockDisplayMode("menu_bar_only")}
@@ -561,7 +560,7 @@ function TrayMenu() {
                 : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
             }`}
           >
-            Menu Bar
+            {t("tray.menu.bar")}
           </button>
         </div>
       )}
@@ -571,13 +570,13 @@ function TrayMenu() {
           onClick={() => void invokeBackend("open_main_window")}
           className="flex-1 rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-gray-100 dark:hover:bg-gray-800"
         >
-          Open Codex Switcher
+          {t("tray.open.codex.switcher")}
         </button>
         <button
           onClick={() => void invokeBackend("quit_app")}
           className="rounded-lg px-2 py-1.5 text-sm text-gray-500 transition-colors hover:bg-gray-100 hover:text-red-600 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-red-400"
         >
-          Quit
+          {t("tray.quit")}
         </button>
       </div>
     </div>

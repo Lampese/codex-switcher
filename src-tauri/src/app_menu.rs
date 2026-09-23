@@ -8,8 +8,8 @@ use tauri::{
 #[cfg(target_os = "macos")]
 pub(crate) use crate::types::DockDisplayMode;
 use crate::{
-    auth::{load_app_settings, save_app_settings},
-    types::{AppSettings, TrayDisplayMode},
+    auth::{load_app_settings_or_fallback, mutate_app_settings},
+    types::{resolve_desktop_language, AppSettings, TrayDisplayMode},
 };
 
 const TRAY_ICON_AND_SESSION_ID: &str = "tray-display-icon-and-session";
@@ -30,11 +30,21 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 }
 
 pub fn refresh<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
-    let settings = load_app_settings().unwrap_or_default();
+    refresh_internal(app, true)
+}
+
+pub(crate) fn refresh_without_notification<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    refresh_internal(app, false)
+}
+
+fn refresh_internal<R: Runtime>(app: &AppHandle<R>, notify: bool) -> tauri::Result<()> {
+    let settings = load_app_settings_or_fallback();
     let menu = build_menu(app, &settings)?;
     app.set_menu(menu)?;
-    if let Err(error) = app.emit("app-settings-changed", ()) {
-        eprintln!("Failed to notify settings changes: {error}");
+    if notify {
+        if let Err(error) = app.emit("app-settings-changed", ()) {
+            eprintln!("Failed to notify settings changes: {error}");
+        }
     }
     Ok(())
 }
@@ -77,11 +87,14 @@ pub(crate) fn update_tray_display_mode(app: &AppHandle, mode: TrayDisplayMode) {
 }
 
 pub(crate) fn set_tray_display_mode(app: &AppHandle, mode: TrayDisplayMode) -> anyhow::Result<()> {
-    let mut settings = load_app_settings()?;
-    settings.tray_display_mode = mode;
-    #[cfg(target_os = "macos")]
-    let dock_mode_changed = ensure_dock_entry_for_tray_mode(&mut settings);
-    save_app_settings(&settings)?;
+    let (settings, dock_mode_changed) = mutate_app_settings(|settings| {
+        settings.tray_display_mode = mode;
+        #[cfg(target_os = "macos")]
+        let dock_mode_changed = ensure_dock_entry_for_tray_mode(settings);
+        #[cfg(not(target_os = "macos"))]
+        let dock_mode_changed = false;
+        Ok((settings.clone(), dock_mode_changed))
+    })?;
 
     #[cfg(target_os = "macos")]
     if dock_mode_changed {
@@ -114,43 +127,31 @@ pub(crate) fn set_dock_display_mode<R: Runtime>(
     app: &AppHandle<R>,
     mode: DockDisplayMode,
 ) -> anyhow::Result<AppSettings> {
-    let mut settings = load_app_settings().unwrap_or_default();
-    if settings.dock_display_mode == mode {
-        let changed = ensure_menu_bar_entry_for_dock_mode(&mut settings);
-        if changed {
-            save_app_settings(&settings)?;
-        }
-        apply_dock_display_mode(app, mode);
-        if changed {
-            if let Err(error) = refresh(app) {
-                eprintln!("Failed to refresh app menu: {error}");
-            }
-            crate::tray::refresh(app);
-        }
-        return Ok(settings);
-    }
+    let (settings, changed) = mutate_app_settings(|settings| {
+        let dock_changed = settings.dock_display_mode != mode;
+        settings.dock_display_mode = mode;
+        let tray_changed = ensure_menu_bar_entry_for_dock_mode(settings);
+        Ok((settings.clone(), dock_changed || tray_changed))
+    })?;
 
-    settings.dock_display_mode = mode;
-    ensure_menu_bar_entry_for_dock_mode(&mut settings);
-    save_app_settings(&settings)?;
-    apply_dock_display_mode(app, mode);
+    apply_dock_display_mode(app, settings.dock_display_mode);
 
-    if let Err(error) = refresh(app) {
-        eprintln!("Failed to refresh app menu: {error}");
+    if changed {
+        if let Err(error) = refresh(app) {
+            eprintln!("Failed to refresh app menu: {error}");
+        }
+        crate::tray::refresh(app);
     }
-    crate::tray::refresh(app);
     Ok(settings)
 }
 
 #[cfg(target_os = "macos")]
 fn apply_saved_dock_display_mode<R: Runtime>(app: &AppHandle<R>) {
-    let mut settings = load_app_settings().unwrap_or_default();
-    let changed = ensure_menu_bar_entry_for_dock_mode(&mut settings);
-    if changed {
-        if let Err(error) = save_app_settings(&settings) {
-            eprintln!("Failed to save app settings: {error}");
-        }
-    }
+    let settings = mutate_app_settings(|settings| {
+        ensure_menu_bar_entry_for_dock_mode(settings);
+        Ok(settings.clone())
+    })
+    .unwrap_or_default();
     apply_dock_display_mode(app, settings.dock_display_mode);
 }
 
@@ -187,6 +188,7 @@ fn apply_dock_display_mode<R: Runtime>(app: &AppHandle<R>, mode: DockDisplayMode
 }
 
 fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::Result<Menu<R>> {
+    let language = resolve_desktop_language(settings.ui_language_preference);
     let pkg_info = app.package_info();
     let config = app.config();
     let about_metadata = AboutMetadata {
@@ -203,13 +205,13 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
 
     let tray_settings = Submenu::with_items(
         app,
-        "Tray",
+        text(language, NativeText::Tray),
         true,
         &[
             &CheckMenuItem::with_id(
                 app,
                 TRAY_ICON_AND_SESSION_ID,
-                "Icon + Session",
+                text(language, NativeText::IconAndSession),
                 true,
                 settings.tray_display_mode == TrayDisplayMode::IconAndSession,
                 None::<&str>,
@@ -217,7 +219,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
             &CheckMenuItem::with_id(
                 app,
                 TRAY_ACTIVE_USAGE_TEXT_ID,
-                "Hourly + Weekly",
+                text(language, NativeText::HourlyAndWeekly),
                 true,
                 settings.tray_display_mode == TrayDisplayMode::ActiveUsageText,
                 None::<&str>,
@@ -225,7 +227,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
             &CheckMenuItem::with_id(
                 app,
                 TRAY_HIDDEN_ID,
-                "Hidden",
+                text(language, NativeText::Hidden),
                 true,
                 settings.tray_display_mode == TrayDisplayMode::Hidden,
                 None::<&str>,
@@ -236,13 +238,13 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
     #[cfg(target_os = "macos")]
     let dock_settings = Submenu::with_items(
         app,
-        "Dock Icon",
+        text(language, NativeText::DockIcon),
         true,
         &[
             &CheckMenuItem::with_id(
                 app,
                 DOCK_SHOW_IN_DOCK_ID,
-                "Show in Dock",
+                text(language, NativeText::ShowInDock),
                 true,
                 settings.dock_display_mode == DockDisplayMode::ShowInDock,
                 None::<&str>,
@@ -250,7 +252,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
             &CheckMenuItem::with_id(
                 app,
                 DOCK_MENU_BAR_ONLY_ID,
-                "Menu Bar Only",
+                text(language, NativeText::MenuBarOnly),
                 true,
                 settings.dock_display_mode == DockDisplayMode::MenuBarOnly,
                 None::<&str>,
@@ -261,7 +263,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
     let desktop_reopen_settings = MenuItem::with_id(
         app,
         DESKTOP_REOPEN_SETTINGS_ID,
-        "Reopen Codex after force close...",
+        text(language, NativeText::ReopenAfterForceClose),
         cfg!(any(target_os = "macos", windows)),
         None::<&str>,
     )?;
@@ -269,7 +271,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
     #[cfg(target_os = "macos")]
     let settings_menu = Submenu::with_items(
         app,
-        "Settings",
+        text(language, NativeText::Settings),
         true,
         &[&tray_settings, &dock_settings, &desktop_reopen_settings],
     )?;
@@ -277,25 +279,25 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
     #[cfg(not(target_os = "macos"))]
     let settings_menu = Submenu::with_items(
         app,
-        "Settings",
+        text(language, NativeText::Settings),
         true,
         &[&tray_settings, &desktop_reopen_settings],
     )?;
 
     let window_menu = Submenu::with_items(
         app,
-        "Window",
+        text(language, NativeText::Window),
         true,
         &[
-            &PredefinedMenuItem::minimize(app, None)?,
-            &PredefinedMenuItem::maximize(app, None)?,
+            &PredefinedMenuItem::minimize(app, Some(&text(language, NativeText::Minimize)))?,
+            &PredefinedMenuItem::maximize(app, Some(&text(language, NativeText::Maximize)))?,
             #[cfg(target_os = "macos")]
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::close_window(app, None)?,
+            &PredefinedMenuItem::close_window(app, Some(&text(language, NativeText::Close)))?,
         ],
     )?;
 
-    let help_menu = Submenu::with_items(app, "Help", true, &[])?;
+    let help_menu = Submenu::with_items(app, text(language, NativeText::Help), true, &[])?;
 
     Menu::with_items(
         app,
@@ -306,16 +308,26 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
                 pkg_info.name.clone(),
                 true,
                 &[
-                    &PredefinedMenuItem::about(app, None, Some(about_metadata))?,
+                    &PredefinedMenuItem::about(
+                        app,
+                        Some(&text(language, NativeText::About)),
+                        Some(about_metadata),
+                    )?,
                     &PredefinedMenuItem::separator(app)?,
                     &settings_menu,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::services(app, None)?,
+                    &PredefinedMenuItem::services(
+                        app,
+                        Some(&text(language, NativeText::Services)),
+                    )?,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::hide(app, None)?,
-                    &PredefinedMenuItem::hide_others(app, None)?,
+                    &PredefinedMenuItem::hide(app, Some(&text(language, NativeText::Hide)))?,
+                    &PredefinedMenuItem::hide_others(
+                        app,
+                        Some(&text(language, NativeText::HideOthers)),
+                    )?,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::quit(app, None)?,
+                    &PredefinedMenuItem::quit(app, Some(&text(language, NativeText::Quit)))?,
                 ],
             )?,
             #[cfg(not(any(
@@ -327,34 +339,43 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
             )))]
             &Submenu::with_items(
                 app,
-                "File",
+                text(language, NativeText::File),
                 true,
                 &[
-                    &PredefinedMenuItem::close_window(app, None)?,
+                    &PredefinedMenuItem::close_window(
+                        app,
+                        Some(&text(language, NativeText::Close)),
+                    )?,
                     #[cfg(not(target_os = "macos"))]
-                    &PredefinedMenuItem::quit(app, None)?,
+                    &PredefinedMenuItem::quit(app, Some(&text(language, NativeText::Quit)))?,
                 ],
             )?,
             &Submenu::with_items(
                 app,
-                "Edit",
+                text(language, NativeText::Edit),
                 true,
                 &[
-                    &PredefinedMenuItem::undo(app, None)?,
-                    &PredefinedMenuItem::redo(app, None)?,
+                    &PredefinedMenuItem::undo(app, Some(&text(language, NativeText::Undo)))?,
+                    &PredefinedMenuItem::redo(app, Some(&text(language, NativeText::Redo)))?,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::cut(app, None)?,
-                    &PredefinedMenuItem::copy(app, None)?,
-                    &PredefinedMenuItem::paste(app, None)?,
-                    &PredefinedMenuItem::select_all(app, None)?,
+                    &PredefinedMenuItem::cut(app, Some(&text(language, NativeText::Cut)))?,
+                    &PredefinedMenuItem::copy(app, Some(&text(language, NativeText::Copy)))?,
+                    &PredefinedMenuItem::paste(app, Some(&text(language, NativeText::Paste)))?,
+                    &PredefinedMenuItem::select_all(
+                        app,
+                        Some(&text(language, NativeText::SelectAll)),
+                    )?,
                 ],
             )?,
             #[cfg(target_os = "macos")]
             &Submenu::with_items(
                 app,
-                "View",
+                text(language, NativeText::View),
                 true,
-                &[&PredefinedMenuItem::fullscreen(app, None)?],
+                &[&PredefinedMenuItem::fullscreen(
+                    app,
+                    Some(&text(language, NativeText::Fullscreen)),
+                )?],
             )?,
             #[cfg(not(target_os = "macos"))]
             &settings_menu,
@@ -362,6 +383,120 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
             &help_menu,
         ],
     )
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+pub(crate) enum NativeText {
+    Tray,
+    IconAndSession,
+    HourlyAndWeekly,
+    Hidden,
+    DockIcon,
+    ShowInDock,
+    MenuBarOnly,
+    ReopenAfterForceClose,
+    Settings,
+    Window,
+    File,
+    Edit,
+    View,
+    Help,
+    About,
+    Services,
+    Hide,
+    HideOthers,
+    Undo,
+    Redo,
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+    Minimize,
+    Maximize,
+    Fullscreen,
+    Close,
+    NoAccounts,
+    OpenSwitcher,
+    CodexSwitcher,
+    Quit,
+}
+
+pub(crate) fn text(language: &str, key: NativeText) -> String {
+    let english = match key {
+        NativeText::Tray => "Tray",
+        NativeText::IconAndSession => "Icon + Session",
+        NativeText::HourlyAndWeekly => "Hourly + Weekly",
+        NativeText::Hidden => "Hidden",
+        NativeText::DockIcon => "Dock Icon",
+        NativeText::ShowInDock => "Show in Dock",
+        NativeText::MenuBarOnly => "Menu Bar Only",
+        NativeText::ReopenAfterForceClose => "Reopen Codex after force close...",
+        NativeText::Settings => "Settings",
+        NativeText::Window => "Window",
+        NativeText::File => "File",
+        NativeText::Edit => "Edit",
+        NativeText::View => "View",
+        NativeText::Help => "Help",
+        NativeText::About => "About",
+        NativeText::Services => "Services",
+        NativeText::Hide => "Hide",
+        NativeText::HideOthers => "Hide Others",
+        NativeText::Undo => "Undo",
+        NativeText::Redo => "Redo",
+        NativeText::Cut => "Cut",
+        NativeText::Copy => "Copy",
+        NativeText::Paste => "Paste",
+        NativeText::SelectAll => "Select All",
+        NativeText::Minimize => "Minimize",
+        NativeText::Maximize => "Maximize",
+        NativeText::Fullscreen => "Fullscreen",
+        NativeText::Close => "Close",
+        NativeText::NoAccounts => "No accounts configured",
+        NativeText::OpenSwitcher => "Open Codex Switcher",
+        NativeText::CodexSwitcher => "Codex Switcher",
+        NativeText::Quit => "Quit",
+    };
+
+    if language.eq_ignore_ascii_case("zh-cn") {
+        match key {
+            NativeText::Tray => "托盘",
+            NativeText::IconAndSession => "图标 + 会话",
+            NativeText::HourlyAndWeekly => "每小时 + 每周",
+            NativeText::Hidden => "隐藏",
+            NativeText::DockIcon => "Dock 图标",
+            NativeText::ShowInDock => "在 Dock 中显示",
+            NativeText::MenuBarOnly => "仅菜单栏",
+            NativeText::ReopenAfterForceClose => "强制关闭后重新打开 Codex……",
+            NativeText::Settings => "设置",
+            NativeText::Window => "窗口",
+            NativeText::File => "文件",
+            NativeText::Edit => "编辑",
+            NativeText::View => "视图",
+            NativeText::Help => "帮助",
+            NativeText::About => "关于",
+            NativeText::Services => "服务",
+            NativeText::Hide => "隐藏 Codex Switcher",
+            NativeText::HideOthers => "隐藏其他应用",
+            NativeText::Undo => "撤销",
+            NativeText::Redo => "重做",
+            NativeText::Cut => "剪切",
+            NativeText::Copy => "复制",
+            NativeText::Paste => "粘贴",
+            NativeText::SelectAll => "全选",
+            NativeText::Minimize => "最小化",
+            NativeText::Maximize => "最大化",
+            NativeText::Fullscreen => "全屏",
+            NativeText::Close => "关闭",
+            NativeText::NoAccounts => "未配置账号",
+            NativeText::OpenSwitcher => "打开 Codex Switcher",
+            NativeText::CodexSwitcher => "Codex Switcher",
+            NativeText::Quit => "退出",
+        }
+        .to_string()
+    } else {
+        english.to_string()
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -393,5 +528,18 @@ mod tests {
         assert!(ensure_dock_entry_for_tray_mode(&mut settings));
         assert_eq!(settings.tray_display_mode, TrayDisplayMode::Hidden);
         assert_eq!(settings.dock_display_mode, DockDisplayMode::ShowInDock);
+    }
+}
+
+#[cfg(test)]
+mod text_tests {
+    use super::{text, NativeText};
+
+    #[test]
+    fn native_menu_text_has_english_fallback_and_simplified_chinese() {
+        assert_eq!(text("en-US", NativeText::Settings), "Settings");
+        assert_eq!(text("zh-CN", NativeText::Settings), "设置");
+        assert_eq!(text("zh-CN", NativeText::File), "文件");
+        assert_eq!(text("zh-CN", NativeText::Quit), "退出");
     }
 }
