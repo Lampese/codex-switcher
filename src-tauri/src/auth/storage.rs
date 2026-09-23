@@ -4,6 +4,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::{cell::RefCell, thread_local};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -11,6 +13,11 @@ use chrono::{DateTime, Utc};
 use crate::types::{
     parse_chatgpt_id_token_claims, AccountsStore, AppSettings, AuthData, AuthDotJson, StoredAccount,
 };
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CONFIG_DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
 
 pub fn sync_active_account_tokens(store: &mut AccountsStore, auth: &AuthDotJson) -> bool {
     let Some(active_id) = store.active_account_id.as_deref() else {
@@ -85,10 +92,82 @@ fn runtime_snapshot_is_older_than_stored_credentials(
     }
 }
 
+pub fn reconcile_active_projection(store: &mut AccountsStore, auth: Option<&AuthDotJson>) -> bool {
+    let previous_active = store.active_account_id.clone();
+
+    let matching_id = auth.and_then(|auth| {
+        if let Some(api_key) = auth.openai_api_key.as_ref() {
+            return store
+                .accounts
+                .iter()
+                .find_map(|account| match &account.auth_data {
+                    AuthData::ApiKey { key } if key == api_key => Some(account.id.clone()),
+                    _ => None,
+                });
+        }
+
+        let tokens = auth.tokens.as_ref()?;
+        let runtime_account_id = parse_chatgpt_id_token_claims(&tokens.id_token)
+            .account_id
+            .or_else(|| tokens.account_id.clone())?;
+
+        store
+            .accounts
+            .iter()
+            .find_map(|account| match &account.auth_data {
+                AuthData::ChatGPT {
+                    id_token,
+                    account_id,
+                    ..
+                } => {
+                    let stored_account_id = parse_chatgpt_id_token_claims(id_token)
+                        .account_id
+                        .or_else(|| account_id.clone());
+                    (stored_account_id.as_deref() == Some(runtime_account_id.as_str()))
+                        .then(|| account.id.clone())
+                }
+                _ => None,
+            })
+    });
+
+    store.active_account_id = matching_id;
+
+    let mut changed = store.active_account_id != previous_active;
+    if let (Some(auth), Some(active_id)) = (auth, store.active_account_id.clone()) {
+        let before = store
+            .accounts
+            .iter()
+            .find(|account| account.id == active_id)
+            .cloned();
+        if sync_active_account_tokens(store, auth) {
+            changed = true;
+        } else if before.is_none() {
+            changed = true;
+        }
+    }
+
+    changed
+}
+
 /// Get the path to the codex-switcher config directory
 pub fn get_config_dir() -> Result<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = TEST_CONFIG_DIR.with(|dir| dir.borrow().clone()) {
+        return Ok(path);
+    }
+
     let home = dirs::home_dir().context("Could not find home directory")?;
     Ok(home.join(".codex-switcher"))
+}
+
+#[cfg(test)]
+pub(crate) fn with_test_config_dir<T>(path: PathBuf, operation: impl FnOnce() -> T) -> T {
+    TEST_CONFIG_DIR.with(|dir| {
+        let previous = dir.replace(Some(path));
+        let result = operation();
+        dir.replace(previous);
+        result
+    })
 }
 
 /// Get the path to accounts.json
@@ -379,36 +458,34 @@ pub fn mutate_accounts<T>(mutate: impl FnOnce(&mut AccountsStore) -> Result<T>) 
 
 /// Add a new account to the store
 pub fn add_account(account: StoredAccount) -> Result<StoredAccount> {
-    mutate_accounts(|store| {
-        if store.accounts.iter().any(|a| a.name == account.name) {
-            anyhow::bail!("An account with name '{}' already exists", account.name);
-        }
+    mutate_accounts(|store| add_account_to_store(store, account))
+}
 
-        let account_clone = account.clone();
-        store.accounts.push(account);
+fn add_account_to_store(
+    store: &mut AccountsStore,
+    account: StoredAccount,
+) -> Result<StoredAccount> {
+    if store.accounts.iter().any(|a| a.name == account.name) {
+        anyhow::bail!("An account with name '{}' already exists", account.name);
+    }
 
-        if store.accounts.len() == 1 {
-            store.active_account_id = Some(account_clone.id.clone());
-        }
-
-        Ok(account_clone)
-    })
+    store.accounts.push(account.clone());
+    Ok(account)
 }
 
 /// Remove an account by ID
 pub fn remove_account(account_id: &str) -> Result<()> {
     mutate_accounts(|store| {
+        if store.active_account_id.as_deref() == Some(account_id) {
+            anyhow::bail!("Cannot delete the active account; switch to another account first");
+        }
+
         let initial_len = store.accounts.len();
         store.accounts.retain(|a| a.id != account_id);
 
         if store.accounts.len() == initial_len {
             anyhow::bail!("Account not found: {account_id}");
         }
-
-        if store.active_account_id.as_deref() == Some(account_id) {
-            store.active_account_id = store.accounts.first().map(|account| account.id.clone());
-        }
-
         Ok(())
     })
 }
@@ -589,8 +666,8 @@ pub fn set_masked_account_ids(ids: Vec<String>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_mutation_lock_at, sync_active_account_tokens,
-        update_account_chatgpt_tokens_in_store, write_file_atomic,
+        acquire_mutation_lock_at, add_account_to_store, reconcile_active_projection,
+        sync_active_account_tokens, update_account_chatgpt_tokens_in_store, write_file_atomic,
         write_file_atomic_with_pre_replace,
     };
     use crate::types::{AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData};
@@ -649,6 +726,22 @@ mod tests {
         assert!(leftovers.is_empty());
 
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn adding_first_account_does_not_claim_runtime_activation() {
+        let mut store = AccountsStore::default();
+        let profile = account("A", "workspace-a", "a1");
+        let profile_id = profile.id.clone();
+
+        let added = add_account_to_store(&mut store, profile).unwrap();
+
+        assert_eq!(added.id, profile_id);
+        assert!(store
+            .accounts
+            .iter()
+            .any(|account| account.id == profile_id));
+        assert_eq!(store.active_account_id, None);
     }
 
     #[test]
@@ -742,6 +835,56 @@ mod tests {
             format!(r#"{{"https://api.openai.com/auth":{{"chatgpt_account_id":"{account_id}"}}}}"#);
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
         format!("header.{encoded}.{suffix}")
+    }
+
+    #[test]
+    fn projection_follows_matching_runtime_chatgpt_account_and_tokens() {
+        let mut account_a = account("A", "workspace-a", "a1");
+        let account_a_id = account_a.id.clone();
+        let runtime_refresh_at = account_a.last_refresh_at.unwrap() + Duration::seconds(1);
+        let account_b = account("B", "workspace-b", "b1");
+        let account_b_id = account_b.id.clone();
+        let mut store = AccountsStore {
+            accounts: vec![account_a.clone(), account_b],
+            active_account_id: Some(account_b_id),
+            ..AccountsStore::default()
+        };
+
+        let live = auth_with_refresh_at("workspace-a", "a2", runtime_refresh_at);
+        assert!(reconcile_active_projection(&mut store, Some(&live)));
+        assert_eq!(
+            store.active_account_id.as_deref(),
+            Some(account_a_id.as_str())
+        );
+        let AuthData::ChatGPT {
+            refresh_token: stored_refresh_token,
+            ..
+        } = &store.accounts[0].auth_data
+        else {
+            panic!("expected ChatGPT account");
+        };
+        assert_eq!(stored_refresh_token, "refresh-a2");
+
+        account_a = store.accounts.remove(0);
+        assert_eq!(refresh_token(&account_a), "refresh-a2");
+    }
+
+    #[test]
+    fn projection_clears_when_runtime_is_logged_out_or_unknown() {
+        let account_a = account("A", "workspace-a", "a1");
+        let account_a_id = account_a.id.clone();
+        let mut store = AccountsStore {
+            accounts: vec![account_a],
+            active_account_id: Some(account_a_id),
+            ..AccountsStore::default()
+        };
+
+        assert!(reconcile_active_projection(&mut store, None));
+        assert!(store.active_account_id.is_none());
+
+        let unknown = auth("workspace-unknown", "x");
+        assert!(!reconcile_active_projection(&mut store, Some(&unknown)));
+        assert!(store.active_account_id.is_none());
     }
 
     #[test]
