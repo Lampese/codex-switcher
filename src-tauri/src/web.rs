@@ -18,7 +18,7 @@ use crate::commands::{
     refresh_all_accounts_usage, rename_account, set_masked_account_ids, set_warmup_policy,
     start_login, switch_account, warmup_account, warmup_all_accounts,
 };
-use crate::types::WarmupPolicy;
+use crate::types::WarmupPolicyPatch;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -187,8 +187,8 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
         "get_warmup_policy" => to_json(get_warmup_policy()?),
         "get_warmup_state" => to_json(crate::commands::get_warmup_state()?),
         "set_warmup_policy" => {
-            let policy: WarmupPolicy = parse_args(payload)?;
-            to_json(set_warmup_policy(policy)?)
+            let patch: WarmupPolicyPatch = parse_args(payload)?;
+            to_json(set_warmup_policy(patch)?)
         }
         "import_accounts_slim_text" => {
             let args: ImportSlimArgs = parse_args(payload)?;

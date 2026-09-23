@@ -15,8 +15,8 @@ use futures::{stream, StreamExt};
 use crate::api::usage::{get_account_usage, warmup_account as send_warmup};
 use crate::auth::{acquire_mutation_lock, load_accounts, load_app_settings, mutate_app_settings};
 use crate::types::{
-    StoredAccount, UsageInfo, WarmupAccountLedger, WarmupLedger, WarmupPolicy, WarmupState,
-    WarmupSummary,
+    AppSettings, StoredAccount, UsageInfo, WarmupAccountLedger, WarmupLedger, WarmupPolicy,
+    WarmupPolicyPatch, WarmupState, WarmupSummary,
 };
 
 const SCHEDULER_INTERVAL: Duration = Duration::from_secs(30);
@@ -78,12 +78,28 @@ pub fn normalize_policy(mut policy: WarmupPolicy) -> WarmupPolicy {
 }
 
 /// Persist a policy without overwriting a concurrently updated ledger.
-pub fn set_policy(policy: WarmupPolicy) -> Result<()> {
-    let policy = normalize_policy(policy);
+pub fn set_policy(patch: WarmupPolicyPatch) -> Result<()> {
     mutate_app_settings(|settings| {
-        settings.warmup_policy = policy;
+        apply_policy_patch(settings, patch);
         Ok(())
     })
+}
+
+fn apply_policy_patch(settings: &mut AppSettings, patch: WarmupPolicyPatch) {
+    let mut policy = std::mem::take(&mut settings.warmup_policy);
+    if let Some(value) = patch.auto_warmup_all_enabled {
+        policy.auto_warmup_all_enabled = value;
+    }
+    if let Some(value) = patch.auto_warmup_account_ids {
+        policy.auto_warmup_account_ids = value;
+    }
+    if let Some(value) = patch.timed_warmup_enabled {
+        policy.timed_warmup_enabled = value;
+    }
+    if let Some(value) = patch.timed_warmup_times {
+        policy.timed_warmup_times = value;
+    }
+    settings.warmup_policy = normalize_policy(policy);
 }
 
 /// Record a manually-triggered successful warm-up in the host ledger. This
@@ -495,5 +511,33 @@ mod tests {
                 .and_then(|entry| entry.last_successful_warmup_at),
             Some(42)
         );
+    }
+
+    #[test]
+    fn independent_policy_patches_preserve_updates_from_the_same_earlier_state() {
+        let earlier_policy = WarmupPolicy::default();
+        let mut settings = AppSettings {
+            warmup_policy: earlier_policy,
+            ..AppSettings::default()
+        };
+
+        // Each client submits only the field it changed from the same earlier read.
+        apply_policy_patch(
+            &mut settings,
+            WarmupPolicyPatch {
+                auto_warmup_all_enabled: Some(true),
+                ..WarmupPolicyPatch::default()
+            },
+        );
+        apply_policy_patch(
+            &mut settings,
+            WarmupPolicyPatch {
+                timed_warmup_enabled: Some(true),
+                ..WarmupPolicyPatch::default()
+            },
+        );
+
+        assert!(settings.warmup_policy.auto_warmup_all_enabled);
+        assert!(settings.warmup_policy.timed_warmup_enabled);
     }
 }

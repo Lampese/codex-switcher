@@ -259,9 +259,7 @@ function TrayMenu() {
     const next = !autoWarmupAllEnabled;
     setAutoWarmupAllEnabled(next);
     try {
-      const state = await invokeBackend<WarmupState>("get_warmup_state");
       await invokeBackend("set_warmup_policy", {
-        ...state.policy,
         auto_warmup_all_enabled: next,
       });
     } catch (err) {

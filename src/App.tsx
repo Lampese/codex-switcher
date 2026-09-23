@@ -231,19 +231,10 @@ function App() {
   }, []);
 
   const persistWarmupPolicy = useCallback((overrides: Partial<WarmupPolicy>) => {
-    return invokeBackend("set_warmup_policy", {
-      auto_warmup_all_enabled: autoWarmupAllEnabled,
-      auto_warmup_account_ids: Array.from(autoWarmupAccountIds),
-      timed_warmup_enabled: timedWarmupEnabled,
-      timed_warmup_times: timedWarmupTimes,
-      ...overrides,
-    }).catch((err) => console.error("Failed to persist host warm-up policy:", err));
-  }, [
-    autoWarmupAccountIds,
-    autoWarmupAllEnabled,
-    timedWarmupEnabled,
-    timedWarmupTimes,
-  ]);
+    return invokeBackend("set_warmup_policy", overrides).catch((err) =>
+      console.error("Failed to persist host warm-up policy:", err)
+    );
+  }, []);
 
   const handleTitlebarDrag = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {

@@ -52,6 +52,15 @@ pub struct WarmupPolicy {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
+pub struct WarmupPolicyPatch {
+    pub auto_warmup_all_enabled: Option<bool>,
+    pub auto_warmup_account_ids: Option<Vec<String>>,
+    pub timed_warmup_enabled: Option<bool>,
+    pub timed_warmup_times: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WarmupAccountLedger {
     pub last_successful_warmup_at: Option<i64>,
     pub last_auto_window_key: Option<String>,
