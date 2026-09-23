@@ -1236,23 +1236,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_refresh_timestamp_is_projected_with_live_tokens() {
-        let account = account("A", "workspace-a", "a1");
-        let account_id = account.id.clone();
-        let mut store = AccountsStore {
-            accounts: vec![account],
-            active_account_id: Some(account_id),
-            ..AccountsStore::default()
-        };
-        let refresh_at = store.accounts[0].last_refresh_at.unwrap() + Duration::seconds(1);
-        let mut live = auth("workspace-a", "a2");
-        live.last_refresh = Some(refresh_at);
-
-        assert!(sync_active_account_tokens(&mut store, &live));
-        assert_eq!(store.accounts[0].last_refresh_at, Some(refresh_at));
-    }
-
-    #[test]
     fn rejects_live_tokens_when_stored_account_identity_is_unknown() {
         let mut account = account("A", "workspace-a", "a1");
         let account_id = account.id.clone();
@@ -1317,11 +1300,11 @@ mod tests {
     fn rotated_refresh_token_survives_stale_runtime_reconciliation() {
         let old_generation = Utc.timestamp_opt(1_800_000_000, 0).single().unwrap();
         let rotated_generation = old_generation + Duration::seconds(1);
-        let mut current_account = account("A", "workspace-a", "old");
-        let account_id = current_account.id.clone();
-        current_account.last_refresh_at = Some(old_generation);
+        let mut account = account("A", "workspace-a", "old");
+        let account_id = account.id.clone();
+        account.last_refresh_at = Some(old_generation);
         let mut store = AccountsStore {
-            accounts: vec![current_account],
+            accounts: vec![account],
             active_account_id: Some(account_id.clone()),
             ..AccountsStore::default()
         };
@@ -1353,12 +1336,12 @@ mod tests {
     fn newer_runtime_generation_projects_tokens_to_the_active_store() {
         let stored_generation = Utc.timestamp_opt(1_800_000_000, 0).single().unwrap();
         let runtime_generation = stored_generation + Duration::seconds(1);
-        let mut current_account = account("A", "workspace-a", "old");
-        let account_id = current_account.id.clone();
-        current_account.last_refresh_at = Some(stored_generation);
+        let mut account = account("A", "workspace-a", "old");
+        let account_id = account.id.clone();
+        account.last_refresh_at = Some(stored_generation);
         let mut store = AccountsStore {
-            accounts: vec![current_account],
-            active_account_id: Some(account_id.clone()),
+            accounts: vec![account],
+            active_account_id: Some(account_id),
             ..AccountsStore::default()
         };
 
@@ -1369,23 +1352,6 @@ mod tests {
         assert_eq!(refresh_token(&store.accounts[0]), "refresh-runtime");
         assert_eq!(store.accounts[0].last_refresh_at, Some(runtime_generation));
 
-        let old_generation = Utc.timestamp_opt(1_800_000_000, 0).single().unwrap();
-        let newer_generation = old_generation + Duration::seconds(1);
-        let mut account = account("A", "workspace-a", "stored");
-        let account_id = account.id.clone();
-        account.last_refresh_at = Some(newer_generation);
-        let mut store = AccountsStore {
-            accounts: vec![account],
-            active_account_id: Some(account_id),
-            ..AccountsStore::default()
-        };
-
-        assert!(!sync_active_account_tokens(
-            &mut store,
-            &auth_with_refresh_at("workspace-a", "runtime", old_generation)
-        ));
-        assert_eq!(refresh_token(&store.accounts[0]), "refresh-stored");
-        assert_eq!(store.accounts[0].last_refresh_at, Some(newer_generation));
     }
 
     #[test]
