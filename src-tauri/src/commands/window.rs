@@ -7,9 +7,11 @@ use std::{
 
 use tauri::{AppHandle, Manager, Runtime};
 
-use crate::{
-    auth::{load_app_settings, mutate_app_settings},
-    types::{DockDisplayMode, TrayDisplayMode, UsageInfo},
+use crate::auth::load_app_settings;
+#[cfg(target_os = "macos")]
+use crate::auth::mutate_app_settings;
+use crate::types::{
+    DockDisplayMode, TrayDisplayMode, UsageInfo, WarmupPolicy, WarmupPolicyPatch, WarmupState,
 };
 
 /// Label of the borderless tray popup window.
@@ -116,6 +118,23 @@ pub fn get_display_settings() -> Result<DisplaySettings, String> {
             None
         },
     })
+}
+
+#[tauri::command]
+pub fn get_warmup_policy() -> Result<WarmupPolicy, String> {
+    Ok(load_app_settings()
+        .map_err(|error| error.to_string())?
+        .warmup_policy)
+}
+
+#[tauri::command]
+pub fn get_warmup_state() -> Result<WarmupState, String> {
+    crate::warmup_scheduler::get_state().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn set_warmup_policy(patch: WarmupPolicyPatch) -> Result<(), String> {
+    crate::warmup_scheduler::set_policy(patch).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
