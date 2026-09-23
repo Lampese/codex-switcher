@@ -34,7 +34,6 @@ import {
 } from "./lib/autoWarmup";
 import {
   getAutoWarmupWindowKind,
-  type AutoWarmupWindowKind,
 } from "./lib/autoWarmupPolicy";
 import { useI18n } from "./lib/i18n";
 import { getTauriWindow } from "./lib/tauriWindow";
@@ -55,14 +54,6 @@ interface BackupPassphraseRequest {
   title: string;
   resolve: (value: string | null) => void;
 }
-type AutoWarmupLedger = Record<
-  string,
-  {
-    lastSuccessfulWarmupAt?: number;
-    lastAutoWindowKey?: string;
-    lastAutoWindowKind?: AutoWarmupWindowKind;
-  }
->;
 const isMacOs =
   typeof navigator !== "undefined" &&
   /(Mac|iPhone|iPod|iPad)/i.test(navigator.userAgent);

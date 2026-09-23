@@ -1351,7 +1351,6 @@ mod tests {
         ));
         assert_eq!(refresh_token(&store.accounts[0]), "refresh-runtime");
         assert_eq!(store.accounts[0].last_refresh_at, Some(runtime_generation));
-
     }
 
     #[test]
