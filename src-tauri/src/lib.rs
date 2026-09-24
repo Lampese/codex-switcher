@@ -26,10 +26,13 @@ use tauri::Emitter;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(w) = tauri::Manager::get_webview_window(app, "main") {
-                let _ = w.show();
-                let _ = w.set_focus();
-            }
+            // On macOS, a second process can be started by a login item or
+            // launchd. That must not interrupt the foreground app. An explicit
+            // Dock/Finder reopen is handled by RunEvent::Reopen below.
+            #[cfg(not(target_os = "macos"))]
+            commands::restore_main_window(app);
+            #[cfg(target_os = "macos")]
+            let _ = app;
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
