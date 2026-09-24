@@ -467,7 +467,7 @@ async fn close_desktop_for_handoff(session_id: &str) -> Result<String> {
     let processes = crate::commands::process::check_codex_processes()
         .await
         .map_err(anyhow::Error::msg)?;
-    if processes.count != 1 {
+    if processes.count != 1 || !is_macos_desktop_root_pid(processes.pids[0]) {
         anyhow::bail!("Expected one Codex desktop process; deferring account handoff");
     }
     let closed = crate::commands::process::kill_codex_processes(Some(true), Some(false))
@@ -490,7 +490,8 @@ async fn close_idle_desktop_for_cli(session: &ActiveCodexSession) -> Result<bool
         return Ok(false);
     }
     desktop_handoff_is_exclusive(&session.session_id)?;
-    if processes.pids.len() != 2 || !processes.pids.contains(&session.pid) {
+    if processes.pids.len() != 2 || !processes.pids.contains(&session.pid)
+        || !processes.pids.iter().copied().any(|pid| pid != session.pid && is_macos_desktop_root_pid(pid)) {
         anyhow::bail!("Another Codex process is running; deferring CLI account handoff");
     }
     let status = Command::new("osascript")
@@ -531,6 +532,25 @@ fn is_desktop_app_server_command(command: &str) -> bool {
     (command.contains("/chatgpt.app/contents/resources/codex")
         || command.contains("/codex.app/contents/resources/codex"))
         && command.contains(" app-server")
+}
+
+#[cfg(target_os = "macos")]
+fn is_macos_desktop_root_pid(pid: u32) -> bool {
+    let Ok(output) = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "args="])
+        .output() else { return false };
+    if !output.status.success() {
+        return false;
+    }
+    is_macos_desktop_root_command(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(target_os = "macos")]
+fn is_macos_desktop_root_command(command: &str) -> bool {
+    let command = command.trim().to_ascii_lowercase();
+    command.starts_with('/')
+        && (command.contains("/chatgpt.app/contents/macos/chatgpt")
+            || command.contains("/codex.app/contents/macos/codex"))
 }
 
 #[cfg(target_os = "macos")]
@@ -1899,6 +1919,10 @@ mod tests {
         assert!(!is_desktop_app_server_command(
             "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
         ));
+        assert!(is_macos_desktop_root_command(
+            "/Users/test/Applications With Spaces/ChatGPT.app/Contents/MacOS/ChatGPT"
+        ));
+        assert!(!is_macos_desktop_root_command("/usr/local/bin/codex resume thread"));
     }
 
     #[test]
