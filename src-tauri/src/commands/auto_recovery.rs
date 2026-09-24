@@ -18,8 +18,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{
-    get_accounts_file, load_accounts, load_app_settings, save_app_settings,
-    switch_to_account,
+    ensure_chatgpt_tokens_fresh_locked, load_accounts, load_app_settings, read_current_auth,
+    save_accounts, save_app_settings, switch_to_account, sync_active_account_tokens,
+    AUTH_OPERATION_LOCK,
 };
 use crate::commands::account_stats::AccountResetCredits;
 use crate::types::{
@@ -113,6 +114,24 @@ fn escape_shell_arg(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+#[cfg(target_os = "macos")]
+fn macos_resume_command(
+    codex_bin: &Path,
+    cwd: &Path,
+    session_id: &str,
+    phrase: &str,
+    restart_file: &Path,
+) -> String {
+    let cwd = escape_shell_arg(&cwd.to_string_lossy());
+    let binary = escape_shell_arg(&codex_bin.to_string_lossy());
+    let session = escape_shell_arg(session_id);
+    let phrase = escape_shell_arg(phrase);
+    let restart = escape_shell_arg(&restart_file.to_string_lossy());
+    format!(
+        "cd {cwd} && while true; do {binary} resume {session} {phrase}; if [ -f {restart} ]; then rm -f {restart}; sleep 1; continue; fi; break; done; exit"
+    )
+}
+
 /// Find the codex CLI executable in standard and user environments
 pub fn find_codex_binary() -> PathBuf {
     if let Some(path) = which_cmd("codex") {
@@ -194,6 +213,11 @@ pub fn find_active_sessions() -> Result<Vec<ActiveCodexSession>> {
 
         // Determine PID holding or associated with this session
         let pid = find_pid_for_session(&session_id, &path).unwrap_or(0);
+        // A desktop app-server can hold locks for many unrelated chats. Never
+        // terminate it or relaunch those chats as standalone CLI sessions.
+        if pid == 0 {
+            continue;
+        }
         let rollout_path = locate_rollout_file(&home, &session_id);
 
         // Inspect rollout metadata: if this is a subagent (child thread of another session),
@@ -345,7 +369,9 @@ fn find_pid_for_session(session_id: &str, file_path: &Path) -> Option<u32> {
                     let cmdline_path = entry.path().join("cmdline");
                     if let Ok(cmdline_bytes) = fs::read(&cmdline_path) {
                         let cmdline = String::from_utf8_lossy(&cmdline_bytes);
-                        if cmdline.contains(session_id) && !cmdline.contains("codex-switcher") {
+                        if cmdline.contains(session_id)
+                            && is_supported_cli_command(&cmdline.replace('\0', " "))
+                        {
                             return Some(pid);
                         }
                     }
@@ -361,7 +387,14 @@ fn find_pid_for_session(session_id: &str, file_path: &Path) -> Option<u32> {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 for line in stdout.lines() {
                     if let Ok(pid) = line.trim().parse::<u32>() {
-                        return Some(pid);
+                        let Ok(output) = Command::new("ps")
+                            .args(["-p", &pid.to_string(), "-o", "args="])
+                            .output() else { continue };
+                        if output.status.success()
+                            && is_supported_cli_command(&String::from_utf8_lossy(&output.stdout))
+                        {
+                            return Some(pid);
+                        }
                     }
                 }
             }
@@ -369,6 +402,17 @@ fn find_pid_for_session(session_id: &str, file_path: &Path) -> Option<u32> {
     }
 
     None
+}
+
+fn is_supported_cli_command(command: &str) -> bool {
+    let command = command.trim().to_ascii_lowercase();
+    !command.is_empty()
+        && command.contains("codex")
+        && !command.contains("codex-switcher")
+        && !command.contains("app-server")
+        && !command.contains("exec-server")
+        && !command.contains("chatgpt.app")
+        && !command.contains("codex.app")
 }
 
 /// Get process current working directory
@@ -929,6 +973,7 @@ pub fn launch_session_in_terminal(
     let codex_bin = find_codex_binary();
     let restart_file = std::env::temp_dir()
         .join(format!("codex-switcher-restart-{}", session_id));
+    #[cfg(target_os = "linux")]
     let restart_file_str = restart_file.to_string_lossy().to_string();
 
     let default_cwd = cwd
@@ -1030,17 +1075,18 @@ exec $SHELL
 
     #[cfg(target_os = "macos")]
     {
-        let script = format!(
-            "tell application \"Terminal\" to do script \"cd {} && while true; do {} resume {} {}; if [ -f {} ]; then rm -f {}; sleep 1; continue; fi; break; done; exit\"",
-            default_cwd.display(),
-            codex_bin.to_string_lossy(),
+        // Pass the command as an AppleScript argument instead of interpolating
+        // it into source code. Shell-quote each value separately above.
+        let script = "on run argv\n  tell application \"Terminal\" to do script (item 1 of argv)\nend run";
+        let command = macos_resume_command(
+            &codex_bin,
+            &default_cwd,
             session_id,
             phrase,
-            restart_file_str,
-            restart_file_str
+            &restart_file,
         );
         let mut cmd = Command::new("osascript");
-        cmd.arg("-e").arg(script);
+        cmd.arg("-e").arg(script).arg("--").arg(command);
         let child = cmd.spawn().context("Failed to spawn macOS Terminal")?;
         return Ok(child.id());
     }
@@ -1438,14 +1484,26 @@ async fn handle_account_switch_for_session(
         anyhow::bail!("No eligible fallback account found with available limits");
     };
 
-    // Switch account credentials in auth.json
-    switch_to_account(&target)?;
-    let mut updated_store = store;
-    updated_store.active_account_id = Some(target.id.clone());
-    let accounts_path = get_accounts_file()?;
-    if let Ok(content) = serde_json::to_string_pretty(&updated_store) {
-        let _ = fs::write(&accounts_path, content);
+    // Serialize this with manual switches and token refresh. Codex can rotate
+    // its refresh token while running; preserve that live token before replacing
+    // auth.json so switching back to this account still works.
+    let _auth_guard = AUTH_OPERATION_LOCK.lock().await;
+    let mut updated_store = load_accounts()?;
+    if updated_store.active_account_id.as_deref() != current_id {
+        anyhow::bail!("Active account changed during auto recovery");
     }
+    if let Some(auth) = read_current_auth()? {
+        if sync_active_account_tokens(&mut updated_store, &auth) {
+            save_accounts(&updated_store)?;
+        }
+    }
+    let target = ensure_chatgpt_tokens_fresh_locked(&target).await?;
+    switch_to_account(&target)?;
+    // Refresh may have saved rotated target credentials to accounts.json.
+    updated_store = load_accounts()?;
+    updated_store.active_account_id = Some(target.id.clone());
+    save_accounts(&updated_store)?;
+    drop(_auth_guard);
 
     let phrase = resolve_session_resume_phrase(&session.session_id, &settings.continue_phrase);
 
@@ -1624,6 +1682,31 @@ pub async fn save_auto_recovery_settings(
 mod tests {
     use super::*;
     use chrono::{Duration as ChronoDuration, TimeZone};
+
+    #[test]
+    fn desktop_app_server_is_not_a_recoverable_cli_session() {
+        assert!(!is_supported_cli_command(
+            "/Applications/ChatGPT.app/Contents/Resources/codex app-server --analytics-default-enabled"
+        ));
+        assert!(!is_supported_cli_command("/usr/local/bin/codex app-server"));
+        assert!(is_supported_cli_command("/usr/local/bin/codex resume session-id"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_resume_command_quotes_every_dynamic_argument() {
+        let command = macos_resume_command(
+            Path::new("/tmp/Codex Bin/codex"),
+            Path::new("/tmp/my work; touch /tmp/injected"),
+            "thread' id",
+            "continue $(touch /tmp/injected) 'now'",
+            Path::new("/tmp/restart file"),
+        );
+        assert!(command.contains("cd '/tmp/my work; touch /tmp/injected'"));
+        assert!(command.contains("'/tmp/Codex Bin/codex' resume 'thread'\\'' id'"));
+        assert!(command.contains("'continue $(touch /tmp/injected) '\\''now'\\'''"));
+        assert!(command.contains("[ -f '/tmp/restart file' ]"));
+    }
 
     fn make_test_account(id: &str, name: &str, expires_at: Option<DateTime<Utc>>) -> StoredAccount {
         let mut acc = StoredAccount::new_chatgpt(
@@ -2765,4 +2848,3 @@ mod tests {
         }
     }
 }
-
