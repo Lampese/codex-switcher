@@ -21,6 +21,9 @@ use commands::{
     set_masked_account_ids, start_login, switch_account, warmup_account, warmup_all_accounts,
 };
 use tauri::Emitter;
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -49,14 +52,32 @@ pub fn run() {
             // Spawn background auto-recovery loop
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                let mut last_recovery_error: Option<String> = None;
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     match commands::auto_recovery::check_and_recover_sessions().await {
                         Ok(Some(event)) => {
+                            last_recovery_error = None;
                             let _ = app_handle.emit("session-recovery-event", event);
                         }
-                        Err(error) => eprintln!("[AutoRecovery] {error:#}"),
-                        Ok(None) => {}
+                        Err(error) => {
+                            let message = format!("{error:#}");
+                            if last_recovery_error.as_deref() != Some(&message) {
+                                eprintln!("[AutoRecovery] {message}");
+                                if let Some(home) = dirs::home_dir() {
+                                    let path = home.join(".codex-switcher/auto-recovery.log");
+                                    let mut options = std::fs::OpenOptions::new();
+                                    options.create(true).append(true);
+                                    #[cfg(unix)]
+                                    options.mode(0o600);
+                                    if let Ok(mut log) = options.open(path) {
+                                        let _ = writeln!(log, "{} {message}", chrono::Utc::now());
+                                    }
+                                }
+                                last_recovery_error = Some(message);
+                            }
+                        }
+                        Ok(None) => last_recovery_error = None,
                     }
                 }
             });

@@ -1523,9 +1523,11 @@ async fn handle_account_switch_for_session(
     if settings.auto_redeem_reset_credits {
         if let Some(curr_acc_id) = current_id {
             if let Some(curr_acc) = store.accounts.iter().find(|a| a.id == curr_acc_id) {
-                if let Ok(stats) =
-                    crate::commands::account_stats::get_account_usage_stats(curr_acc.id.clone())
-                        .await
+                if let Ok(Ok(stats)) = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    crate::commands::account_stats::get_account_usage_stats(curr_acc.id.clone()),
+                )
+                .await
                 {
                     if let Some(resets) = stats.reset_credits {
                         let mut available_credits: Vec<_> = resets
@@ -1618,14 +1620,34 @@ async fn handle_account_switch_for_session(
     let mut usage_map = HashMap::new();
     let mut resets_map = HashMap::new();
 
-    for acc in &store.accounts {
-        if let Ok(u) = crate::commands::usage::fetch_usage(&acc.id).await {
-            usage_map.insert(acc.id.clone(), u);
-        }
-        if let Ok(stats) = crate::commands::account_stats::get_account_usage_stats(acc.id.clone()).await {
-            if let Some(resets) = stats.reset_credits {
-                resets_map.insert(acc.id.clone(), resets);
+    // One stalled profile request must not block every recovery cycle. Fetch
+    // candidates concurrently and bound each account's total lookup time.
+    let candidates = store.accounts.iter().filter(|acc| Some(acc.id.as_str()) != current_id);
+    let snapshots = futures::future::join_all(candidates.map(|acc| async {
+        let account_id = acc.id.clone();
+        let snapshot = tokio::time::timeout(Duration::from_secs(10), async {
+            let usage = crate::commands::usage::fetch_usage(&account_id).await.ok();
+            let resets = crate::commands::account_stats::get_account_usage_stats(account_id.clone())
+                .await
+                .ok()
+                .and_then(|stats| stats.reset_credits);
+            (usage, resets)
+        })
+        .await;
+        (account_id, snapshot)
+    }))
+    .await;
+    for (account_id, snapshot) in snapshots {
+        match snapshot {
+            Ok((usage, resets)) => {
+                if let Some(usage) = usage {
+                    usage_map.insert(account_id.clone(), usage);
+                }
+                if let Some(resets) = resets {
+                    resets_map.insert(account_id, resets);
+                }
             }
+            Err(_) => eprintln!("[AutoRecovery] Candidate usage lookup timed out"),
         }
     }
 
