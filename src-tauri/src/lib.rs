@@ -48,8 +48,12 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    if let Ok(Some(event)) = commands::auto_recovery::check_and_recover_sessions().await {
-                        let _ = app_handle.emit("session-recovery-event", event);
+                    match commands::auto_recovery::check_and_recover_sessions().await {
+                        Ok(Some(event)) => {
+                            let _ = app_handle.emit("session-recovery-event", event);
+                        }
+                        Err(error) => eprintln!("[AutoRecovery] {error:#}"),
+                        Ok(None) => {}
                     }
                 }
             });
