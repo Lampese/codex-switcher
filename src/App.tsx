@@ -1474,7 +1474,7 @@ function App() {
                   <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100 tracking-tight">
                     Codex Switcher
                   </h1>
-                  <button
+                  {isTauriRuntime() && <button
                     type="button"
                     role="switch"
                     aria-label="Automatic account switching on usage limit"
@@ -1492,7 +1492,7 @@ function App() {
                       <span className={`absolute top-0.5 h-2.5 w-2.5 rounded-full bg-white transition-transform ${appSettings?.auto_switch_limit_enabled ? "translate-x-3" : "translate-x-0.5"}`} />
                     </span>
                     Auto-switch {appSettings ? (appSettings.auto_switch_limit_enabled ? "On" : "Off") : "…"}
-                  </button>
+                  </button>}
                   {processInfo && (
                     <div className="inline-flex items-center gap-1">
                       <span
