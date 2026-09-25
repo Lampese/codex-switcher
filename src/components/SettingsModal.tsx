@@ -236,7 +236,7 @@ export function SettingsModal({
                 Auto-switch account on usage limit reached
               </label>
               <p className="text-xs text-gray-500 dark:text-gray-400">
-                When a session hits its usage limit, switches to an available account and continues the same conversation. CLI sessions resume in a terminal. On macOS, the desktop app closes and reopens around the switch; recovery waits while another turn is active.
+                When a session hits its usage limit, switches to an available account and continues the same conversation. CLI sessions resume in a terminal. On macOS and Linux, the desktop app closes and reopens around the switch; recovery waits while another turn is active.
               </p>
 
               {(appSettings?.auto_switch_limit_enabled ?? false) && (

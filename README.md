@@ -27,7 +27,7 @@
 - **macOS Dock Control** – Keep Codex Switcher in the Dock or run it as a menu bar only app, with a first-close prompt and a tray fallback
 - **Rate-Limit Monitoring** – View real-time 5-hour session and weekly usage, reset timing, credits, and subscription expiry
 - **Auto-Retry on Model Capacity** – Automatically queue retries when OpenAI models are overloaded, with configurable backoff delays and optional escalation to account switching
-- **Session Auto-Switch** – Detect rate limit exhaustion in running sessions, auto-redeem banked reset credits in place, or rotate accounts and continue the same CLI or macOS desktop conversation
+- **Session Auto-Switch** – Detect rate limit exhaustion in running sessions, auto-redeem banked reset credits in place, or rotate accounts and continue the same CLI, macOS desktop, or Linux desktop conversation
 - **Smart Rotation Strategies** – Optimize quota rotation with Smart Balanced heuristics (FIFO reset credits, burn-before-reset weekly rollover, and Pro / Pro Lite tier reserves), Most Remaining Quota, or Round Robin
 - **Codex `/goal` Continuity** – Detect active or interrupted goal objectives from local SQLite state and automatically resume them using `/goal resume`
 - **Blocked Switch Recovery** – Detect running Codex sessions and offer a force-close flow before retrying the account switch
@@ -151,7 +151,7 @@ cannot be recovered locally.
 Enable **Auto-switch account on usage limit reached** in Settings to let Codex
 Switcher rotate to an account with available quota after a running session hits
 its limit. The feature is off by default. CLI sessions restart with `codex
-resume` in a terminal. On macOS, a Codex desktop conversation is continued by
+resume` in a terminal. On macOS and Linux, a Codex desktop conversation is continued by
 closing the desktop app gracefully, changing credentials, reopening it, and
 queueing the continuation in the same thread.
 

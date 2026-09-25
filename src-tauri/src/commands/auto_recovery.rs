@@ -214,9 +214,9 @@ pub fn find_active_sessions() -> Result<Vec<ActiveCodexSession>> {
 
         // Determine PID holding or associated with this session
         let cli_pid = find_pid_for_session(&session_id, &path);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         let desktop_pid = find_desktop_pid_for_session(&path);
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let desktop_pid: Option<u32> = None;
         let is_desktop = cli_pid.is_none() && desktop_pid.is_some();
         let pid = cli_pid.or(desktop_pid).unwrap_or(0);
@@ -419,6 +419,8 @@ fn is_supported_cli_command(command: &str) -> bool {
         && !command.contains("exec-server")
         && !command.contains("chatgpt.app")
         && !command.contains("codex.app")
+        && !command.contains("/usr/lib/chatgpt")
+        && !command.contains("/usr/lib/codex")
 }
 
 fn rollout_has_active_turn(path: &Path) -> Result<bool> {
@@ -447,7 +449,7 @@ fn rollout_has_active_turn(path: &Path) -> Result<bool> {
     anyhow::bail!("Cannot determine whether another Codex turn is active")
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn desktop_handoff_is_exclusive(session_id: &str) -> Result<()> {
     for other in find_active_sessions()? {
         if other.session_id == session_id {
@@ -464,13 +466,13 @@ fn desktop_handoff_is_exclusive(session_id: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn close_desktop_for_handoff(session_id: &str) -> Result<String> {
     desktop_handoff_is_exclusive(session_id)?;
     let processes = crate::commands::process::check_codex_processes()
         .await
         .map_err(anyhow::Error::msg)?;
-    if processes.count != 1 || !is_macos_desktop_root_pid(processes.pids[0]) {
+    if processes.count != 1 || !is_desktop_root_pid(processes.pids[0]) {
         anyhow::bail!("Expected one Codex desktop process; deferring account handoff");
     }
     let closed = crate::commands::process::kill_codex_processes(Some(true), Some(false))
@@ -484,7 +486,7 @@ async fn close_desktop_for_handoff(session_id: &str) -> Result<String> {
     Ok(token)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn close_idle_desktop_for_cli(session: &ActiveCodexSession) -> Result<bool> {
     let processes = crate::commands::process::check_codex_processes()
         .await
@@ -494,14 +496,22 @@ async fn close_idle_desktop_for_cli(session: &ActiveCodexSession) -> Result<bool
     }
     desktop_handoff_is_exclusive(&session.session_id)?;
     if processes.pids.len() != 2 || !processes.pids.contains(&session.pid)
-        || !processes.pids.iter().copied().any(|pid| pid != session.pid && is_macos_desktop_root_pid(pid)) {
+        || !processes.pids.iter().copied().any(|pid| pid != session.pid && is_desktop_root_pid(pid)) {
         anyhow::bail!("Another Codex process is running; deferring CLI account handoff");
     }
-    let status = Command::new("osascript")
-        .args(["-e", "tell application id \"com.openai.codex\" to quit"])
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("Could not gracefully close Codex desktop");
+    #[cfg(target_os = "macos")]
+    {
+        let status = Command::new("osascript")
+            .args(["-e", "tell application id \"com.openai.codex\" to quit"])
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("Could not gracefully close Codex desktop");
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let desktop_pid = processes.pids.iter().copied().find(|&pid| pid != session.pid).unwrap();
+        let _ = Command::new("kill").args(["-TERM", &desktop_pid.to_string()]).status();
     }
     for _ in 0..40 {
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -515,7 +525,7 @@ async fn close_idle_desktop_for_cli(session: &ActiveCodexSession) -> Result<bool
     anyhow::bail!("Codex desktop did not close; account was not switched")
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn resume_desktop_after_handoff(token: String, session_id: &str, phrase: &str) -> Result<()> {
     crate::commands::reopen_closed_codex_desktop(token)
         .await
@@ -529,34 +539,53 @@ async fn resume_desktop_after_handoff(token: String, session_id: &str, phrase: &
     anyhow::bail!("Codex desktop reopened, but the continuation message could not be queued")
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn is_desktop_app_server_command(command: &str) -> bool {
     let command = command.trim().to_ascii_lowercase();
     (command.contains("/chatgpt.app/contents/resources/codex")
-        || command.contains("/codex.app/contents/resources/codex"))
+        || command.contains("/codex.app/contents/resources/codex")
+        || command.contains("/usr/lib/chatgpt/resources/codex")
+        || command.contains("/usr/lib/codex/resources/codex"))
         && command.contains(" app-server")
 }
 
-#[cfg(target_os = "macos")]
-fn is_macos_desktop_root_pid(pid: u32) -> bool {
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn is_desktop_root_pid(pid: u32) -> bool {
     let Ok(output) = Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "args="])
         .output() else { return false };
     if !output.status.success() {
         return false;
     }
-    is_macos_desktop_root_command(&String::from_utf8_lossy(&output.stdout))
+    is_desktop_root_command(&String::from_utf8_lossy(&output.stdout))
 }
 
-#[cfg(target_os = "macos")]
-fn is_macos_desktop_root_command(command: &str) -> bool {
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn is_desktop_root_command(command: &str) -> bool {
     let command = command.trim().to_ascii_lowercase();
-    command.starts_with('/')
-        && (command.contains("/chatgpt.app/contents/macos/chatgpt")
-            || command.contains("/codex.app/contents/macos/codex"))
+    if command.contains("--type=") || command.contains("codex-switcher") {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        command.starts_with('/')
+            && (command.contains("/chatgpt.app/contents/macos/chatgpt")
+                || command.contains("/codex.app/contents/macos/codex"))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let first = command.split_whitespace().next().unwrap_or("");
+        first.ends_with("/chatgpt")
+            || first.ends_with("/codex-desktop")
+            || first == "chatgpt"
+            || first == "codex-desktop"
+            || (command.starts_with('/') && (command.contains("/usr/lib/chatgpt/chatgpt") || command.contains("/usr/lib/codex/codex")))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    false
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn find_desktop_pid_for_session(lock_path: &Path) -> Option<u32> {
     let output = Command::new("lsof").arg("-t").arg(lock_path).output().ok()?;
     if !output.status.success() {
@@ -1671,14 +1700,14 @@ async fn handle_account_switch_for_session(
     };
 
     let desktop_reopen_token: Option<String> = if session.is_desktop {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         { Some(close_desktop_for_handoff(&session.session_id).await?) }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         { anyhow::bail!("Desktop recovery is not supported on this platform") }
     } else {
         None
     };
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let reopen_desktop_after_cli = if session.is_desktop {
         false
     } else {
@@ -1710,11 +1739,11 @@ async fn handle_account_switch_for_session(
     let target = match switch_result {
         Ok(target) => target,
         Err(error) => {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             if let Some(token) = desktop_reopen_token {
                 let _ = crate::commands::reopen_closed_codex_desktop(token).await;
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             if reopen_desktop_after_cli {
                 let _ = crate::commands::process::open_codex_app().await;
             }
@@ -1724,7 +1753,7 @@ async fn handle_account_switch_for_session(
 
     let phrase = resolve_session_resume_phrase(&session.session_id, &settings.continue_phrase);
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     if let Some(token) = desktop_reopen_token {
         if let Ok(mut tracker) = TRACKER.lock() {
             tracker.last_account_switch = Some((Instant::now(), target.id.clone(), false));
@@ -1745,7 +1774,7 @@ async fn handle_account_switch_for_session(
         return Ok(Some(notification));
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     if reopen_desktop_after_cli {
         if let Err(error) = crate::commands::process::open_codex_app().await {
             eprintln!("[AutoRecovery] CLI account switched, but desktop could not reopen: {error}");
@@ -1933,24 +1962,41 @@ mod tests {
         assert!(!is_supported_cli_command(
             "/Applications/ChatGPT.app/Contents/Resources/codex app-server --analytics-default-enabled"
         ));
+        assert!(!is_supported_cli_command(
+            "/usr/lib/chatgpt/resources/codex -c features.code_mode_host=true app-server --analytics-default-enabled"
+        ));
         assert!(!is_supported_cli_command("/usr/local/bin/codex app-server"));
         assert!(is_supported_cli_command("/usr/local/bin/codex resume session-id"));
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
-    fn recognizes_only_the_macos_desktop_app_server() {
+    fn recognizes_desktop_app_server() {
         assert!(is_desktop_app_server_command(
             "/Applications/ChatGPT.app/Contents/Resources/codex app-server --analytics-default-enabled"
+        ));
+        assert!(is_desktop_app_server_command(
+            "/usr/lib/chatgpt/resources/codex -c features.code_mode_host=true app-server --analytics-default-enabled"
         ));
         assert!(!is_desktop_app_server_command("/usr/local/bin/codex app-server"));
         assert!(!is_desktop_app_server_command(
             "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
         ));
-        assert!(is_macos_desktop_root_command(
-            "/Users/test/Applications With Spaces/ChatGPT.app/Contents/MacOS/ChatGPT"
-        ));
-        assert!(!is_macos_desktop_root_command("/usr/local/bin/codex resume thread"));
+        #[cfg(target_os = "macos")]
+        {
+            assert!(is_desktop_root_command(
+                "/Users/test/Applications With Spaces/ChatGPT.app/Contents/MacOS/ChatGPT"
+            ));
+            assert!(!is_desktop_root_command("/usr/local/bin/codex resume thread"));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            assert!(is_desktop_root_command("/usr/lib/chatgpt/ChatGPT"));
+            assert!(is_desktop_root_command("/usr/bin/codex-desktop"));
+            assert!(is_desktop_root_command("/usr/bin/chatgpt"));
+            assert!(!is_desktop_root_command("/usr/lib/chatgpt/ChatGPT --type=renderer"));
+            assert!(!is_desktop_root_command("/usr/local/bin/codex resume thread"));
+        }
     }
 
     #[test]
