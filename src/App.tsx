@@ -270,6 +270,7 @@ function App() {
   }, []);
 
   const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
+  const [autoSwitchSaving, setAutoSwitchSaving] = useState(false);
 
   const loadAppSettings = useCallback(async () => {
     if (!isTauriRuntime()) return;
@@ -627,6 +628,23 @@ function App() {
     setWarmupToast({ message, isError });
     toastTimerRef.current = setTimeout(() => setWarmupToast(null), isError ? 10000 : 2500);
   }, []);
+
+  const handleToggleAutoSwitch = useCallback(async () => {
+    if (!appSettings || autoSwitchSaving) return;
+    setAutoSwitchSaving(true);
+    try {
+      const updated = await invokeBackend<AppSettings>("set_auto_switch_limit_enabled", {
+        enabled: !appSettings.auto_switch_limit_enabled,
+      });
+      setAppSettings(updated);
+      showWarmupToast(`Automatic account switching ${updated.auto_switch_limit_enabled ? "enabled" : "disabled"}.`);
+    } catch (err) {
+      showWarmupToast(`Could not change automatic switching: ${String(err)}`, true);
+      void loadAppSettings();
+    } finally {
+      setAutoSwitchSaving(false);
+    }
+  }, [appSettings, autoSwitchSaving, loadAppSettings, showWarmupToast]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -1437,7 +1455,7 @@ function App() {
                 onClick={() => {
                   void appWindow.close();
                 }}
-                className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-red-500 hover:text-white dark:text-gray-400 dark:hover:bg-red-500 dark:hover:text-white"
+                className="flex h-8 w-8 items-center justify-center rounded-md text-red-600 transition-colors hover:bg-red-500 hover:text-white dark:text-red-400 dark:hover:bg-red-500 dark:hover:text-white"
                 title="Close"
               >
                 <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
@@ -1456,6 +1474,25 @@ function App() {
                   <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100 tracking-tight">
                     Codex Switcher
                   </h1>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-label="Automatic account switching on usage limit"
+                    aria-checked={appSettings?.auto_switch_limit_enabled ?? false}
+                    onClick={() => void handleToggleAutoSwitch()}
+                    disabled={!appSettings || autoSwitchSaving}
+                    className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
+                      appSettings?.auto_switch_limit_enabled
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300"
+                        : "border-gray-200 bg-gray-100 text-gray-600 hover:bg-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
+                    }`}
+                    title="Switch accounts automatically when the active account reaches its usage limit"
+                  >
+                    <span className={`relative h-3.5 w-6 rounded-full ${appSettings?.auto_switch_limit_enabled ? "bg-emerald-500" : "bg-gray-400"}`} aria-hidden="true">
+                      <span className={`absolute top-0.5 h-2.5 w-2.5 rounded-full bg-white transition-transform ${appSettings?.auto_switch_limit_enabled ? "translate-x-3" : "translate-x-0.5"}`} />
+                    </span>
+                    Auto-switch {appSettings ? (appSettings.auto_switch_limit_enabled ? "On" : "Off") : "…"}
+                  </button>
                   {processInfo && (
                     <div className="inline-flex items-center gap-1">
                       <span

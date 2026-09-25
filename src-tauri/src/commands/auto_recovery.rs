@@ -2067,6 +2067,15 @@ pub fn get_app_settings() -> Result<AppSettings, String> {
     load_app_settings().map_err(|e| e.to_string())
 }
 
+/// Toggle limit recovery without overwriting the other auto-recovery settings.
+#[tauri::command]
+pub fn set_auto_switch_limit_enabled(enabled: bool) -> Result<AppSettings, String> {
+    let mut settings = load_app_settings().map_err(|e| e.to_string())?;
+    settings.auto_switch_limit_enabled = enabled;
+    save_app_settings(&settings).map_err(|e| e.to_string())?;
+    Ok(settings)
+}
+
 /// Save auto-recovery configuration
 #[tauri::command]
 pub async fn save_auto_recovery_settings(
