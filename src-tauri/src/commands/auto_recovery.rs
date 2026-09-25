@@ -431,13 +431,16 @@ fn rollout_has_active_turn(path: &Path) -> Result<bool> {
     file.read_to_string(&mut tail)?;
     // A missing lifecycle event is uncertain. The caller defers the handoff.
     for line in tail.lines().rev() {
-        if !line.contains("\"task_started\"") && !line.contains("\"task_complete\"") {
+        if !line.contains("\"task_started\"")
+            && !line.contains("\"task_complete\"")
+            && !line.contains("\"turn_aborted\"")
+        {
             continue;
         }
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         match value.pointer("/payload/type").and_then(|kind| kind.as_str()) {
             Some("task_started") => return Ok(true),
-            Some("task_complete") => return Ok(false),
+            Some("task_complete") | Some("turn_aborted") => return Ok(false),
             _ => {}
         }
     }
@@ -635,7 +638,10 @@ pub fn check_rollout_for_errors(rollout_path: &Path, session_id: &str) -> Option
             continue;
         }
 
-        if !line.contains("\"task_started\"") && !line.contains("\"task_complete\"") {
+        if !line.contains("\"task_started\"")
+            && !line.contains("\"task_complete\"")
+            && !line.contains("\"turn_aborted\"")
+        {
             continue;
         }
 
@@ -650,8 +656,8 @@ pub fn check_rollout_for_errors(rollout_path: &Path, session_id: &str) -> Option
         let event_type = payload.get("type").and_then(|t| t.as_str());
 
         // If the newest turn event is `task_started`, the session is actively executing a turn.
-        // It is NOT in an error state.
-        if event_type == Some("task_started") {
+        // If it is `turn_aborted`, the turn was aborted/cancelled and is not in a rate-limit error state.
+        if event_type == Some("task_started") || event_type == Some("turn_aborted") {
             return None;
         }
 
@@ -1954,6 +1960,8 @@ mod tests {
         assert!(rollout_has_active_turn(&path).unwrap());
         fs::write(&path, "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n").unwrap();
         assert!(!rollout_has_active_turn(&path).unwrap());
+        fs::write(&path, "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"turn_aborted\"}}\n").unwrap();
+        assert!(!rollout_has_active_turn(&path).unwrap());
         let _ = fs::remove_file(path);
     }
 
@@ -2783,6 +2791,16 @@ mod tests {
         let err = detected.unwrap();
         assert_eq!(err.kind, SessionErrorKind::UsageLimitExceeded);
         assert_eq!(err.turn_id.as_deref(), Some("turn-3"));
+
+        // Case 5: A turn is started and then aborted by user -> session not in error state, should return None!
+        {
+            let mut f = fs::OpenOptions::new().append(true).open(&rollout_file).unwrap();
+            writeln!(f, r#"{{"type":"event_msg","payload":{{"type":"task_started","turn_id":"turn-4"}}}}"#).unwrap();
+            writeln!(f, r#"{{"type":"event_msg","payload":{{"type":"turn_aborted","turn_id":"turn-4"}}}}"#).unwrap();
+        }
+
+        let detected = check_rollout_for_errors(&rollout_file, "sess-1");
+        assert!(detected.is_none(), "When latest turn was aborted by user, check_rollout_for_errors must return None");
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
