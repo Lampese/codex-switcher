@@ -21,15 +21,21 @@ use commands::{
     set_masked_account_ids, start_login, switch_account, warmup_account, warmup_all_accounts,
 };
 use tauri::Emitter;
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(w) = tauri::Manager::get_webview_window(app, "main") {
-                let _ = w.show();
-                let _ = w.set_focus();
-            }
+            // On macOS, a second process can be started by a login item or
+            // launchd. That must not interrupt the foreground app. An explicit
+            // Dock/Finder reopen is handled by RunEvent::Reopen below.
+            #[cfg(not(target_os = "macos"))]
+            commands::restore_main_window(app);
+            #[cfg(target_os = "macos")]
+            let _ = app;
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -46,10 +52,32 @@ pub fn run() {
             // Spawn background auto-recovery loop
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                let mut last_recovery_error: Option<String> = None;
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    if let Ok(Some(event)) = commands::auto_recovery::check_and_recover_sessions().await {
-                        let _ = app_handle.emit("session-recovery-event", event);
+                    match commands::auto_recovery::check_and_recover_sessions().await {
+                        Ok(Some(event)) => {
+                            last_recovery_error = None;
+                            let _ = app_handle.emit("session-recovery-event", event);
+                        }
+                        Err(error) => {
+                            let message = format!("{error:#}");
+                            if last_recovery_error.as_deref() != Some(&message) {
+                                eprintln!("[AutoRecovery] {message}");
+                                if let Some(home) = dirs::home_dir() {
+                                    let path = home.join(".codex-switcher/auto-recovery.log");
+                                    let mut options = std::fs::OpenOptions::new();
+                                    options.create(true).append(true);
+                                    #[cfg(unix)]
+                                    options.mode(0o600);
+                                    if let Ok(mut log) = options.open(path) {
+                                        let _ = writeln!(log, "{} {message}", chrono::Utc::now());
+                                    }
+                                }
+                                last_recovery_error = Some(message);
+                            }
+                        }
+                        Ok(None) => last_recovery_error = None,
                     }
                 }
             });

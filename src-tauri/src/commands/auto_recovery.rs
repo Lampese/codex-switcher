@@ -18,8 +18,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{
-    get_accounts_file, load_accounts, load_app_settings, save_app_settings,
-    switch_to_account,
+    ensure_chatgpt_tokens_fresh_locked, load_accounts, load_app_settings, read_current_auth,
+    save_accounts, save_app_settings, switch_to_account, sync_active_account_tokens,
+    AUTH_OPERATION_LOCK,
 };
 use crate::commands::account_stats::AccountResetCredits;
 use crate::types::{
@@ -53,6 +54,7 @@ pub struct ActiveCodexSession {
     pub rollout_path: Option<String>,
     pub last_error: Option<DetectedSessionError>,
     pub is_managed: bool,
+    pub is_desktop: bool,
 }
 
 /// Status of the auto-recovery monitor
@@ -83,7 +85,7 @@ struct SessionTrackerState {
     /// Last recovery event notification
     last_event: Option<RecoveryEventNotification>,
     /// Last account switch timestamp and target account ID (to prevent cascading switches across multiple active sessions)
-    last_account_switch: Option<(Instant, String)>,
+    last_account_switch: Option<(Instant, String, bool)>,
 }
 
 static TRACKER: std::sync::LazyLock<Mutex<SessionTrackerState>> =
@@ -111,6 +113,24 @@ fn which_cmd(cmd: &str) -> Option<PathBuf> {
 
 fn escape_shell_arg(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_resume_command(
+    codex_bin: &Path,
+    cwd: &Path,
+    session_id: &str,
+    phrase: &str,
+    restart_file: &Path,
+) -> String {
+    let cwd = escape_shell_arg(&cwd.to_string_lossy());
+    let binary = escape_shell_arg(&codex_bin.to_string_lossy());
+    let session = escape_shell_arg(session_id);
+    let phrase = escape_shell_arg(phrase);
+    let restart = escape_shell_arg(&restart_file.to_string_lossy());
+    format!(
+        "cd {cwd} && while true; do {binary} resume {session} {phrase}; if [ -f {restart} ]; then rm -f {restart}; sleep 1; continue; fi; break; done; exit"
+    )
 }
 
 /// Find the codex CLI executable in standard and user environments
@@ -157,7 +177,7 @@ pub fn find_codex_binary() -> PathBuf {
     PathBuf::from("codex")
 }
 
-/// Find active Codex CLI sessions by inspecting thread-writer-locks and running processes
+/// Find local Codex sessions by inspecting thread-writer-locks and running processes.
 pub fn find_active_sessions() -> Result<Vec<ActiveCodexSession>> {
     let mut sessions = Vec::new();
     let home = dirs::home_dir().context("Could not determine home directory")?;
@@ -193,7 +213,16 @@ pub fn find_active_sessions() -> Result<Vec<ActiveCodexSession>> {
         }
 
         // Determine PID holding or associated with this session
-        let pid = find_pid_for_session(&session_id, &path).unwrap_or(0);
+        let cli_pid = find_pid_for_session(&session_id, &path);
+        #[cfg(target_os = "macos")]
+        let desktop_pid = find_desktop_pid_for_session(&path);
+        #[cfg(not(target_os = "macos"))]
+        let desktop_pid: Option<u32> = None;
+        let is_desktop = cli_pid.is_none() && desktop_pid.is_some();
+        let pid = cli_pid.or(desktop_pid).unwrap_or(0);
+        if pid == 0 {
+            continue;
+        }
         let rollout_path = locate_rollout_file(&home, &session_id);
 
         // Inspect rollout metadata: if this is a subagent (child thread of another session),
@@ -221,6 +250,7 @@ pub fn find_active_sessions() -> Result<Vec<ActiveCodexSession>> {
             rollout_path: rollout_path.as_ref().map(|p| p.to_string_lossy().to_string()),
             last_error: None,
             is_managed,
+            is_desktop,
         };
 
         if let Some(ref r_path) = rollout_path {
@@ -345,7 +375,9 @@ fn find_pid_for_session(session_id: &str, file_path: &Path) -> Option<u32> {
                     let cmdline_path = entry.path().join("cmdline");
                     if let Ok(cmdline_bytes) = fs::read(&cmdline_path) {
                         let cmdline = String::from_utf8_lossy(&cmdline_bytes);
-                        if cmdline.contains(session_id) && !cmdline.contains("codex-switcher") {
+                        if cmdline.contains(session_id)
+                            && is_supported_cli_command(&cmdline.replace('\0', " "))
+                        {
                             return Some(pid);
                         }
                     }
@@ -361,13 +393,183 @@ fn find_pid_for_session(session_id: &str, file_path: &Path) -> Option<u32> {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 for line in stdout.lines() {
                     if let Ok(pid) = line.trim().parse::<u32>() {
-                        return Some(pid);
+                        let Ok(output) = Command::new("ps")
+                            .args(["-p", &pid.to_string(), "-o", "args="])
+                            .output() else { continue };
+                        if output.status.success()
+                            && is_supported_cli_command(&String::from_utf8_lossy(&output.stdout))
+                        {
+                            return Some(pid);
+                        }
                     }
                 }
             }
         }
     }
 
+    None
+}
+
+fn is_supported_cli_command(command: &str) -> bool {
+    let command = command.trim().to_ascii_lowercase();
+    !command.is_empty()
+        && command.contains("codex")
+        && !command.contains("codex-switcher")
+        && !command.contains("app-server")
+        && !command.contains("exec-server")
+        && !command.contains("chatgpt.app")
+        && !command.contains("codex.app")
+}
+
+fn rollout_has_active_turn(path: &Path) -> Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    let offset = size.saturating_sub(1024 * 1024);
+    file.seek(SeekFrom::Start(offset))?;
+    let mut tail = String::new();
+    file.read_to_string(&mut tail)?;
+    // A missing lifecycle event is uncertain. The caller defers the handoff.
+    for line in tail.lines().rev() {
+        if !line.contains("\"task_started\"") && !line.contains("\"task_complete\"") {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        match value.pointer("/payload/type").and_then(|kind| kind.as_str()) {
+            Some("task_started") => return Ok(true),
+            Some("task_complete") => return Ok(false),
+            _ => {}
+        }
+    }
+    anyhow::bail!("Cannot determine whether another Codex turn is active")
+}
+
+#[cfg(target_os = "macos")]
+fn desktop_handoff_is_exclusive(session_id: &str) -> Result<()> {
+    for other in find_active_sessions()? {
+        if other.session_id == session_id {
+            continue;
+        }
+        if !other.is_desktop {
+            anyhow::bail!("Another CLI session is open; deferring desktop account handoff");
+        }
+        let path = other.rollout_path.as_deref().context("Desktop session history is unavailable")?;
+        if rollout_has_active_turn(Path::new(path))? {
+            anyhow::bail!("Another desktop turn is active; deferring account handoff");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+async fn close_desktop_for_handoff(session_id: &str) -> Result<String> {
+    desktop_handoff_is_exclusive(session_id)?;
+    let processes = crate::commands::process::check_codex_processes()
+        .await
+        .map_err(anyhow::Error::msg)?;
+    if processes.count != 1 || !is_macos_desktop_root_pid(processes.pids[0]) {
+        anyhow::bail!("Expected one Codex desktop process; deferring account handoff");
+    }
+    let closed = crate::commands::process::kill_codex_processes(Some(true), Some(false))
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let token = closed.reopen_token.context("Could not record Codex desktop for reopening")?;
+    if !closed.failed_pids.is_empty() {
+        let _ = crate::commands::reopen_closed_codex_desktop(token).await;
+        anyhow::bail!("Codex desktop did not close cleanly; account was not switched");
+    }
+    Ok(token)
+}
+
+#[cfg(target_os = "macos")]
+async fn close_idle_desktop_for_cli(session: &ActiveCodexSession) -> Result<bool> {
+    let processes = crate::commands::process::check_codex_processes()
+        .await
+        .map_err(anyhow::Error::msg)?;
+    if processes.pids == vec![session.pid] {
+        return Ok(false);
+    }
+    desktop_handoff_is_exclusive(&session.session_id)?;
+    if processes.pids.len() != 2 || !processes.pids.contains(&session.pid)
+        || !processes.pids.iter().copied().any(|pid| pid != session.pid && is_macos_desktop_root_pid(pid)) {
+        anyhow::bail!("Another Codex process is running; deferring CLI account handoff");
+    }
+    let status = Command::new("osascript")
+        .args(["-e", "tell application id \"com.openai.codex\" to quit"])
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("Could not gracefully close Codex desktop");
+    }
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let current = crate::commands::process::check_codex_processes()
+            .await
+            .map_err(anyhow::Error::msg)?;
+        if current.pids == vec![session.pid] {
+            return Ok(true);
+        }
+    }
+    anyhow::bail!("Codex desktop did not close; account was not switched")
+}
+
+#[cfg(target_os = "macos")]
+async fn resume_desktop_after_handoff(token: String, session_id: &str, phrase: &str) -> Result<()> {
+    crate::commands::reopen_closed_codex_desktop(token)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    for attempt in 0..10 {
+        if send_codex_queue_resume(session_id, phrase).await.is_ok() {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1 + attempt)).await;
+    }
+    anyhow::bail!("Codex desktop reopened, but the continuation message could not be queued")
+}
+
+#[cfg(target_os = "macos")]
+fn is_desktop_app_server_command(command: &str) -> bool {
+    let command = command.trim().to_ascii_lowercase();
+    (command.contains("/chatgpt.app/contents/resources/codex")
+        || command.contains("/codex.app/contents/resources/codex"))
+        && command.contains(" app-server")
+}
+
+#[cfg(target_os = "macos")]
+fn is_macos_desktop_root_pid(pid: u32) -> bool {
+    let Ok(output) = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "args="])
+        .output() else { return false };
+    if !output.status.success() {
+        return false;
+    }
+    is_macos_desktop_root_command(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(target_os = "macos")]
+fn is_macos_desktop_root_command(command: &str) -> bool {
+    let command = command.trim().to_ascii_lowercase();
+    command.starts_with('/')
+        && (command.contains("/chatgpt.app/contents/macos/chatgpt")
+            || command.contains("/codex.app/contents/macos/codex"))
+}
+
+#[cfg(target_os = "macos")]
+fn find_desktop_pid_for_session(lock_path: &Path) -> Option<u32> {
+    let output = Command::new("lsof").arg("-t").arg(lock_path).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Ok(pid) = line.trim().parse::<u32>() else { continue };
+        let Ok(process) = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "args="])
+            .output() else { continue };
+        if process.status.success()
+            && is_desktop_app_server_command(&String::from_utf8_lossy(&process.stdout))
+        {
+            return Some(pid);
+        }
+    }
     None
 }
 
@@ -929,6 +1131,7 @@ pub fn launch_session_in_terminal(
     let codex_bin = find_codex_binary();
     let restart_file = std::env::temp_dir()
         .join(format!("codex-switcher-restart-{}", session_id));
+    #[cfg(target_os = "linux")]
     let restart_file_str = restart_file.to_string_lossy().to_string();
 
     let default_cwd = cwd
@@ -1030,17 +1233,18 @@ exec $SHELL
 
     #[cfg(target_os = "macos")]
     {
-        let script = format!(
-            "tell application \"Terminal\" to do script \"cd {} && while true; do {} resume {} {}; if [ -f {} ]; then rm -f {}; sleep 1; continue; fi; break; done; exit\"",
-            default_cwd.display(),
-            codex_bin.to_string_lossy(),
+        // Pass the command as an AppleScript argument instead of interpolating
+        // it into source code. Shell-quote each value separately above.
+        let script = "on run argv\n  tell application \"Terminal\" to do script (item 1 of argv)\nend run";
+        let command = macos_resume_command(
+            &codex_bin,
+            &default_cwd,
             session_id,
             phrase,
-            restart_file_str,
-            restart_file_str
+            &restart_file,
         );
         let mut cmd = Command::new("osascript");
-        cmd.arg("-e").arg(script);
+        cmd.arg("-e").arg(script).arg("--").arg(command);
         let child = cmd.spawn().context("Failed to spawn macOS Terminal")?;
         return Ok(child.id());
     }
@@ -1212,16 +1416,15 @@ async fn handle_account_switch_for_session(
         tracker.last_account_switch.clone()
     };
 
-    if let Some((switch_time, target_id)) = recent_switch {
+    if let Some((switch_time, target_id, was_reset_credit)) = recent_switch {
         if switch_time.elapsed() < Duration::from_secs(20) {
             let phrase = resolve_session_resume_phrase(&session.session_id, &settings.continue_phrase);
 
             // If the account was NOT changed (for example, limits were restored via reset credit on the same account),
             // we do NOT need to terminate the process or launch a new terminal! The credentials in memory are still valid.
             // We just queue the continue phrase to the existing running session.
-            let is_same_account = current_id.map(|id| id == target_id).unwrap_or(false);
-            if is_same_account {
-                let _ = send_codex_queue_resume(&session.session_id, &phrase).await;
+            if was_reset_credit || session.is_desktop {
+                send_codex_queue_resume(&session.session_id, &phrase).await?;
 
                 if let Ok(mut tracker) = TRACKER.lock() {
                     let turn_key = session
@@ -1235,10 +1438,11 @@ async fn handle_account_switch_for_session(
                 }
 
                 let notification = RecoveryEventNotification {
-                    event_type: "reset_credit_redeemed".to_string(),
+                    event_type: if was_reset_credit { "reset_credit_redeemed" } else { "account_switched" }.to_string(),
                     session_id: session.session_id.clone(),
                     message: format!(
-                        "Resumed session in-place with '{phrase}' on refreshed account (reset credit redeemed {}s ago)",
+                        "Resumed session with '{phrase}' on account '{}' after {}s",
+                        target_id,
                         switch_time.elapsed().as_secs()
                     ),
                     timestamp: Utc::now(),
@@ -1319,9 +1523,11 @@ async fn handle_account_switch_for_session(
     if settings.auto_redeem_reset_credits {
         if let Some(curr_acc_id) = current_id {
             if let Some(curr_acc) = store.accounts.iter().find(|a| a.id == curr_acc_id) {
-                if let Ok(stats) =
-                    crate::commands::account_stats::get_account_usage_stats(curr_acc.id.clone())
-                        .await
+                if let Ok(Ok(stats)) = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    crate::commands::account_stats::get_account_usage_stats(curr_acc.id.clone()),
+                )
+                .await
                 {
                     if let Some(resets) = stats.reset_credits {
                         let mut available_credits: Vec<_> = resets
@@ -1380,7 +1586,7 @@ async fn handle_account_switch_for_session(
                                         .insert(session.session_id.clone(), turn_key);
                                     // Update last_account_switch with curr_acc.id so other concurrent sessions
                                     // don't immediately trigger a cascade switch to another account!
-                                    tracker.last_account_switch = Some((Instant::now(), curr_acc.id.clone()));
+                                    tracker.last_account_switch = Some((Instant::now(), curr_acc.id.clone(), true));
                                 }
 
                                 let notification = RecoveryEventNotification {
@@ -1414,14 +1620,34 @@ async fn handle_account_switch_for_session(
     let mut usage_map = HashMap::new();
     let mut resets_map = HashMap::new();
 
-    for acc in &store.accounts {
-        if let Ok(u) = crate::commands::usage::fetch_usage(&acc.id).await {
-            usage_map.insert(acc.id.clone(), u);
-        }
-        if let Ok(stats) = crate::commands::account_stats::get_account_usage_stats(acc.id.clone()).await {
-            if let Some(resets) = stats.reset_credits {
-                resets_map.insert(acc.id.clone(), resets);
+    // One stalled profile request must not block every recovery cycle. Fetch
+    // candidates concurrently and bound each account's total lookup time.
+    let candidates = store.accounts.iter().filter(|acc| Some(acc.id.as_str()) != current_id);
+    let snapshots = futures::future::join_all(candidates.map(|acc| async {
+        let account_id = acc.id.clone();
+        let snapshot = tokio::time::timeout(Duration::from_secs(10), async {
+            let usage = crate::commands::usage::fetch_usage(&account_id).await.ok();
+            let resets = crate::commands::account_stats::get_account_usage_stats(account_id.clone())
+                .await
+                .ok()
+                .and_then(|stats| stats.reset_credits);
+            (usage, resets)
+        })
+        .await;
+        (account_id, snapshot)
+    }))
+    .await;
+    for (account_id, snapshot) in snapshots {
+        match snapshot {
+            Ok((usage, resets)) => {
+                if let Some(usage) = usage {
+                    usage_map.insert(account_id.clone(), usage);
+                }
+                if let Some(resets) = resets {
+                    resets_map.insert(account_id, resets);
+                }
             }
+            Err(_) => eprintln!("[AutoRecovery] Candidate usage lookup timed out"),
         }
     }
 
@@ -1438,16 +1664,87 @@ async fn handle_account_switch_for_session(
         anyhow::bail!("No eligible fallback account found with available limits");
     };
 
-    // Switch account credentials in auth.json
-    switch_to_account(&target)?;
-    let mut updated_store = store;
-    updated_store.active_account_id = Some(target.id.clone());
-    let accounts_path = get_accounts_file()?;
-    if let Ok(content) = serde_json::to_string_pretty(&updated_store) {
-        let _ = fs::write(&accounts_path, content);
-    }
+    let desktop_reopen_token: Option<String> = if session.is_desktop {
+        #[cfg(target_os = "macos")]
+        { Some(close_desktop_for_handoff(&session.session_id).await?) }
+        #[cfg(not(target_os = "macos"))]
+        { anyhow::bail!("Desktop recovery is not supported on this platform") }
+    } else {
+        None
+    };
+    #[cfg(target_os = "macos")]
+    let reopen_desktop_after_cli = if session.is_desktop {
+        false
+    } else {
+        close_idle_desktop_for_cli(session).await?
+    };
+
+    // Serialize this with manual switches and token refresh. Codex can rotate
+    // its refresh token while running; preserve that live token before replacing
+    // auth.json so switching back to this account still works.
+    let switch_result: Result<StoredAccount> = async {
+        let _auth_guard = AUTH_OPERATION_LOCK.lock().await;
+        let mut updated_store = load_accounts()?;
+        if updated_store.active_account_id.as_deref() != current_id {
+            anyhow::bail!("Active account changed during auto recovery");
+        }
+        if let Some(auth) = read_current_auth()? {
+            if sync_active_account_tokens(&mut updated_store, &auth) {
+                save_accounts(&updated_store)?;
+            }
+        }
+        let target = ensure_chatgpt_tokens_fresh_locked(&target).await?;
+        switch_to_account(&target)?;
+        // Refresh may have saved rotated target credentials to accounts.json.
+        updated_store = load_accounts()?;
+        updated_store.active_account_id = Some(target.id.clone());
+        save_accounts(&updated_store)?;
+        Ok(target)
+    }.await;
+    let target = match switch_result {
+        Ok(target) => target,
+        Err(error) => {
+            #[cfg(target_os = "macos")]
+            if let Some(token) = desktop_reopen_token {
+                let _ = crate::commands::reopen_closed_codex_desktop(token).await;
+            }
+            #[cfg(target_os = "macos")]
+            if reopen_desktop_after_cli {
+                let _ = crate::commands::process::open_codex_app().await;
+            }
+            return Err(error);
+        }
+    };
 
     let phrase = resolve_session_resume_phrase(&session.session_id, &settings.continue_phrase);
+
+    #[cfg(target_os = "macos")]
+    if let Some(token) = desktop_reopen_token {
+        if let Ok(mut tracker) = TRACKER.lock() {
+            tracker.last_account_switch = Some((Instant::now(), target.id.clone(), false));
+            let turn_key = session.last_error.as_ref().and_then(|e| e.turn_id.clone())
+                .unwrap_or_else(|| "default".to_string());
+            tracker.handled_usage_limits.insert(session.session_id.clone(), turn_key);
+        }
+        resume_desktop_after_handoff(token, &session.session_id, &phrase).await?;
+        let notification = RecoveryEventNotification {
+            event_type: "account_switched".to_string(),
+            session_id: session.session_id.clone(),
+            message: format!("Switched to '{}' and queued '{}' in the desktop session", target.name, phrase),
+            timestamp: Utc::now(),
+        };
+        if let Ok(mut tracker) = TRACKER.lock() {
+            tracker.last_event = Some(notification.clone());
+        }
+        return Ok(Some(notification));
+    }
+
+    #[cfg(target_os = "macos")]
+    if reopen_desktop_after_cli {
+        if let Err(error) = crate::commands::process::open_codex_app().await {
+            eprintln!("[AutoRecovery] CLI account switched, but desktop could not reopen: {error}");
+        }
+    }
 
     let restart_file = std::env::temp_dir()
         .join(format!("codex-switcher-restart-{}", session.session_id));
@@ -1496,7 +1793,7 @@ async fn handle_account_switch_for_session(
         tracker
             .handled_usage_limits
             .insert(session.session_id.clone(), turn_key);
-        tracker.last_account_switch = Some((Instant::now(), target.id.clone()));
+        tracker.last_account_switch = Some((Instant::now(), target.id.clone(), false));
     }
 
     let notification = RecoveryEventNotification {
@@ -1624,6 +1921,57 @@ pub async fn save_auto_recovery_settings(
 mod tests {
     use super::*;
     use chrono::{Duration as ChronoDuration, TimeZone};
+
+    #[test]
+    fn desktop_app_server_is_not_a_recoverable_cli_session() {
+        assert!(!is_supported_cli_command(
+            "/Applications/ChatGPT.app/Contents/Resources/codex app-server --analytics-default-enabled"
+        ));
+        assert!(!is_supported_cli_command("/usr/local/bin/codex app-server"));
+        assert!(is_supported_cli_command("/usr/local/bin/codex resume session-id"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn recognizes_only_the_macos_desktop_app_server() {
+        assert!(is_desktop_app_server_command(
+            "/Applications/ChatGPT.app/Contents/Resources/codex app-server --analytics-default-enabled"
+        ));
+        assert!(!is_desktop_app_server_command("/usr/local/bin/codex app-server"));
+        assert!(!is_desktop_app_server_command(
+            "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
+        ));
+        assert!(is_macos_desktop_root_command(
+            "/Users/test/Applications With Spaces/ChatGPT.app/Contents/MacOS/ChatGPT"
+        ));
+        assert!(!is_macos_desktop_root_command("/usr/local/bin/codex resume thread"));
+    }
+
+    #[test]
+    fn detects_another_turn_before_desktop_handoff() {
+        let path = std::env::temp_dir().join(format!("codex_handoff_{}.jsonl", uuid::Uuid::new_v4()));
+        fs::write(&path, "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n").unwrap();
+        assert!(rollout_has_active_turn(&path).unwrap());
+        fs::write(&path, "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n").unwrap();
+        assert!(!rollout_has_active_turn(&path).unwrap());
+        let _ = fs::remove_file(path);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_resume_command_quotes_every_dynamic_argument() {
+        let command = macos_resume_command(
+            Path::new("/tmp/Codex Bin/codex"),
+            Path::new("/tmp/my work; touch /tmp/injected"),
+            "thread' id",
+            "continue $(touch /tmp/injected) 'now'",
+            Path::new("/tmp/restart file"),
+        );
+        assert!(command.contains("cd '/tmp/my work; touch /tmp/injected'"));
+        assert!(command.contains("'/tmp/Codex Bin/codex' resume 'thread'\\'' id'"));
+        assert!(command.contains("'continue $(touch /tmp/injected) '\\''now'\\'''"));
+        assert!(command.contains("[ -f '/tmp/restart file' ]"));
+    }
 
     fn make_test_account(id: &str, name: &str, expires_at: Option<DateTime<Utc>>) -> StoredAccount {
         let mut acc = StoredAccount::new_chatgpt(
@@ -2750,19 +3098,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_live_user_goal_session_resumes_with_goal_resume() {
-        // If the user's ~/.codex/goals_1.sqlite is present, verify session 01a0c723-3f3b-7bd2-98df-e40f26a4d278
-        if let Some(home) = dirs::home_dir() {
-            let db_path = home.join(".codex").join("goals_1.sqlite");
-            if db_path.exists() {
-                let phrase = resolve_session_resume_phrase("01a0c723-3f3b-7bd2-98df-e40f26a4d278", "продолжи");
-                assert_eq!(
-                    phrase, "/goal resume",
-                    "Session with status usage_limited in thread_goals must resume with '/goal resume' instead of continue phrase"
-                );
-            }
-        }
-    }
 }
-
