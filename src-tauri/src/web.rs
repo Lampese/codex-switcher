@@ -14,10 +14,19 @@ use crate::commands::{
     complete_login, delete_account, export_accounts_full_encrypted_bytes,
     export_accounts_slim_text, fetch_usage, get_account_usage_stats, get_active_account_info,
     get_masked_account_ids, import_accounts_full_encrypted_bytes, import_accounts_slim_text,
-    kill_codex_processes, list_accounts, refresh_account_metadata, refresh_all_accounts_usage,
-    rename_account, set_masked_account_ids, start_login, switch_account, warmup_account,
-    warmup_all_accounts,
+    kill_codex_processes, list_accounts, redeem_account_reset_credit,
+    refresh_account_metadata, refresh_all_accounts_usage, rename_account, set_masked_account_ids,
+    start_login, switch_account, warmup_account, warmup_all_accounts,
 };
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RedeemCreditArgs {
+    #[serde(alias = "account_id")]
+    account_id: String,
+    #[serde(alias = "credit_id")]
+    credit_id: String,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -152,6 +161,10 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
         "get_account_usage_stats" => {
             let args: AccountIdArgs = parse_args(payload)?;
             to_json(get_account_usage_stats(args.account_id).await?)
+        }
+        "redeem_account_reset_credit" => {
+            let args: RedeemCreditArgs = parse_args(payload)?;
+            to_json(redeem_account_reset_credit(args.account_id, args.credit_id).await?)
         }
         "refresh_account_metadata" => {
             let args: AccountIdArgs = parse_args(payload)?;

@@ -8,7 +8,7 @@ import { finishForceClose, type DesktopReopenPreference } from "./lib/desktopReo
 import type { CodexClosePreference } from "./lib/codexClosePreference";
 import { useForceCloseCodexProcesses } from "./hooks/useForceCloseCodexProcesses";
 import { AccountCard, AddAccountModal, UpdateChecker } from "./components";
-import type { AccountWithUsage, CodexProcessInfo, DockDisplayMode, UsageInfo } from "./types";
+import type { AccountWithUsage, AppSettings, CodexProcessInfo, DockDisplayMode, UsageInfo } from "./types";
 import {
   exportFullBackupFile,
   importFullBackupFile,
@@ -268,6 +268,23 @@ function App() {
       unlisten?.();
     };
   }, []);
+
+  const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
+  const [autoSwitchSaving, setAutoSwitchSaving] = useState(false);
+
+  const loadAppSettings = useCallback(async () => {
+    if (!isTauriRuntime()) return;
+    try {
+      const s = await invokeBackend<AppSettings>("get_app_settings");
+      setAppSettings(s);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadAppSettings();
+  }, [loadAppSettings]);
 
   const actionsMenuRef = useRef<HTMLDivElement | null>(null);
   const navMenuRef = useRef<HTMLDivElement | null>(null);
@@ -611,6 +628,55 @@ function App() {
     setWarmupToast({ message, isError });
     toastTimerRef.current = setTimeout(() => setWarmupToast(null), isError ? 10000 : 2500);
   }, []);
+
+  const handleToggleAutoSwitch = useCallback(async () => {
+    if (!appSettings || autoSwitchSaving) return;
+    setAutoSwitchSaving(true);
+    try {
+      const updated = await invokeBackend<AppSettings>("set_auto_switch_limit_enabled", {
+        enabled: !appSettings.auto_switch_limit_enabled,
+      });
+      setAppSettings(updated);
+      showWarmupToast(`Automatic account switching ${updated.auto_switch_limit_enabled ? "enabled" : "disabled"}.`);
+    } catch (err) {
+      showWarmupToast(`Could not change automatic switching: ${String(err)}`, true);
+      void loadAppSettings();
+    } finally {
+      setAutoSwitchSaving(false);
+    }
+  }, [appSettings, autoSwitchSaving, loadAppSettings, showWarmupToast]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/event").then(async ({ listen }) => {
+      const stop = await listen<{ message: string; event_type: string }>(
+        "session-recovery-event",
+        (event) => {
+          // Only show notification and reload account state when an actual switch occurred
+          if (
+            event.payload.event_type === "account_switched" ||
+            event.payload.event_type === "account_switched_queued" ||
+            event.payload.event_type === "reset_credit_redeemed"
+          ) {
+            showWarmupToast(event.payload.message);
+            void loadAccounts(true).then((accountList) => {
+              if (accountList && accountList.length > 0) {
+                void refreshUsage(accountList);
+              }
+            });
+          }
+        }
+      );
+      if (disposed) stop();
+      else unlisten = stop;
+    }).catch((err) => console.error("Failed to listen for session-recovery-event:", err));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [loadAccounts, refreshUsage, showWarmupToast]);
 
   const formatWarmupError = useCallback((err: unknown) => {
     if (!err) return "Unknown error";
@@ -1408,6 +1474,36 @@ function App() {
                   <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100 tracking-tight">
                     Codex Switcher
                   </h1>
+                  {isTauriRuntime() && <button
+                    type="button"
+                    role="switch"
+                    aria-label="Automatic account switching on usage limit"
+                    aria-checked={appSettings?.auto_switch_limit_enabled ?? false}
+                    onClick={() => void handleToggleAutoSwitch()}
+                    disabled={!appSettings || autoSwitchSaving}
+                    className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
+                      appSettings?.auto_switch_limit_enabled
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300"
+                        : "border-gray-200 bg-gray-100 text-gray-600 hover:bg-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
+                    }`}
+                    title="Switch accounts automatically when the active account reaches its usage limit"
+                  >
+                    <span
+                      className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors ${
+                        appSettings?.auto_switch_limit_enabled ? "bg-emerald-500" : "bg-gray-400 dark:bg-gray-600"
+                      }`}
+                      aria-hidden="true"
+                    >
+                      <span
+                        className={`inline-block h-3 w-3 rounded-full bg-white shadow transition-transform ${
+                          appSettings?.auto_switch_limit_enabled ? "translate-x-3.5" : "translate-x-0.5"
+                        }`}
+                      />
+                    </span>
+                    <span className="select-none">
+                      Auto-switch {appSettings ? (appSettings.auto_switch_limit_enabled ? "On" : "Off") : "…"}
+                    </span>
+                  </button>}
                   {processInfo && (
                     <div className="inline-flex items-center gap-1">
                       <span
@@ -1851,6 +1947,7 @@ function App() {
                       autoWarmupRunningIds.has(activeAccount.id)
                     )}
                     onToggleAutoWarmup={() => toggleAutoWarmupAccount(activeAccount.id)}
+                    resetCreditWarningDays={appSettings?.reset_credit_warning_days ?? 3}
                   />
                 </section>
               )}
@@ -1948,6 +2045,7 @@ function App() {
                         autoWarmupRunningIds.has(account.id)
                       )}
                       onToggleAutoWarmup={() => toggleAutoWarmupAccount(account.id)}
+                      resetCreditWarningDays={appSettings?.reset_credit_warning_days ?? 3}
                     />
                   ))}
                 </div>
@@ -1990,7 +2088,10 @@ function App() {
           onReopenPreferenceChange={saveDesktopReopenPreference}
           closePreference={codexClose.preference}
           onClosePreferenceChange={saveCodexClosePreference}
-          onClose={() => setIsSettingsOpen(false)}
+          onClose={() => {
+            setIsSettingsOpen(false);
+            void loadAppSettings();
+          }}
         />
       )}
 

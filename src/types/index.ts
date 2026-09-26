@@ -122,3 +122,26 @@ export interface ImportAccountsSummary {
   imported_count: number;
   skipped_count: number;
 }
+
+export type AutoSwitchStrategy =
+  | "smart_balanced"
+  | "resets_first"
+  | "expiring_subscription_first"
+  | "most_remaining_quota"
+  | "round_robin";
+
+export interface AppSettings {
+  tray_display_mode: "icon_and_session" | "active_usage_text" | "hidden";
+  dock_display_mode: DockDisplayMode;
+  close_behavior_prompt_enabled: boolean;
+  auto_retry_capacity_enabled: boolean;
+  auto_retry_capacity_max_attempts: number;
+  auto_retry_capacity_initial_delay_sec: number;
+  auto_retry_capacity_escalate_to_switch: boolean;
+  auto_switch_limit_enabled: boolean;
+  auto_switch_strategy: AutoSwitchStrategy;
+  auto_redeem_reset_credits: boolean;
+  continue_phrase: string;
+  reset_credit_warning_days: number;
+  preferred_terminal: string | null;
+}

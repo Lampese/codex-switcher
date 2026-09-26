@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { DesktopReopenPreference } from "../lib/desktopReopen";
 import type { CodexClosePreference } from "../lib/codexClosePreference";
 import { invokeBackend, isTauriRuntime } from "../lib/platform";
-import type { DockDisplayMode } from "../types";
+import type { AppSettings, AutoSwitchStrategy, DockDisplayMode } from "../types";
 
 type TrayDisplayMode = "icon_and_session" | "active_usage_text" | "hidden";
 interface DisplaySettings {
@@ -26,16 +26,22 @@ export function SettingsModal({
   onClose,
 }: SettingsModalProps) {
   const [displaySettings, setDisplaySettings] = useState<DisplaySettings | null>(null);
+  const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const requestId = useRef(0);
   const desktop = isTauriRuntime();
-  const loadDisplaySettings = useCallback(async () => {
+
+  const loadSettings = useCallback(async () => {
     const currentRequest = ++requestId.current;
     try {
-      const settings = await invokeBackend<DisplaySettings>("get_display_settings");
+      const [disp, app] = await Promise.all([
+        invokeBackend<DisplaySettings>("get_display_settings"),
+        invokeBackend<AppSettings>("get_app_settings"),
+      ]);
       if (currentRequest === requestId.current) {
-        setDisplaySettings(settings);
+        setDisplaySettings(disp);
+        setAppSettings(app);
         setError(null);
       }
     } catch (err) {
@@ -49,12 +55,12 @@ export function SettingsModal({
     let unlisten: (() => void) | undefined;
     void import("@tauri-apps/api/event").then(async ({ listen }) => {
       const stop = await listen("app-settings-changed", () => {
-        void loadDisplaySettings();
+        void loadSettings();
       });
       if (disposed) stop();
       else {
         unlisten = stop;
-        void loadDisplaySettings();
+        void loadSettings();
       }
     }).catch((err) => {
       if (!disposed) setError(String(err));
@@ -64,15 +70,14 @@ export function SettingsModal({
       requestId.current += 1;
       unlisten?.();
     };
-  }, [desktop, loadDisplaySettings]);
+  }, [desktop, loadSettings]);
 
   const changeDisplaySetting = async (command: string, mode: string) => {
     setSaving(true);
     setError(null);
     try {
       await invokeBackend(command, { mode });
-      // Changing tray visibility can also adjust the Dock mode, and vice versa.
-      await loadDisplaySettings();
+      await loadSettings();
     } catch (err) {
       requestId.current += 1;
       setError(String(err));
@@ -81,15 +86,42 @@ export function SettingsModal({
     }
   };
 
+  const updateAutoRecovery = async (updates: Partial<AppSettings>) => {
+    if (!appSettings) return;
+    const next: AppSettings = { ...appSettings, ...updates };
+    setAppSettings(next);
+    setSaving(true);
+    setError(null);
+    try {
+      await invokeBackend("save_auto_recovery_settings", {
+        autoRetryCapacityEnabled: next.auto_retry_capacity_enabled,
+        autoRetryCapacityMaxAttempts: next.auto_retry_capacity_max_attempts,
+        autoRetryCapacityInitialDelaySec: next.auto_retry_capacity_initial_delay_sec,
+        autoRetryCapacityEscalateToSwitch: next.auto_retry_capacity_escalate_to_switch,
+        autoSwitchLimitEnabled: next.auto_switch_limit_enabled,
+        autoSwitchStrategy: next.auto_switch_strategy,
+        autoRedeemResetCredits: next.auto_redeem_reset_credits ?? false,
+        continuePhrase: next.continue_phrase,
+        resetCreditWarningDays: next.reset_credit_warning_days,
+        preferredTerminal: next.preferred_terminal,
+      });
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const selectClassName = "w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 disabled:opacity-50";
+  const inputClassName = "w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 disabled:opacity-50";
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-      <div role="dialog" aria-modal="true" aria-labelledby="settings-title" className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-md mx-4 shadow-xl">
+      <div role="dialog" aria-modal="true" aria-labelledby="settings-title" className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-lg mx-4 shadow-xl">
         <div className="p-5 border-b border-gray-100 dark:border-gray-800">
           <h2 id="settings-title" className="text-lg font-semibold text-gray-900 dark:text-gray-100">Settings</h2>
         </div>
-        <div className="p-5 space-y-3 max-h-[65vh] overflow-y-auto">
+        <div className="p-5 space-y-4 max-h-[70vh] overflow-y-auto">
           {desktop && (
             <>
               {displaySettings ? (
@@ -128,6 +160,164 @@ export function SettingsModal({
               <div className="border-t border-gray-100 dark:border-gray-800" />
             </>
           )}
+
+          {/* Auto Recovery Section */}
+          <div className="space-y-3">
+            <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 uppercase tracking-wider">
+              Auto Recovery & Session Automation
+            </h3>
+
+            {/* Model Capacity Auto-Retry */}
+            <div className="rounded-xl border border-gray-200 dark:border-gray-800 p-3 space-y-2 bg-gray-50/50 dark:bg-gray-800/30">
+              <label className="flex items-center gap-2 cursor-pointer text-sm font-medium text-gray-900 dark:text-gray-100">
+                <input
+                  type="checkbox"
+                  checked={appSettings?.auto_retry_capacity_enabled ?? false}
+                  disabled={saving || !appSettings}
+                  onChange={(e) => void updateAutoRecovery({ auto_retry_capacity_enabled: e.target.checked })}
+                  className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                />
+                Auto-retry when model is at capacity
+              </label>
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                Automatically sends queue messages to resume sessions paused by OpenAI capacity limits.
+              </p>
+
+              {(appSettings?.auto_retry_capacity_enabled ?? false) && (
+                <div className="pt-2 pl-6 space-y-2 border-t border-gray-200/60 dark:border-gray-700/60 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-gray-700 dark:text-gray-300">Max retry attempts:</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={10}
+                      value={appSettings?.auto_retry_capacity_max_attempts ?? 3}
+                      disabled={saving || !appSettings}
+                      onChange={(e) => void updateAutoRecovery({ auto_retry_capacity_max_attempts: Number(e.target.value) })}
+                      className="w-16 rounded border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-2 py-1 text-xs text-right"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-gray-700 dark:text-gray-300">Initial delay (seconds):</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={60}
+                      value={appSettings?.auto_retry_capacity_initial_delay_sec ?? 5}
+                      disabled={saving || !appSettings}
+                      onChange={(e) => void updateAutoRecovery({ auto_retry_capacity_initial_delay_sec: Number(e.target.value) })}
+                      className="w-16 rounded border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-2 py-1 text-xs text-right"
+                    />
+                  </div>
+                  <label className="flex items-center gap-2 cursor-pointer text-xs text-gray-700 dark:text-gray-300 pt-1">
+                    <input
+                      type="checkbox"
+                      checked={appSettings?.auto_retry_capacity_escalate_to_switch ?? false}
+                      disabled={saving || !appSettings}
+                      onChange={(e) => void updateAutoRecovery({ auto_retry_capacity_escalate_to_switch: e.target.checked })}
+                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                    />
+                    Escalate to account switch if retries continue failing
+                  </label>
+                </div>
+              )}
+            </div>
+
+            {/* Usage Limit Auto-Switch */}
+            <div className="rounded-xl border border-gray-200 dark:border-gray-800 p-3 space-y-2 bg-gray-50/50 dark:bg-gray-800/30">
+              <label className="flex items-center gap-2 cursor-pointer text-sm font-medium text-gray-900 dark:text-gray-100">
+                <input
+                  type="checkbox"
+                  checked={appSettings?.auto_switch_limit_enabled ?? false}
+                  disabled={saving || !appSettings}
+                  onChange={(e) => void updateAutoRecovery({ auto_switch_limit_enabled: e.target.checked })}
+                  className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                />
+                Auto-switch account on usage limit reached
+              </label>
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                When a session hits its usage limit, switches to an available account and continues the same conversation. CLI sessions resume in a terminal. On macOS and Linux, the desktop app closes and reopens around the switch; recovery waits while another turn is active.
+              </p>
+
+              {(appSettings?.auto_switch_limit_enabled ?? false) && (
+                <div className="pt-2 pl-6 space-y-3 border-t border-gray-200/60 dark:border-gray-700/60 text-xs">
+                  <div>
+                    <label className="block text-gray-700 dark:text-gray-300 mb-1">Switching Strategy:</label>
+                    <select
+                      value={appSettings?.auto_switch_strategy ?? "smart_balanced"}
+                      disabled={saving || !appSettings}
+                      onChange={(e) => void updateAutoRecovery({ auto_switch_strategy: e.target.value as AutoSwitchStrategy })}
+                      className={selectClassName}
+                    >
+                      <option value="smart_balanced">Smart Balanced (Banked Resets, Weekly Pacing & Expiring First)</option>
+                      <option value="resets_first">Banked Resets First</option>
+                      <option value="expiring_subscription_first">Expiring Subscription First</option>
+                      <option value="most_remaining_quota">Most Remaining Quota (Effective Capacity)</option>
+                      <option value="round_robin">Round Robin</option>
+                    </select>
+                  </div>
+
+                  <div className="pt-1">
+                    <label className="flex items-center gap-2 cursor-pointer font-medium text-gray-900 dark:text-gray-100">
+                      <input
+                        type="checkbox"
+                        checked={appSettings?.auto_redeem_reset_credits ?? false}
+                        disabled={saving || !appSettings}
+                        onChange={(e) => void updateAutoRecovery({ auto_redeem_reset_credits: e.target.checked })}
+                        className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                      />
+                      Auto-redeem banked reset credits before switching
+                    </label>
+                    <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5 pl-5">
+                      When the active account hits its limit, automatically consumes an available reset credit to restore 100% quota before switching accounts.
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Custom Resume Phrase & Warning Days */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label htmlFor="continue-phrase" className="block text-xs font-medium text-gray-900 dark:text-gray-100 mb-1">
+                  Resume Prompt Phrase
+                </label>
+                <input
+                  id="continue-phrase"
+                  type="text"
+                  placeholder="continue or продолжи"
+                  value={appSettings?.continue_phrase ?? "continue"}
+                  disabled={saving || !appSettings}
+                  onChange={(e) => void updateAutoRecovery({ continue_phrase: e.target.value })}
+                  className={inputClassName}
+                />
+                <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-1">
+                  Phrase sent to continue task (e.g. &apos;continue&apos; or &apos;продолжи&apos;).
+                </p>
+              </div>
+              <div>
+                <label htmlFor="reset-warning-days" className="block text-xs font-medium text-gray-900 dark:text-gray-100 mb-1">
+                  Reset Expiration Warning (days)
+                </label>
+                <input
+                  id="reset-warning-days"
+                  type="number"
+                  min={1}
+                  max={30}
+                  value={appSettings?.reset_credit_warning_days ?? 3}
+                  disabled={saving || !appSettings}
+                  onChange={(e) => void updateAutoRecovery({ reset_credit_warning_days: Number(e.target.value) })}
+                  className={inputClassName}
+                />
+                <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-1">
+                  Highlights reset credits in red when expiring within N days.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="border-t border-gray-100 dark:border-gray-800" />
+
           <label htmlFor="codex-close-preference" className="block text-sm font-medium text-gray-900 dark:text-gray-100">
             Codex close method
           </label>

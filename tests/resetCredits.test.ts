@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   formatResetCreditDateTime,
   getAvailableResetCredits,
+  getResetCreditsTone,
 } from "../src/lib/resetCredits.ts";
 import type { AccountResetCredit, AccountResetCredits } from "../src/types/index.ts";
 
@@ -67,3 +68,24 @@ test("missing and malformed expiry values remain visible", () => {
   assert.equal(formatResetCreditDateTime(null), "No expiry");
   assert.equal(formatResetCreditDateTime("not-a-date"), "Expiry unavailable");
 });
+
+test("reset credit tone highlights red according to configured warning days", () => {
+  const now = new Date("2026-09-19T12:00:00Z").getTime();
+  const dayMs = 24 * 60 * 60 * 1000;
+
+  // Credit expires in 4 days
+  const credits: AccountResetCredits = {
+    available_count: 1,
+    next_expires_at: new Date(now + 4 * dayMs).toISOString(),
+    credits: [],
+  };
+
+  // With default 3 days, 4 days is amber
+  const toneDefault = getResetCreditsTone(credits, 3, now);
+  assert.match(toneDefault.container, /border-amber/);
+
+  // With 5 days threshold, 4 days becomes red (urgent)
+  const toneUrgent = getResetCreditsTone(credits, 5, now);
+  assert.match(toneUrgent.container, /border-red/);
+});
+

@@ -497,11 +497,16 @@ fn find_codex_processes() -> anyhow::Result<(Vec<u32>, usize)> {
                 let bundle_identifier = read_macos_app_bundle_identifier(&command, process_name);
                 #[cfg(not(target_os = "macos"))]
                 let bundle_identifier: Option<String> = None;
+                #[cfg(target_os = "macos")]
                 let is_codex_desktop = is_macos_codex_desktop_process(
                     &command,
                     process_name,
                     bundle_identifier.as_deref(),
                 );
+                #[cfg(target_os = "linux")]
+                let is_codex_desktop = is_linux_codex_desktop_process(&command);
+                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                let is_codex_desktop = false;
 
                 if !is_codex_cli && !is_codex_desktop {
                     continue;
@@ -562,6 +567,19 @@ fn read_unix_process_names() -> HashMap<u32, String> {
 }
 
 #[cfg(unix)]
+pub(crate) fn is_linux_codex_desktop_process(command: &str) -> bool {
+    let cmd = command.trim().to_ascii_lowercase();
+    if cmd.contains("--type=") || cmd.contains("codex-switcher") {
+        return false;
+    }
+    let first = cmd.split_whitespace().next().unwrap_or("");
+    first.ends_with("/chatgpt")
+        || first.ends_with("/codex-desktop")
+        || first == "chatgpt"
+        || first == "codex-desktop"
+        || (cmd.starts_with('/') && (cmd.contains("/usr/lib/chatgpt/chatgpt") || cmd.contains("/usr/lib/codex/codex")))
+}
+
 fn is_macos_codex_desktop_process(
     command: &str,
     process_name: Option<&str>,
@@ -827,6 +845,17 @@ mod tests {
         classify_windows_codex_processes, is_windows_codex_root_process,
         parse_windows_codex_processes, WindowsCodexProcess,
     };
+
+    #[test]
+    fn detects_linux_codex_desktop_root_process() {
+        assert!(super::is_linux_codex_desktop_process("/usr/lib/chatgpt/ChatGPT"));
+        assert!(super::is_linux_codex_desktop_process("/usr/bin/codex-desktop"));
+        assert!(super::is_linux_codex_desktop_process("/usr/bin/chatgpt"));
+        assert!(!super::is_linux_codex_desktop_process("/usr/lib/chatgpt/ChatGPT --type=renderer"));
+        assert!(!super::is_linux_codex_desktop_process("/usr/lib/chatgpt/ChatGPT --type=gpu-process"));
+        assert!(!super::is_linux_codex_desktop_process("/home/bn/.nvm/versions/node/v24.18.0/bin/codex resume session-id"));
+        assert!(!super::is_linux_codex_desktop_process("codex-switcher"));
+    }
 
     fn windows_process(
         name: &str,
@@ -1166,6 +1195,24 @@ fn open_codex_app_blocking() -> Result<(), String> {
         }
 
         return Err("Codex app is not installed or could not be opened".to_string());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        for candidate in ["/usr/bin/codex-desktop", "/usr/bin/chatgpt", "/usr/lib/chatgpt/ChatGPT"] {
+            if std::path::Path::new(candidate).exists() {
+                if Command::new(candidate)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .is_ok()
+                {
+                    return Ok(());
+                }
+            }
+        }
+        return Err("Codex desktop is not installed or could not be opened".to_string());
     }
 
     #[cfg(windows)]

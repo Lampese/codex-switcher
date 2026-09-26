@@ -12,6 +12,8 @@ enum DesktopTarget {
     WindowsExecutable(String),
     #[cfg(any(windows, test))]
     WindowsAppId(String),
+    #[cfg(any(target_os = "linux", test))]
+    LinuxExecutable(String),
 }
 
 pub(super) struct CapturedDesktop {
@@ -43,7 +45,7 @@ pub async fn get_codex_reopen_info() -> Result<CodexReopenInfo, String> {
         let (pids, _) = super::find_codex_processes().map_err(|e| e.to_string())?;
         let desktops = capture_desktops(&pids)?;
         Ok(CodexReopenInfo {
-            supported: cfg!(any(target_os = "macos", windows)),
+            supported: cfg!(any(target_os = "macos", windows, target_os = "linux")),
             desktop_count: desktops.len(),
         })
     })
@@ -108,9 +110,41 @@ pub(super) fn capture_desktops(pids: &[u32]) -> Result<Vec<CapturedDesktop>, Str
         }
     }
 
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    {
+        for &pid in pids {
+            let output = super::Command::new("ps")
+                .args(["-p", &pid.to_string(), "-o", "command="])
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !output.status.success() {
+                continue;
+            }
+            let command = String::from_utf8_lossy(&output.stdout);
+            if super::is_linux_codex_desktop_process(command.trim()) {
+                let executable = linux_desktop_executable_path(command.trim());
+                desktops.push(CapturedDesktop {
+                    pid,
+                    target: DesktopTarget::LinuxExecutable(executable),
+                });
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     let _ = (pids, &mut desktops);
     Ok(desktops)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_desktop_executable_path(command: &str) -> String {
+    for candidate in ["/usr/bin/codex-desktop", "/usr/bin/chatgpt", "/usr/lib/chatgpt/ChatGPT"] {
+        if std::path::Path::new(candidate).exists() {
+            return candidate.to_string();
+        }
+    }
+    let first = command.split_whitespace().next().unwrap_or("chatgpt");
+    first.to_string()
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -324,6 +358,15 @@ fn launch_desktop(target: &DesktopTarget) -> bool {
                         "$ErrorActionPreference = 'Stop'; Start-Process ('shell:AppsFolder\\' + $env:CODEX_SWITCHER_REOPEN_APP_ID)"])
                     .env("CODEX_SWITCHER_REOPEN_APP_ID", id),
             )
+        }
+        #[cfg(target_os = "linux")]
+        DesktopTarget::LinuxExecutable(path) => {
+            super::Command::new(path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .is_ok()
         }
         #[allow(unreachable_patterns)]
         _ => false,
