@@ -12,6 +12,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::process::Stdio;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -526,17 +530,142 @@ async fn close_idle_desktop_for_cli(session: &ActiveCodexSession) -> Result<bool
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-async fn resume_desktop_after_handoff(token: String, session_id: &str, phrase: &str) -> Result<()> {
-    crate::commands::reopen_closed_codex_desktop(token)
-        .await
-        .map_err(anyhow::Error::msg)?;
-    for attempt in 0..10 {
-        if send_codex_queue_resume(session_id, phrase).await.is_ok() {
-            return Ok(());
+async fn app_server_response(
+    lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    id: u64,
+) -> Result<serde_json::Value> {
+    loop {
+        let line = tokio::time::timeout(Duration::from_secs(15), lines.next_line())
+            .await
+            .context("Codex app-server did not respond")?
+            .context("Could not read Codex app-server response")?
+            .context("Codex app-server exited before responding")?;
+        let value: serde_json::Value = serde_json::from_str(&line)?;
+        if value.get("id").and_then(|v| v.as_u64()) != Some(id) {
+            continue;
         }
-        tokio::time::sleep(Duration::from_secs(1 + attempt)).await;
+        if let Some(error) = value.get("error") {
+            anyhow::bail!("Codex app-server request failed: {error}");
+        }
+        return value.get("result").cloned().context("Codex app-server response has no result");
     }
-    anyhow::bail!("Codex desktop reopened, but the continuation message could not be queued")
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+async fn app_server_request(
+    stdin: &mut tokio::process::ChildStdin,
+    lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    id: u64,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value> {
+    let request = serde_json::json!({"id": id, "method": method, "params": params});
+    stdin.write_all(format!("{request}\n").as_bytes()).await?;
+    stdin.flush().await?;
+    app_server_response(lines, id).await
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+async fn resume_desktop_after_handoff(
+    token: String,
+    sessions: &[ActiveCodexSession],
+    settings: &AppSettings,
+) -> Result<Vec<String>> {
+    // The desktop app owns the writer locks while open. Start real turns on a
+    // temporary app-server after closing it, then reopen the desktop UI.
+    let mut child = tokio::process::Command::new(find_codex_binary())
+        .arg("app-server")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("Could not start Codex app-server for desktop continuation")?;
+    let mut stdin = child.stdin.take().context("Codex app-server has no stdin")?;
+    let stdout = child.stdout.take().context("Codex app-server has no stdout")?;
+    let mut lines = BufReader::new(stdout).lines();
+    let result: Result<Vec<String>> = async {
+        app_server_request(
+            &mut stdin,
+            &mut lines,
+            1,
+            "initialize",
+            serde_json::json!({"clientInfo":{"name":"codex-switcher","version":"0.2.20"}}),
+        )
+        .await?;
+        stdin.write_all(b"{\"method\":\"initialized\",\"params\":{}}\n").await?;
+        stdin.flush().await?;
+
+        let mut started = Vec::new();
+        for (index, session) in sessions.iter().enumerate() {
+            let id = 2 + index as u64 * 2;
+            if let Err(error) = app_server_request(
+                &mut stdin,
+                &mut lines,
+                id,
+                "thread/resume",
+                serde_json::json!({"threadId": session.session_id}),
+            )
+            .await {
+                eprintln!("[AutoRecovery] Could not resume desktop thread {}: {error}", session.session_id);
+                continue;
+            }
+            let phrase = resolve_session_resume_phrase(&session.session_id, &settings.continue_phrase);
+            if let Err(error) = app_server_request(
+                &mut stdin,
+                &mut lines,
+                id + 1,
+                "turn/start",
+                serde_json::json!({
+                    "threadId": session.session_id,
+                    "input": [{"type": "text", "text": phrase}],
+                }),
+            )
+            .await {
+                eprintln!("[AutoRecovery] Could not start continuation in {}: {error}", session.session_id);
+                continue;
+            }
+            started.push(session.session_id.clone());
+        }
+        if started.is_empty() {
+            anyhow::bail!("Codex could not start a continuation in any desktop session");
+        }
+        Ok(started)
+    }
+    .await;
+
+    // Keep the app-server and its writer locks alive until the turns finish.
+    if let Ok(started) = &result {
+        let remaining = started.len();
+        tokio::spawn(async move {
+            let _stdin = stdin;
+            let mut completed = 0;
+            let _ = tokio::time::timeout(Duration::from_secs(4 * 3600), async {
+                while completed < remaining {
+                    match lines.next_line().await {
+                        Ok(Some(line)) => {
+                            if serde_json::from_str::<serde_json::Value>(&line)
+                                .ok()
+                                .and_then(|value| value.get("method").and_then(|m| m.as_str()).map(str::to_owned))
+                                .as_deref() == Some("turn/completed")
+                            {
+                                completed += 1;
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+            }).await;
+            let _ = child.kill().await;
+        });
+    } else {
+        let _ = child.kill().await;
+    }
+
+    let reopened = crate::commands::reopen_closed_codex_desktop(token)
+        .await
+        .map_err(anyhow::Error::msg);
+    reopened?;
+    result
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1699,6 +1828,20 @@ async fn handle_account_switch_for_session(
         anyhow::bail!("No eligible fallback account found with available limits");
     };
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    let desktop_sessions = if session.is_desktop {
+        let mut affected: Vec<_> = find_active_sessions()?.into_iter()
+            .filter(|candidate| candidate.is_desktop && candidate.last_error.as_ref()
+                .is_some_and(|error| error.kind == SessionErrorKind::UsageLimitExceeded))
+            .collect();
+        if !affected.iter().any(|candidate| candidate.session_id == session.session_id) {
+            affected.push(session.clone());
+        }
+        affected
+    } else {
+        Vec::new()
+    };
+
     let desktop_reopen_token: Option<String> = if session.is_desktop {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         { Some(close_desktop_for_handoff(&session.session_id).await?) }
@@ -1757,15 +1900,21 @@ async fn handle_account_switch_for_session(
     if let Some(token) = desktop_reopen_token {
         if let Ok(mut tracker) = TRACKER.lock() {
             tracker.last_account_switch = Some((Instant::now(), target.id.clone(), false));
-            let turn_key = session.last_error.as_ref().and_then(|e| e.turn_id.clone())
-                .unwrap_or_else(|| "default".to_string());
-            tracker.handled_usage_limits.insert(session.session_id.clone(), turn_key);
         }
-        resume_desktop_after_handoff(token, &session.session_id, &phrase).await?;
+        let started = resume_desktop_after_handoff(token, &desktop_sessions, settings).await?;
+        if let Ok(mut tracker) = TRACKER.lock() {
+            for recovered in &desktop_sessions {
+                if started.contains(&recovered.session_id) {
+                    let turn_key = recovered.last_error.as_ref().and_then(|e| e.turn_id.clone())
+                        .unwrap_or_else(|| "default".to_string());
+                    tracker.handled_usage_limits.insert(recovered.session_id.clone(), turn_key);
+                }
+            }
+        }
         let notification = RecoveryEventNotification {
             event_type: "account_switched".to_string(),
             session_id: session.session_id.clone(),
-            message: format!("Switched to '{}' and queued '{}' in the desktop session", target.name, phrase),
+            message: format!("Switched to '{}' and started continuations in {} desktop sessions", target.name, started.len()),
             timestamp: Utc::now(),
         };
         if let Ok(mut tracker) = TRACKER.lock() {
@@ -1916,6 +2065,15 @@ pub async fn launch_codex_session(
 #[tauri::command]
 pub fn get_app_settings() -> Result<AppSettings, String> {
     load_app_settings().map_err(|e| e.to_string())
+}
+
+/// Toggle limit recovery without overwriting the other auto-recovery settings.
+#[tauri::command]
+pub fn set_auto_switch_limit_enabled(enabled: bool) -> Result<AppSettings, String> {
+    let mut settings = load_app_settings().map_err(|e| e.to_string())?;
+    settings.auto_switch_limit_enabled = enabled;
+    save_app_settings(&settings).map_err(|e| e.to_string())?;
+    Ok(settings)
 }
 
 /// Save auto-recovery configuration

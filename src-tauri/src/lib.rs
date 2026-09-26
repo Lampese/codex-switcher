@@ -113,6 +113,7 @@ pub fn run() {
             commands::reopen_closed_codex_desktop,
             // Auto Recovery & Session Automation
             commands::get_app_settings,
+            commands::set_auto_switch_limit_enabled,
             commands::get_auto_recovery_status,
             commands::trigger_auto_recovery_check,
             commands::launch_codex_session,
