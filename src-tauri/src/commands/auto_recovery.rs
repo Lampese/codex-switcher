@@ -540,7 +540,9 @@ async fn app_server_response(
             .context("Codex app-server did not respond")?
             .context("Could not read Codex app-server response")?
             .context("Codex app-server exited before responding")?;
-        let value: serde_json::Value = serde_json::from_str(&line)?;
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
         if value.get("id").and_then(|v| v.as_u64()) != Some(id) {
             continue;
         }
@@ -589,7 +591,7 @@ async fn resume_desktop_after_handoff(
             &mut lines,
             1,
             "initialize",
-            serde_json::json!({"clientInfo":{"name":"codex-switcher","version":"0.2.20"}}),
+            serde_json::json!({"clientInfo":{"name":"codex-switcher","version":env!("CARGO_PKG_VERSION")}}),
         )
         .await?;
         stdin.write_all(b"{\"method\":\"initialized\",\"params\":{}}\n").await?;

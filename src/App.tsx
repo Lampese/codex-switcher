@@ -1455,7 +1455,7 @@ function App() {
                 onClick={() => {
                   void appWindow.close();
                 }}
-                className="flex h-8 w-8 items-center justify-center rounded-md text-red-600 transition-colors hover:bg-red-500 hover:text-white dark:text-red-400 dark:hover:bg-red-500 dark:hover:text-white"
+                className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-red-500 hover:text-white dark:text-gray-400 dark:hover:bg-red-500 dark:hover:text-white"
                 title="Close"
               >
                 <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
