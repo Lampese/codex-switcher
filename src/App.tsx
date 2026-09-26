@@ -1488,10 +1488,21 @@ function App() {
                     }`}
                     title="Switch accounts automatically when the active account reaches its usage limit"
                   >
-                    <span className={`relative h-3.5 w-6 rounded-full ${appSettings?.auto_switch_limit_enabled ? "bg-emerald-500" : "bg-gray-400"}`} aria-hidden="true">
-                      <span className={`absolute top-0.5 h-2.5 w-2.5 rounded-full bg-white transition-transform ${appSettings?.auto_switch_limit_enabled ? "translate-x-3" : "translate-x-0.5"}`} />
+                    <span
+                      className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors ${
+                        appSettings?.auto_switch_limit_enabled ? "bg-emerald-500" : "bg-gray-400 dark:bg-gray-600"
+                      }`}
+                      aria-hidden="true"
+                    >
+                      <span
+                        className={`inline-block h-3 w-3 rounded-full bg-white shadow transition-transform ${
+                          appSettings?.auto_switch_limit_enabled ? "translate-x-3.5" : "translate-x-0.5"
+                        }`}
+                      />
                     </span>
-                    Auto-switch {appSettings ? (appSettings.auto_switch_limit_enabled ? "On" : "Off") : "…"}
+                    <span className="select-none">
+                      Auto-switch {appSettings ? (appSettings.auto_switch_limit_enabled ? "On" : "Off") : "…"}
+                    </span>
                   </button>}
                   {processInfo && (
                     <div className="inline-flex items-center gap-1">

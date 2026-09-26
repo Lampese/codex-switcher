@@ -88,8 +88,8 @@ struct SessionTrackerState {
     managed_pids: Vec<u32>,
     /// Last recovery event notification
     last_event: Option<RecoveryEventNotification>,
-    /// Last account switch timestamp and target account ID (to prevent cascading switches across multiple active sessions)
-    last_account_switch: Option<(Instant, String, bool)>,
+    /// Last account switch timestamp, target account ID, was_reset_credit, and the session_id that triggered it
+    last_account_switch: Option<(Instant, String, bool, String)>,
 }
 
 static TRACKER: std::sync::LazyLock<Mutex<SessionTrackerState>> =
@@ -130,10 +130,14 @@ fn macos_resume_command(
     let cwd = escape_shell_arg(&cwd.to_string_lossy());
     let binary = escape_shell_arg(&codex_bin.to_string_lossy());
     let session = escape_shell_arg(session_id);
-    let phrase = escape_shell_arg(phrase);
+    let phrase_arg = if phrase == "/goal resume" || phrase.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", escape_shell_arg(phrase))
+    };
     let restart = escape_shell_arg(&restart_file.to_string_lossy());
     format!(
-        "cd {cwd} && while true; do {binary} resume {session} {phrase}; if [ -f {restart} ]; then rm -f {restart}; sleep 1; continue; fi; break; done; exit"
+        "cd {cwd} && while true; do {binary} resume {session}{phrase_arg}; if [ -f {restart} ]; then rm -f {restart}; sleep 1; continue; fi; break; done; exit"
     )
 }
 
@@ -415,16 +419,23 @@ fn find_pid_for_session(session_id: &str, file_path: &Path) -> Option<u32> {
 }
 
 fn is_supported_cli_command(command: &str) -> bool {
-    let command = command.trim().to_ascii_lowercase();
-    !command.is_empty()
-        && command.contains("codex")
-        && !command.contains("codex-switcher")
-        && !command.contains("app-server")
-        && !command.contains("exec-server")
-        && !command.contains("chatgpt.app")
-        && !command.contains("codex.app")
-        && !command.contains("/usr/lib/chatgpt")
-        && !command.contains("/usr/lib/codex")
+    let command = command.trim();
+    if command.is_empty() {
+        return false;
+    }
+    let lowercase_command = command.to_ascii_lowercase();
+    if lowercase_command.contains("codex-switcher")
+        || lowercase_command.contains("app-server")
+        || lowercase_command.contains("exec-server")
+        || lowercase_command.contains("chatgpt.app")
+        || lowercase_command.contains("codex.app")
+        || lowercase_command.contains("/usr/lib/chatgpt")
+        || lowercase_command.contains("/usr/lib/codex")
+    {
+        return false;
+    }
+    let first = lowercase_command.split_whitespace().next().unwrap_or("");
+    first == "codex" || first.ends_with("/codex")
 }
 
 fn rollout_has_active_turn(path: &Path) -> Result<bool> {
@@ -491,15 +502,36 @@ async fn close_desktop_for_handoff(session_id: &str) -> Result<String> {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+fn is_same_or_related_cli_pid(pid1: u32, pid2: u32) -> bool {
+    if pid1 == pid2 {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let get_ppid = |p: u32| -> Option<u32> {
+            let stat = fs::read_to_string(format!("/proc/{p}/stat")).ok()?;
+            stat.split_whitespace().nth(3)?.parse().ok()
+        };
+        if get_ppid(pid1) == Some(pid2) || get_ppid(pid2) == Some(pid1) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn close_idle_desktop_for_cli(session: &ActiveCodexSession) -> Result<bool> {
     let processes = crate::commands::process::check_codex_processes()
         .await
         .map_err(anyhow::Error::msg)?;
-    if processes.pids == vec![session.pid] {
+    let only_this_cli = processes.pids == vec![session.pid]
+        || (processes.pids.len() == 1 && is_same_or_related_cli_pid(processes.pids[0], session.pid));
+    if only_this_cli {
         return Ok(false);
     }
     desktop_handoff_is_exclusive(&session.session_id)?;
-    if processes.pids.len() != 2 || !processes.pids.contains(&session.pid)
+    let contains_session = processes.pids.iter().any(|&p| is_same_or_related_cli_pid(p, session.pid));
+    if processes.pids.len() != 2 || !contains_session
         || !processes.pids.iter().copied().any(|pid| pid != session.pid && is_desktop_root_pid(pid)) {
         anyhow::bail!("Another Codex process is running; deferring CLI account handoff");
     }
@@ -575,7 +607,9 @@ async fn resume_desktop_after_handoff(
 ) -> Result<Vec<String>> {
     // The desktop app owns the writer locks while open. Start real turns on a
     // temporary app-server after closing it, then reopen the desktop UI.
-    let mut child = tokio::process::Command::new(find_codex_binary())
+    let mut app_server_cmd = tokio::process::Command::new(find_codex_binary());
+    app_server_cmd.env_remove("LD_LIBRARY_PATH");
+    let mut child = app_server_cmd
         .arg("app-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1178,6 +1212,50 @@ pub fn is_session_goal_active_in_db(db_path: &Path, session_id: &str) -> bool {
     }
 }
 
+/// Reset goal status in goals SQLite database to 'active' so Codex CLI immediately
+/// continues autonomous execution upon resume.
+pub fn activate_session_goal(session_id: &str) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let codex_dir = home.join(".codex");
+    let primary_db = codex_dir.join("goals_1.sqlite");
+
+    let mut updated = false;
+    if primary_db.exists() && activate_session_goal_in_db(&primary_db, session_id) {
+        updated = true;
+    }
+
+    if let Ok(entries) = fs::read_dir(&codex_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                if file_name.starts_with("goals_") && file_name.ends_with(".sqlite") && path != primary_db {
+                    if activate_session_goal_in_db(&path, session_id) {
+                        updated = true;
+                    }
+                }
+            }
+        }
+    }
+
+    updated
+}
+
+pub fn activate_session_goal_in_db(db_path: &Path, session_id: &str) -> bool {
+    let conn = match rusqlite::Connection::open(db_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let query = "UPDATE thread_goals SET status = 'active', updated_at_ms = ?1 WHERE thread_id = ?2 AND status IN ('usage_limited', 'paused')";
+    match conn.execute(query, rusqlite::params![now_ms, session_id]) {
+        Ok(rows) => rows > 0,
+        Err(_) => false,
+    }
+}
+
 /// Resolve the resume phrase for a session:
 /// If the session has an active/unfinished goal, returns "/goal resume".
 /// Otherwise, returns the user-configured continue phrase (defaulting to "continue" if blank).
@@ -1198,6 +1276,7 @@ pub fn resolve_session_resume_phrase(session_id: &str, user_continue_phrase: &st
 pub async fn send_codex_queue_resume(session_id: &str, phrase: &str) -> Result<()> {
     let codex_bin = find_codex_binary();
     let mut command = Command::new(codex_bin);
+    command.env_remove("LD_LIBRARY_PATH");
     command.args(["queue", "--thread", session_id, "--message", phrase]);
 
     #[cfg(windows)]
@@ -1227,6 +1306,22 @@ pub fn terminate_process(pid: u32) {
     }
     #[cfg(unix)]
     {
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+                if let Some(ppid_str) = stat.split_whitespace().nth(3) {
+                    if let Ok(ppid) = ppid_str.parse::<u32>() {
+                        if ppid > 1 {
+                            if let Ok(cmd) = fs::read_to_string(format!("/proc/{ppid}/cmdline")) {
+                                if cmd.contains("node") && cmd.contains("codex") {
+                                    let _ = Command::new("kill").args(["-TERM", &ppid.to_string()]).status();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
         std::thread::sleep(Duration::from_millis(300));
         let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
@@ -1241,7 +1336,9 @@ pub fn terminate_process(pid: u32) {
 pub fn send_desktop_notification(title: &str, body: &str) {
     #[cfg(target_os = "linux")]
     {
-        let _ = Command::new("notify-send")
+        let mut cmd = Command::new("notify-send");
+        cmd.env_remove("LD_LIBRARY_PATH");
+        let _ = cmd
             .args(["-a", "Codex Switcher", "-i", "dialog-information", title, body])
             .spawn();
     }
@@ -1263,24 +1360,32 @@ fn focus_terminal_window(pid: u32) {
         std::thread::sleep(Duration::from_millis(500));
 
         // 1. Try wmctrl by matching PID
-        if let Ok(output) = Command::new("wmctrl").args(["-l", "-p"]).output() {
+        let mut wmctrl_cmd = Command::new("wmctrl");
+        wmctrl_cmd.env_remove("LD_LIBRARY_PATH");
+        if let Ok(output) = wmctrl_cmd.args(["-l", "-p"]).output() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             for line in stdout.lines() {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() >= 3 && parts[2] == pid.to_string() {
                     let win_id = parts[0];
-                    let _ = Command::new("wmctrl").args(["-i", "-a", win_id]).status();
+                    let mut act_cmd = Command::new("wmctrl");
+                    act_cmd.env_remove("LD_LIBRARY_PATH");
+                    let _ = act_cmd.args(["-i", "-a", win_id]).status();
                     return;
                 }
             }
         }
 
         // 2. Fallback: try xdotool by PID
-        if let Ok(output) = Command::new("xdotool").args(["search", "--pid", &pid.to_string()]).output() {
+        let mut xdotool_cmd = Command::new("xdotool");
+        xdotool_cmd.env_remove("LD_LIBRARY_PATH");
+        if let Ok(output) = xdotool_cmd.args(["search", "--pid", &pid.to_string()]).output() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if let Some(win_id) = stdout.lines().last() {
                 if !win_id.trim().is_empty() {
-                    let _ = Command::new("xdotool").args(["windowactivate", win_id.trim()]).status();
+                    let mut act_cmd = Command::new("xdotool");
+                    act_cmd.env_remove("LD_LIBRARY_PATH");
+                    let _ = act_cmd.args(["windowactivate", win_id.trim()]).status();
                 }
             }
         }
@@ -1308,15 +1413,12 @@ pub fn launch_session_in_terminal(
     // Check preferred or detected terminal
     #[cfg(target_os = "linux")]
     {
-        let terminal = preferred_terminal
-            .and_then(which_cmd)
-            .or_else(|| which_cmd("ghostty"))
-            .or_else(|| which_cmd("alacritty"))
-            .or_else(|| which_cmd("kitty"))
-            .or_else(|| which_cmd("gnome-terminal"))
-            .or_else(|| which_cmd("x-terminal-emulator"));
-
         let runner_script = r#"
+unset LD_LIBRARY_PATH
+unset LIBGL_ALWAYS_SOFTWARE
+unset GALLIUM_DRIVER
+unset WEBKIT_DISABLE_DMABUF_RENDERER
+
 CODEX_BIN="$1"
 SESSION_ID="$2"
 CURRENT_PHRASE="$3"
@@ -1325,9 +1427,17 @@ SESSION_CWD="$5"
 
 while true; do
     if [ -n "$SESSION_CWD" ] && [ -d "$SESSION_CWD" ]; then
-        "$CODEX_BIN" resume -C "$SESSION_CWD" "$SESSION_ID" "$CURRENT_PHRASE"
+        if [ "$CURRENT_PHRASE" = "/goal resume" ] || [ -z "$CURRENT_PHRASE" ]; then
+            "$CODEX_BIN" resume -C "$SESSION_CWD" "$SESSION_ID"
+        else
+            "$CODEX_BIN" resume -C "$SESSION_CWD" "$SESSION_ID" "$CURRENT_PHRASE"
+        fi
     else
-        "$CODEX_BIN" resume "$SESSION_ID" "$CURRENT_PHRASE"
+        if [ "$CURRENT_PHRASE" = "/goal resume" ] || [ -z "$CURRENT_PHRASE" ]; then
+            "$CODEX_BIN" resume "$SESSION_ID"
+        else
+            "$CODEX_BIN" resume "$SESSION_ID" "$CURRENT_PHRASE"
+        fi
     fi
     if [ -f "$RESTART_FILE" ]; then
         if [ -s "$RESTART_FILE" ]; then
@@ -1347,25 +1457,44 @@ done
 exec $SHELL
 "#;
 
-        if let Some(term_path) = terminal {
+        let mut candidates = Vec::new();
+        if let Some(preferred) = preferred_terminal.and_then(which_cmd) {
+            candidates.push(preferred);
+        }
+        for name in &["ghostty", "alacritty", "kitty", "gnome-terminal", "x-terminal-emulator"] {
+            if let Some(p) = which_cmd(name) {
+                if !candidates.contains(&p) {
+                    candidates.push(p);
+                }
+            }
+        }
+
+        let cwd_arg = cwd.unwrap_or("");
+        let args_bundle = [
+            "sh",
+            "-c",
+            runner_script,
+            "sh",
+            &codex_bin.to_string_lossy(),
+            session_id,
+            phrase,
+            &restart_file_str,
+            cwd_arg,
+        ];
+
+        for term_path in candidates {
             let term_name = term_path.file_name().unwrap_or_default().to_string_lossy();
             let mut cmd = Command::new(&term_path);
 
-            let cwd_arg = cwd.unwrap_or("");
-            let args_bundle = [
-                "sh",
-                "-c",
-                runner_script,
-                "sh",
-                &codex_bin.to_string_lossy(),
-                session_id,
-                phrase,
-                &restart_file_str,
-                cwd_arg,
-            ];
+            // Strip AppImage runtime and software rendering workarounds so host binaries link against system libs
+            cmd.env_remove("LD_LIBRARY_PATH");
+            cmd.env_remove("LIBGL_ALWAYS_SOFTWARE");
+            cmd.env_remove("GALLIUM_DRIVER");
+            cmd.env_remove("WEBKIT_DISABLE_DMABUF_RENDERER");
 
             if term_name.contains("ghostty") {
-                cmd.arg(format!("--working-directory={}", default_cwd.display()))
+                cmd.arg("--gtk-single-instance=false")
+                    .arg(format!("--working-directory={}", default_cwd.display()))
                     .arg("-e")
                     .args(args_bundle);
             } else if term_name.contains("kitty") {
@@ -1387,13 +1516,27 @@ exec $SHELL
                     .args(args_bundle);
             }
 
-            let child = cmd.spawn().context("Failed to spawn terminal")?;
-            let pid = child.id();
-            focus_terminal_window(pid);
-            if let Ok(mut state) = TRACKER.lock() {
-                state.managed_pids.push(pid);
+            match cmd.spawn() {
+                Ok(mut child) => {
+                    let pid = child.id();
+                    // Give process a small moment to ensure it doesn't immediately crash
+                    std::thread::sleep(Duration::from_millis(150));
+                    if let Ok(Some(status)) = child.try_wait() {
+                        if !status.success() {
+                            eprintln!("[AutoRecovery] Terminal {term_name} exited immediately with status {status}, trying next fallback...");
+                            continue;
+                        }
+                    }
+                    focus_terminal_window(pid);
+                    if let Ok(mut state) = TRACKER.lock() {
+                        state.managed_pids.push(pid);
+                    }
+                    return Ok(pid);
+                }
+                Err(e) => {
+                    eprintln!("[AutoRecovery] Failed to spawn {term_name}: {e}, trying next fallback...");
+                }
             }
-            return Ok(pid);
         }
     }
 
@@ -1417,11 +1560,16 @@ exec $SHELL
 
     #[cfg(windows)]
     {
+        let phrase_arg = if phrase == "/goal resume" || phrase.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", escape_shell_arg(phrase))
+        };
         let codex_cmd = format!(
-            "{} resume {} {}",
+            "{} resume {}{}",
             escape_shell_arg(&codex_bin.to_string_lossy()),
             escape_shell_arg(session_id),
-            escape_shell_arg(phrase)
+            phrase_arg
         );
         use std::os::windows::process::CommandExt;
         let mut cmd = Command::new("cmd.exe");
@@ -1582,15 +1730,27 @@ async fn handle_account_switch_for_session(
         tracker.last_account_switch.clone()
     };
 
-    if let Some((switch_time, target_id, was_reset_credit)) = recent_switch {
+    if let Some((switch_time, target_id, was_reset_credit, switched_session_id)) = recent_switch {
         if switch_time.elapsed() < Duration::from_secs(20) {
+            // Anti-cascade: If this is the exact same session that just triggered the switch,
+            // its rollout might still show the previous turn error while the new turn boots up.
+            // Do NOT re-terminate or restart it!
+            if switched_session_id == session.session_id {
+                return Ok(None);
+            }
+
             let phrase = resolve_session_resume_phrase(&session.session_id, &settings.continue_phrase);
+            let is_goal = is_session_goal_active(&session.session_id);
 
             // If the account was NOT changed (for example, limits were restored via reset credit on the same account),
             // we do NOT need to terminate the process or launch a new terminal! The credentials in memory are still valid.
             // We just queue the continue phrase to the existing running session.
             if was_reset_credit || session.is_desktop {
-                send_codex_queue_resume(&session.session_id, &phrase).await?;
+                if is_goal {
+                    activate_session_goal(&session.session_id);
+                } else {
+                    send_codex_queue_resume(&session.session_id, &phrase).await?;
+                }
 
                 if let Ok(mut tracker) = TRACKER.lock() {
                     let turn_key = session
@@ -1628,6 +1788,10 @@ async fn handle_account_switch_for_session(
                 terminate_process(session.pid);
             }
 
+            if is_goal {
+                activate_session_goal(&session.session_id);
+            }
+
             // Wait briefly to see if an existing terminal runner consumed the restart file
             let mut consumed = false;
             for _ in 0..12 {
@@ -1646,6 +1810,20 @@ async fn handle_account_switch_for_session(
                     &phrase,
                     settings.preferred_terminal.as_deref(),
                 );
+            }
+
+            if !is_goal {
+                let session_id_clone = session.session_id.clone();
+                let phrase_clone = phrase.clone();
+                tokio::spawn(async move {
+                    for attempt in 0..10 {
+                        tokio::time::sleep(Duration::from_millis(800 + attempt * 400)).await;
+                        if send_codex_queue_resume(&session_id_clone, &phrase_clone).await.is_ok() {
+                            println!("[AutoRecovery] Successfully queued '{phrase_clone}' to resumed session {session_id_clone}");
+                            break;
+                        }
+                    }
+                });
             }
 
             send_desktop_notification(
@@ -1727,11 +1905,13 @@ async fn handle_account_switch_for_session(
                                 );
 
                                 let phrase = resolve_session_resume_phrase(&session.session_id, &settings.continue_phrase);
+                                let is_goal = is_session_goal_active(&session.session_id);
 
-                                // Resume existing session in-place via codex queue.
-                                // IMPORTANT: Do NOT terminate the process and do NOT launch a new terminal!
-                                // The credentials in memory are still valid, and limits are restored at OpenAI.
-                                let _ = send_codex_queue_resume(&session.session_id, &phrase).await;
+                                if is_goal {
+                                    activate_session_goal(&session.session_id);
+                                } else {
+                                    let _ = send_codex_queue_resume(&session.session_id, &phrase).await;
+                                }
 
                                 send_desktop_notification(
                                     "Reset Credit Redeemed",
@@ -1752,7 +1932,7 @@ async fn handle_account_switch_for_session(
                                         .insert(session.session_id.clone(), turn_key);
                                     // Update last_account_switch with curr_acc.id so other concurrent sessions
                                     // don't immediately trigger a cascade switch to another account!
-                                    tracker.last_account_switch = Some((Instant::now(), curr_acc.id.clone(), true));
+                                    tracker.last_account_switch = Some((Instant::now(), curr_acc.id.clone(), true, session.session_id.clone()));
                                 }
 
                                 let notification = RecoveryEventNotification {
@@ -1879,6 +2059,7 @@ async fn handle_account_switch_for_session(
         updated_store = load_accounts()?;
         updated_store.active_account_id = Some(target.id.clone());
         save_accounts(&updated_store)?;
+        crate::commands::account::restart_codex_background_services();
         Ok(target)
     }.await;
     let target = match switch_result {
@@ -1901,7 +2082,7 @@ async fn handle_account_switch_for_session(
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     if let Some(token) = desktop_reopen_token {
         if let Ok(mut tracker) = TRACKER.lock() {
-            tracker.last_account_switch = Some((Instant::now(), target.id.clone(), false));
+            tracker.last_account_switch = Some((Instant::now(), target.id.clone(), false, session.session_id.clone()));
         }
         let started = resume_desktop_after_handoff(token, &desktop_sessions, settings).await?;
         if let Ok(mut tracker) = TRACKER.lock() {
@@ -1932,6 +2113,8 @@ async fn handle_account_switch_for_session(
         }
     }
 
+    let is_goal = is_session_goal_active(&session.session_id);
+
     let restart_file = std::env::temp_dir()
         .join(format!("codex-switcher-restart-{}", session.session_id));
     let _ = fs::write(&restart_file, &phrase);
@@ -1942,6 +2125,10 @@ async fn handle_account_switch_for_session(
     // so the new process initializes fresh AuthManager from the newly written auth.json.
     if session.pid > 0 {
         terminate_process(session.pid);
+    }
+
+    if is_goal {
+        activate_session_goal(&session.session_id);
     }
 
     // Check if an existing terminal runner consumed the restart file
@@ -1964,6 +2151,20 @@ async fn handle_account_switch_for_session(
         );
     }
 
+    if !is_goal {
+        let session_id_clone = session.session_id.clone();
+        let phrase_clone = phrase.clone();
+        tokio::spawn(async move {
+            for attempt in 0..10 {
+                tokio::time::sleep(Duration::from_millis(800 + attempt * 400)).await;
+                if send_codex_queue_resume(&session_id_clone, &phrase_clone).await.is_ok() {
+                    println!("[AutoRecovery] Successfully queued '{phrase_clone}' to resumed session {session_id_clone}");
+                    break;
+                }
+            }
+        });
+    }
+
     send_desktop_notification(
         "Codex Account Switched",
         &format!("Switched to '{}'. Resuming session...", target.name),
@@ -1979,7 +2180,7 @@ async fn handle_account_switch_for_session(
         tracker
             .handled_usage_limits
             .insert(session.session_id.clone(), turn_key);
-        tracker.last_account_switch = Some((Instant::now(), target.id.clone(), false));
+        tracker.last_account_switch = Some((Instant::now(), target.id.clone(), false, session.session_id.clone()));
     }
 
     let notification = RecoveryEventNotification {
@@ -3320,6 +3521,51 @@ mod tests {
             resolve_session_resume_phrase("", "продолжи"),
             "продолжи"
         );
+    }
+
+    #[test]
+    fn test_activate_session_goal_in_db() {
+        let temp_dir = std::env::temp_dir().join(format!("test_goal_act_{}", uuid::Uuid::new_v4()));
+        let _ = fs::create_dir_all(&temp_dir);
+        let db_path = temp_dir.join("goals_1.sqlite");
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE thread_goals (
+                thread_id TEXT PRIMARY KEY NOT NULL,
+                goal_id TEXT NOT NULL,
+                objective TEXT NOT NULL,
+                status TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO thread_goals (thread_id, goal_id, objective, status, updated_at_ms) VALUES
+                ('thread_paused', 'g2', 'obj2', 'paused', 100),
+                ('thread_usage_limited', 'g3', 'obj3', 'usage_limited', 200),
+                ('thread_complete', 'g5', 'obj5', 'complete', 300);",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert!(activate_session_goal_in_db(&db_path, "thread_usage_limited"));
+        assert!(activate_session_goal_in_db(&db_path, "thread_paused"));
+        assert!(!activate_session_goal_in_db(&db_path, "thread_complete"));
+        assert!(!activate_session_goal_in_db(&db_path, "non_existent"));
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let status1: String = conn.query_row("SELECT status FROM thread_goals WHERE thread_id = 'thread_usage_limited'", [], |r| r.get(0)).unwrap();
+        let status2: String = conn.query_row("SELECT status FROM thread_goals WHERE thread_id = 'thread_paused'", [], |r| r.get(0)).unwrap();
+        let status3: String = conn.query_row("SELECT status FROM thread_goals WHERE thread_id = 'thread_complete'", [], |r| r.get(0)).unwrap();
+        assert_eq!(status1, "active");
+        assert_eq!(status2, "active");
+        assert_eq!(status3, "complete");
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 
 }
