@@ -220,17 +220,6 @@ pub fn find_active_sessions() -> Result<Vec<ActiveCodexSession>> {
             continue;
         }
 
-        // Determine PID holding or associated with this session
-        let cli_pid = find_pid_for_session(&session_id, &path);
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
-        let desktop_pid = find_desktop_pid_for_session(&path);
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        let desktop_pid: Option<u32> = None;
-        let is_desktop = cli_pid.is_none() && desktop_pid.is_some();
-        let pid = cli_pid.or(desktop_pid).unwrap_or(0);
-        if pid == 0 {
-            continue;
-        }
         let rollout_path = locate_rollout_file(&home, &session_id);
 
         // Inspect rollout metadata: if this is a subagent (child thread of another session),
@@ -243,10 +232,23 @@ pub fn find_active_sessions() -> Result<Vec<ActiveCodexSession>> {
             }
         }
 
+        let session_cwd = rollout_meta.as_ref().and_then(|m| m.cwd.as_deref());
+
+        // Determine PID holding or associated with this session
+        let cli_pid = find_pid_for_session(&session_id, &path, session_cwd);
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        let desktop_pid = find_desktop_pid_for_session(&path);
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let desktop_pid: Option<u32> = None;
+        let is_desktop = cli_pid.is_none() && desktop_pid.is_some();
+        let pid = cli_pid.or(desktop_pid).unwrap_or(0);
+        if pid == 0 {
+            continue;
+        }
+
         // Canonical working directory: prefer rollout metadata, fallback to process cwd
-        let cwd = rollout_meta
-            .as_ref()
-            .and_then(|m| m.cwd.clone())
+        let cwd = session_cwd
+            .map(|s| s.to_string())
             .or_else(|| if pid > 0 { get_process_cwd(pid) } else { None });
 
         let is_managed = pid > 0 && managed_pids.contains(&pid);
@@ -371,11 +373,11 @@ pub fn locate_rollout_file(codex_home: &Path, session_id: &str) -> Option<PathBu
     None
 }
 
-/// Find PID associated with a session ID via /proc or lsof
-fn find_pid_for_session(session_id: &str, file_path: &Path) -> Option<u32> {
+/// Find PID associated with a session ID via /proc, lsof, or working directory
+fn find_pid_for_session(session_id: &str, file_path: &Path, session_cwd: Option<&str>) -> Option<u32> {
     #[cfg(target_os = "linux")]
     {
-        // Check /proc/[pid]/cmdline for session ID without needing root permissions
+        // 1. Check /proc/[pid]/cmdline for session ID without needing root permissions
         if let Ok(entries) = fs::read_dir("/proc") {
             for entry in entries.filter_map(Result::ok) {
                 let name = entry.file_name();
@@ -396,6 +398,7 @@ fn find_pid_for_session(session_id: &str, file_path: &Path) -> Option<u32> {
 
     #[cfg(unix)]
     {
+        // 2. Check lsof on lock file directly
         if let Ok(output) = Command::new("lsof").arg("-t").arg(file_path).output() {
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -408,6 +411,68 @@ fn find_pid_for_session(session_id: &str, file_path: &Path) -> Option<u32> {
                             && is_supported_cli_command(&String::from_utf8_lossy(&output.stdout))
                         {
                             return Some(pid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Fallback: If lock is held (e.g. by app-server daemon) but no direct CLI pid was matched,
+    // match an active CLI process by its working directory (cwd).
+    if let Some(target_cwd) = session_cwd {
+        if let Some(pid) = find_cli_pid_by_cwd(target_cwd) {
+            return Some(pid);
+        }
+    }
+
+    None
+}
+
+fn find_cli_pid_by_cwd(target_cwd: &str) -> Option<u32> {
+    let target_path = fs::canonicalize(target_cwd).unwrap_or_else(|_| PathBuf::from(target_cwd));
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(entries) = fs::read_dir("/proc") {
+            for entry in entries.filter_map(Result::ok) {
+                let name = entry.file_name();
+                let Ok(pid) = name.to_string_lossy().parse::<u32>() else { continue };
+                let cmdline_path = entry.path().join("cmdline");
+                let Ok(cmdline_bytes) = fs::read(&cmdline_path) else { continue };
+                let cmdline = String::from_utf8_lossy(&cmdline_bytes);
+                if !is_supported_cli_command(&cmdline.replace('\0', " ")) {
+                    continue;
+                }
+                let Ok(dest) = fs::read_link(format!("/proc/{pid}/cwd")) else { continue };
+                let proc_path = fs::canonicalize(&dest).unwrap_or(dest);
+                if proc_path == target_path {
+                    return Some(pid);
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        #[cfg(not(target_os = "linux"))]
+        {
+            if let Ok(output) = Command::new("ps").args(["-axo", "pid=,command="]).output() {
+                if output.status.success() {
+                    for line in String::from_utf8_lossy(&output.stdout).lines() {
+                        let line = line.trim();
+                        let mut parts = line.split_whitespace();
+                        let Some(pid_str) = parts.next() else { continue };
+                        let command = parts.collect::<Vec<_>>().join(" ");
+                        let Ok(pid) = pid_str.parse::<u32>() else { continue };
+                        if !is_supported_cli_command(&command) {
+                            continue;
+                        }
+                        if let Some(proc_cwd) = get_process_cwd(pid) {
+                            let proc_path = fs::canonicalize(&proc_cwd).unwrap_or_else(|_| PathBuf::from(&proc_cwd));
+                            if proc_path == target_path {
+                                return Some(pid);
+                            }
                         }
                     }
                 }
@@ -435,7 +500,18 @@ fn is_supported_cli_command(command: &str) -> bool {
         return false;
     }
     let first = lowercase_command.split_whitespace().next().unwrap_or("");
-    first == "codex" || first.ends_with("/codex")
+    if first == "codex" || first.ends_with("/codex") {
+        return true;
+    }
+    if (first == "node" || first.ends_with("/node"))
+        && lowercase_command
+            .split_whitespace()
+            .nth(1)
+            .map_or(false, |arg| arg == "codex" || arg.ends_with("/codex"))
+    {
+        return true;
+    }
+    false
 }
 
 fn rollout_has_active_turn(path: &Path) -> Result<bool> {
@@ -2321,7 +2397,11 @@ mod tests {
         ));
         assert!(!is_supported_cli_command("/usr/local/bin/codex app-server"));
         assert!(is_supported_cli_command("/usr/local/bin/codex resume session-id"));
+        assert!(is_supported_cli_command("node /home/user/.nvm/versions/node/v24.18.0/bin/codex"));
+        assert!(is_supported_cli_command("node /usr/local/bin/codex resume session-id"));
+        assert!(is_supported_cli_command("/usr/bin/node /usr/bin/codex"));
     }
+
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
