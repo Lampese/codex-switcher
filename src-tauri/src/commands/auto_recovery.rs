@@ -126,6 +126,8 @@ fn macos_resume_command(
     session_id: &str,
     phrase: &str,
     model: Option<&str>,
+    effort: Option<&str>,
+    restart_file: &Path,
 ) -> String {
     let cwd = escape_shell_arg(&cwd.to_string_lossy());
     let binary = escape_shell_arg(&codex_bin.to_string_lossy());
@@ -135,11 +137,14 @@ fn macos_resume_command(
     } else {
         format!(" {}", escape_shell_arg(phrase))
     };
-    let model_arg = model.map(|model| format!(" --model {}", escape_shell_arg(model))).unwrap_or_default();
+    let model_arg = model.map(|m| format!(" --model {}", escape_shell_arg(m))).unwrap_or_default();
+    let effort_arg = effort.map(|e| format!(" -c model_reasoning_effort={}", escape_shell_arg(e))).unwrap_or_default();
+    let restart_file_arg = escape_shell_arg(&restart_file.to_string_lossy());
     format!(
-        "cd {cwd} && {binary} resume{model_arg} {session}{phrase_arg}; exit"
+        "cd {cwd} && while true; do {binary} resume{model_arg}{effort_arg} {session}{phrase_arg}; if [ -f {restart_file_arg} ]; then rm -f {restart_file_arg}; sleep 1; continue; fi; break; done; exit"
     )
 }
+
 
 /// Find the codex CLI executable in standard and user environments
 pub fn find_codex_binary() -> PathBuf {
@@ -681,6 +686,17 @@ fn select_recovery_model(catalog: &serde_json::Value, preferred: Option<&str>) -
         .context("Codex returned no available models")?;
     let selected = preferred
         .and_then(|name| models.iter().find(|model| model.get("model").and_then(|v| v.as_str()) == Some(name)))
+        .or_else(|| {
+            // If preferred has a tier suffix like "-sol" or "-luna", prefer matching suffix in available models
+            let suffix = preferred.and_then(|p| p.split_once('-').map(|(_, s)| s)).unwrap_or("");
+            if !suffix.is_empty() {
+                models.iter().find(|model| {
+                    model.get("model").and_then(|v| v.as_str()).map_or(false, |m| m.ends_with(suffix))
+                })
+            } else {
+                None
+            }
+        })
         .or_else(|| models.iter().find(|model| model.get("isDefault").and_then(|v| v.as_bool()) == Some(true)))
         .or_else(|| models.first())
         .and_then(|model| model.get("model").and_then(|v| v.as_str()))
@@ -689,7 +705,7 @@ fn select_recovery_model(catalog: &serde_json::Value, preferred: Option<&str>) -
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-async fn default_recovery_model() -> Result<String> {
+async fn resolve_recovery_model(preferred: Option<&str>) -> Result<String> {
     let mut command = tokio::process::Command::new(find_codex_binary());
     command.env_remove("LD_LIBRARY_PATH");
     let mut child = command.arg("app-server").stdin(Stdio::piped()).stdout(Stdio::piped())
@@ -702,11 +718,195 @@ async fn default_recovery_model() -> Result<String> {
         stdin.write_all(b"{\"method\":\"initialized\",\"params\":{}}\n").await?;
         let catalog = app_server_request(&mut stdin, &mut lines, 2, "model/list",
             serde_json::json!({"limit":100,"includeHidden":false})).await?;
-        select_recovery_model(&catalog, None)
+        select_recovery_model(&catalog, preferred)
     }.await;
     let _ = child.kill().await;
     result
 }
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+async fn default_recovery_model() -> Result<String> {
+    resolve_recovery_model(None).await
+}
+
+/// Read default model and reasoning effort from ~/.codex/config.toml
+pub fn load_codex_config_model_and_effort() -> (Option<String>, Option<String>) {
+    let Some(home) = dirs::home_dir() else {
+        return (None, None);
+    };
+    let config_path = home.join(".codex/config.toml");
+    let Ok(content) = fs::read_to_string(config_path) else {
+        return (None, None);
+    };
+
+    let mut model = None;
+    let mut effort = None;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') || trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            break;
+        }
+        if let Some((key, val)) = trimmed.split_once('=') {
+            let key = key.trim();
+            let val = val.trim().trim_matches('"').trim_matches('\'');
+            if key == "model" && model.is_none() {
+                model = Some(val.to_string());
+            } else if key == "model_reasoning_effort" && effort.is_none() {
+                effort = Some(val.to_string());
+            }
+        }
+    }
+
+    (model, effort)
+}
+
+/// Extract active model and reasoning effort from session rollout jsonl file
+pub fn extract_session_model_and_effort(rollout_path: &Path) -> (Option<String>, Option<String>) {
+    let Ok(file) = fs::File::open(rollout_path) else {
+        return (None, None);
+    };
+    let Ok(metadata) = file.metadata() else {
+        return (None, None);
+    };
+    let file_size = metadata.len();
+    if file_size == 0 {
+        return (None, None);
+    }
+
+    use std::io::{Read, Seek, SeekFrom};
+    let mut reader = std::io::BufReader::new(file);
+
+    // Read up to last 128KB to find the most recent turn_context or thread_settings_applied
+    let read_size = std::cmp::min(file_size, 131072) as usize;
+    let offset = file_size.saturating_sub(read_size as u64);
+
+    if reader.seek(SeekFrom::Start(offset)).is_err() {
+        return (None, None);
+    }
+    let mut buffer = vec![0u8; read_size];
+    if reader.read_exact(&mut buffer).is_err() {
+        return (None, None);
+    }
+
+    let content = String::from_utf8_lossy(&buffer);
+    let mut found_model = None;
+    let mut found_effort = None;
+
+    for line in content.lines().rev() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if !line.contains("\"turn_context\"") && !line.contains("\"thread_settings_applied\"") {
+            continue;
+        }
+
+        let Ok(json_val) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(payload) = json_val.get("payload") else {
+            continue;
+        };
+
+        // Check turn_context
+        if json_val.get("type").and_then(|t| t.as_str()) == Some("turn_context") {
+            if found_model.is_none() {
+                found_model = payload
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        payload
+                            .get("collaboration_mode")
+                            .and_then(|c| c.get("settings"))
+                            .and_then(|s| s.get("model"))
+                            .and_then(|v| v.as_str())
+                    })
+                    .map(String::from);
+            }
+            if found_effort.is_none() {
+                found_effort = payload
+                    .get("effort")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        payload
+                            .get("collaboration_mode")
+                            .and_then(|c| c.get("settings"))
+                            .and_then(|s| s.get("reasoning_effort"))
+                            .and_then(|v| v.as_str())
+                    })
+                    .map(String::from);
+            }
+        }
+
+        // Check thread_settings_applied
+        if payload.get("type").and_then(|t| t.as_str()) == Some("thread_settings_applied") {
+            let ts = payload.get("thread_settings");
+            if found_model.is_none() {
+                found_model = ts
+                    .and_then(|t| t.get("model"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        ts.and_then(|t| t.get("collaboration_mode"))
+                            .and_then(|c| c.get("settings"))
+                            .and_then(|s| s.get("model"))
+                            .and_then(|v| v.as_str())
+                    })
+                    .map(String::from);
+            }
+            if found_effort.is_none() {
+                found_effort = ts
+                    .and_then(|t| t.get("reasoning_effort"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        ts.and_then(|t| t.get("collaboration_mode"))
+                            .and_then(|c| c.get("settings"))
+                            .and_then(|s| s.get("reasoning_effort"))
+                            .and_then(|v| v.as_str())
+                    })
+                    .map(String::from);
+            }
+        }
+
+        if found_model.is_some() && found_effort.is_some() {
+            break;
+        }
+    }
+
+    // If file is larger than 128KB and we didn't find them in tail, scan initial lines
+    if (found_model.is_none() || found_effort.is_none()) && file_size > 131072 {
+        if let Ok(file_start) = fs::File::open(rollout_path) {
+            use std::io::BufRead;
+            let start_reader = std::io::BufReader::new(file_start);
+            for line in start_reader.lines().take(50).filter_map(Result::ok) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
+                    let payload = val.get("payload");
+                    if payload.and_then(|p| p.get("type")).and_then(|t| t.as_str()) == Some("thread_settings_applied") {
+                        let ts = payload.and_then(|p| p.get("thread_settings"));
+                        if found_model.is_none() {
+                            found_model = ts.and_then(|t| t.get("model")).and_then(|v| v.as_str()).map(String::from);
+                        }
+                        if found_effort.is_none() {
+                            found_effort = ts.and_then(|t| t.get("reasoning_effort")).and_then(|v| v.as_str()).map(String::from);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Filter out synthetic internal review models
+    if found_model.as_deref() == Some("codex-auto-review") {
+        found_model = None;
+    }
+
+    (found_model, found_effort)
+}
+
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn resume_desktop_after_handoff(
@@ -1524,6 +1724,7 @@ pub fn launch_session_in_terminal(
     phrase: &str,
     preferred_terminal: Option<&str>,
     model: Option<&str>,
+    effort: Option<&str>,
 ) -> Result<u32> {
     let codex_bin = find_codex_binary();
 
@@ -1535,6 +1736,10 @@ pub fn launch_session_in_terminal(
     // Check preferred or detected terminal
     #[cfg(target_os = "linux")]
     {
+        let restart_file = std::env::temp_dir()
+            .join(format!("codex-switcher-restart-{}", session_id));
+        let restart_file_str = restart_file.to_string_lossy().to_string();
+
         let runner_script = r#"
 unset LD_LIBRARY_PATH
 unset LIBGL_ALWAYS_SOFTWARE
@@ -1546,17 +1751,48 @@ SESSION_ID="$2"
 CURRENT_PHRASE="$3"
 SESSION_CWD="$4"
 MODEL="$5"
+EFFORT="$6"
+RESTART_FILE="$7"
 
-set -- "$CODEX_BIN" resume
-if [ -n "$MODEL" ]; then set -- "$@" --model "$MODEL"; fi
-if [ -n "$SESSION_CWD" ] && [ -d "$SESSION_CWD" ]; then
-    set -- "$@" -C "$SESSION_CWD"
-fi
-set -- "$@" "$SESSION_ID"
-if [ "$CURRENT_PHRASE" != "/goal resume" ] && [ -n "$CURRENT_PHRASE" ]; then
-    set -- "$@" "$CURRENT_PHRASE"
-fi
-"$@"
+while true; do
+    set -- "$CODEX_BIN" resume
+    if [ -n "$MODEL" ]; then set -- "$@" --model "$MODEL"; fi
+    if [ -n "$EFFORT" ]; then set -- "$@" -c "model_reasoning_effort=\"$EFFORT\""; fi
+    if [ -n "$SESSION_CWD" ] && [ -d "$SESSION_CWD" ]; then
+        set -- "$@" -C "$SESSION_CWD"
+    fi
+    set -- "$@" "$SESSION_ID"
+    if [ "$CURRENT_PHRASE" != "/goal resume" ] && [ -n "$CURRENT_PHRASE" ]; then
+        set -- "$@" "$CURRENT_PHRASE"
+    fi
+    "$@"
+
+    if [ -f "$RESTART_FILE" ]; then
+        if [ -s "$RESTART_FILE" ]; then
+            read -r NEW_PHRASE < "$RESTART_FILE" || true
+            if [ -n "$NEW_PHRASE" ]; then
+                CURRENT_PHRASE="$NEW_PHRASE"
+            fi
+            NEW_MODEL=$(sed -n '2p' "$RESTART_FILE" 2>/dev/null || true)
+            if [ -n "$NEW_MODEL" ]; then
+                MODEL="$NEW_MODEL"
+            fi
+            NEW_EFFORT=$(sed -n '3p' "$RESTART_FILE" 2>/dev/null || true)
+            if [ -n "$NEW_EFFORT" ]; then
+                EFFORT="$NEW_EFFORT"
+            fi
+        else
+            CURRENT_PHRASE="continue"
+        fi
+        rm -f "$RESTART_FILE"
+        printf "\n\033[1;36m========================================================\033[0m\n"
+        printf "\033[1;32m [Codex Switcher] Account switched. Resuming in-place...\033[0m\n"
+        printf "\033[1;36m========================================================\033[0m\n\n"
+        sleep 1
+        continue
+    fi
+    break
+done
 exec $SHELL
 "#;
 
@@ -1583,6 +1819,8 @@ exec $SHELL
             phrase,
             cwd_arg,
             model.unwrap_or(""),
+            effort.unwrap_or(""),
+            &restart_file_str,
         ];
 
         for term_path in candidates {
@@ -1645,6 +1883,8 @@ exec $SHELL
 
     #[cfg(target_os = "macos")]
     {
+        let restart_file = std::env::temp_dir()
+            .join(format!("codex-switcher-restart-{}", session_id));
         // Pass the command as an AppleScript argument instead of interpolating
         // it into source code. Shell-quote each value separately above.
         let script = "on run argv\n  tell application \"Terminal\" to do script (item 1 of argv)\nend run";
@@ -1654,6 +1894,8 @@ exec $SHELL
             session_id,
             phrase,
             model,
+            effort,
+            &restart_file,
         );
         let mut cmd = Command::new("osascript");
         cmd.arg("-e").arg(script).arg("--").arg(command);
@@ -1669,10 +1911,12 @@ exec $SHELL
             format!(" {}", escape_shell_arg(phrase))
         };
         let model_arg = model.map(|model| format!(" --model {}", escape_shell_arg(model))).unwrap_or_default();
+        let effort_arg = effort.map(|e| format!(" -c model_reasoning_effort={}", escape_shell_arg(e))).unwrap_or_default();
         let codex_cmd = format!(
-            "{} resume{} {}{}",
+            "{} resume{}{}{} {}{}",
             escape_shell_arg(&codex_bin.to_string_lossy()),
             model_arg,
+            effort_arg,
             escape_shell_arg(session_id),
             phrase_arg
         );
@@ -1686,6 +1930,7 @@ exec $SHELL
 
     anyhow::bail!("No supported terminal emulator found")
 }
+
 
 /// Perform one automated recovery cycle
 pub async fn check_and_recover_sessions() -> Result<Option<RecoveryEventNotification>> {
@@ -1884,10 +2129,29 @@ async fn handle_account_switch_for_session(
                 return Ok(Some(notification));
             }
 
+            let (rollout_model, rollout_effort) = session
+                .rollout_path
+                .as_deref()
+                .map(|p| extract_session_model_and_effort(Path::new(p)))
+                .unwrap_or((None, None));
+            let (config_model, config_effort) = load_codex_config_model_and_effort();
+            let session_model = rollout_model.or(config_model);
+            let session_effort = rollout_effort.or(config_effort);
+
             #[cfg(any(target_os = "macos", target_os = "linux"))]
-            let recovery_model = default_recovery_model().await.ok();
+            let recovery_model = resolve_recovery_model(session_model.as_deref()).await.ok();
             #[cfg(windows)]
             let recovery_model: Option<String> = None;
+
+            let restart_file = std::env::temp_dir()
+                .join(format!("codex-switcher-restart-{}", session.session_id));
+            let restart_content = format!(
+                "{}\n{}\n{}",
+                phrase,
+                recovery_model.as_deref().unwrap_or(""),
+                session_effort.as_deref().unwrap_or("")
+            );
+            let _ = fs::write(&restart_file, restart_content);
 
             // Terminate stale process that still holds old credentials in memory
             if session.pid > 0 {
@@ -1898,13 +2162,27 @@ async fn handle_account_switch_for_session(
                 activate_session_goal(&session.session_id);
             }
 
-            launch_session_in_terminal(
-                &session.session_id,
-                session.cwd.as_deref(),
-                &phrase,
-                settings.preferred_terminal.as_deref(),
-                recovery_model.as_deref(),
-            )?;
+            // Wait briefly to see if an existing terminal runner consumed the restart file
+            let mut consumed = false;
+            for _ in 0..15 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if !restart_file.exists() {
+                    consumed = true;
+                    break;
+                }
+            }
+
+            if !consumed {
+                let _ = fs::remove_file(&restart_file);
+                launch_session_in_terminal(
+                    &session.session_id,
+                    session.cwd.as_deref(),
+                    &phrase,
+                    settings.preferred_terminal.as_deref(),
+                    recovery_model.as_deref(),
+                    session_effort.as_deref(),
+                )?;
+            }
 
             if !is_goal {
                 let session_id_clone = session.session_id.clone();
@@ -1939,10 +2217,17 @@ async fn handle_account_switch_for_session(
             let notification = RecoveryEventNotification {
                 event_type: "account_switched".to_string(),
                 session_id: session.session_id.clone(),
-                message: format!(
-                    "Relaunched session with '{phrase}' on newly active account (switched {}s ago)",
-                    switch_time.elapsed().as_secs()
-                ),
+                message: if consumed {
+                    format!(
+                        "Resumed session in-place with '{phrase}' on newly active account (switched {}s ago)",
+                        switch_time.elapsed().as_secs()
+                    )
+                } else {
+                    format!(
+                        "Relaunched session with '{phrase}' on newly active account (switched {}s ago)",
+                        switch_time.elapsed().as_secs()
+                    )
+                },
                 timestamp: Utc::now(),
             };
 
@@ -2200,11 +2485,30 @@ async fn handle_account_switch_for_session(
         }
     }
 
+    let (rollout_model, rollout_effort) = session
+        .rollout_path
+        .as_deref()
+        .map(|p| extract_session_model_and_effort(Path::new(p)))
+        .unwrap_or((None, None));
+    let (config_model, config_effort) = load_codex_config_model_and_effort();
+    let session_model = rollout_model.or(config_model);
+    let session_effort = rollout_effort.or(config_effort);
+
     let is_goal = is_session_goal_active(&session.session_id);
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let recovery_model = default_recovery_model().await.ok();
+    let recovery_model = resolve_recovery_model(session_model.as_deref()).await.ok();
     #[cfg(windows)]
     let recovery_model: Option<String> = None;
+
+    let restart_file = std::env::temp_dir()
+        .join(format!("codex-switcher-restart-{}", session.session_id));
+    let restart_content = format!(
+        "{}\n{}\n{}",
+        phrase,
+        recovery_model.as_deref().unwrap_or(""),
+        session_effort.as_deref().unwrap_or("")
+    );
+    let _ = fs::write(&restart_file, restart_content);
 
     // Codex CLI caches JWT tokens in process memory (CachedAuth) for the entire lifetime
     // of the process. In-place queue messages on an existing process will reuse the stale token
@@ -2218,13 +2522,27 @@ async fn handle_account_switch_for_session(
         activate_session_goal(&session.session_id);
     }
 
-    launch_session_in_terminal(
-        &session.session_id,
-        session.cwd.as_deref(),
-        &phrase,
-        settings.preferred_terminal.as_deref(),
-        recovery_model.as_deref(),
-    )?;
+    // Check if an existing terminal runner consumed the restart file
+    let mut consumed = false;
+    for _ in 0..15 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if !restart_file.exists() {
+            consumed = true;
+            break;
+        }
+    }
+
+    if !consumed {
+        let _ = fs::remove_file(&restart_file);
+        launch_session_in_terminal(
+            &session.session_id,
+            session.cwd.as_deref(),
+            &phrase,
+            settings.preferred_terminal.as_deref(),
+            recovery_model.as_deref(),
+            session_effort.as_deref(),
+        )?;
+    }
 
     if !is_goal {
         let session_id_clone = session.session_id.clone();
@@ -2261,10 +2579,17 @@ async fn handle_account_switch_for_session(
     let notification = RecoveryEventNotification {
         event_type: "account_switched".to_string(),
         session_id: session.session_id.clone(),
-        message: format!(
-            "Switched to account '{}' and relaunched session with '{}'",
-            target.name, phrase
-        ),
+        message: if consumed {
+            format!(
+                "Switched to account '{}' and resumed session in-place with '{}'",
+                target.name, phrase
+            )
+        } else {
+            format!(
+                "Switched to account '{}' and relaunched session with '{}'",
+                target.name, phrase
+            )
+        },
         timestamp: Utc::now(),
     };
 
@@ -2323,12 +2648,25 @@ pub async fn launch_codex_session(
         }
     });
 
+    let (rollout_model, rollout_effort) = if !s_id.is_empty() {
+        if let Some(home) = dirs::home_dir() {
+            locate_rollout_file(&home, &s_id)
+                .map(|p| extract_session_model_and_effort(&p))
+                .unwrap_or((None, None))
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
     launch_session_in_terminal(
         &s_id,
         cwd.as_deref(),
         &phrase,
         settings.preferred_terminal.as_deref(),
-        None,
+        rollout_model.as_deref(),
+        rollout_effort.as_deref(),
     )
     .map_err(|e| e.to_string())
 }
@@ -2454,10 +2792,13 @@ mod tests {
             "thread' id",
             "continue $(touch /tmp/injected) 'now'",
             Some("gpt-6-astra; touch /tmp/injected"),
+            Some("high"),
+            Path::new("/tmp/restart file"),
         );
         assert!(command.contains("cd '/tmp/my work; touch /tmp/injected'"));
-        assert!(command.contains("'/tmp/Codex Bin/codex' resume --model 'gpt-6-astra; touch /tmp/injected' 'thread'\\'' id'"));
+        assert!(command.contains("'/tmp/Codex Bin/codex' resume --model 'gpt-6-astra; touch /tmp/injected' -c model_reasoning_effort='high' 'thread'\\'' id'"));
         assert!(command.contains("'continue $(touch /tmp/injected) '\\''now'\\'''"));
+        assert!(command.contains("[ -f '/tmp/restart file' ]"));
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -2468,7 +2809,30 @@ mod tests {
             {"model": "gpt-5.6-sol", "isDefault": false}
         ]});
         assert_eq!(select_recovery_model(&catalog, Some("gpt-5.6-sol")).unwrap(), "gpt-5.6-sol");
-        assert_eq!(select_recovery_model(&catalog, Some("gpt-6-sol")).unwrap(), "gpt-6-astra");
+        // Matches -sol family before jumping to expensive default astra
+        assert_eq!(select_recovery_model(&catalog, Some("gpt-6-sol")).unwrap(), "gpt-5.6-sol");
+        // When completely unknown tier, falls back to default
+        assert_eq!(select_recovery_model(&catalog, Some("unknown-tier")).unwrap(), "gpt-6-astra");
+    }
+
+    #[test]
+    fn test_extract_session_model_and_effort() {
+        let temp_dir = std::env::temp_dir().join(format!("codex-test-rollout-{}", uuid::Uuid::new_v4()));
+        let _ = fs::create_dir_all(&temp_dir);
+        let rollout_file = temp_dir.join("rollout.jsonl");
+
+        let lines = [
+            r#"{"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-6-sol","reasoning_effort":"high"}}}"#,
+            r#"{"type":"turn_context","payload":{"model":"gpt-6-sol","effort":"high"}}"#,
+            r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#,
+        ];
+        fs::write(&rollout_file, lines.join("\n")).unwrap();
+
+        let (model, effort) = extract_session_model_and_effort(&rollout_file);
+        assert_eq!(model.as_deref(), Some("gpt-6-sol"));
+        assert_eq!(effort.as_deref(), Some("high"));
+
+        let _ = fs::remove_dir_all(temp_dir);
     }
 
     fn make_test_account(id: &str, name: &str, expires_at: Option<DateTime<Utc>>) -> StoredAccount {
