@@ -689,18 +689,21 @@ async fn resume_desktop_after_handoff(
                     continue;
                 }
             };
-            let model = select_recovery_model(&catalog, resumed.get("model").and_then(|v| v.as_str()))?;
+            let model = select_recovery_model(&catalog, resumed.get("model").and_then(|v| v.as_str())).ok();
             let phrase = resolve_session_resume_phrase(&session.session_id, &settings.continue_phrase);
+            let mut turn_params = serde_json::json!({
+                "threadId": session.session_id,
+                "input": [{"type": "text", "text": phrase}],
+            });
+            if let Some(ref m) = model {
+                turn_params["model"] = serde_json::json!(m);
+            }
             if let Err(error) = app_server_request(
                 &mut stdin,
                 &mut lines,
                 id + 1,
                 "turn/start",
-                serde_json::json!({
-                    "threadId": session.session_id,
-                    "input": [{"type": "text", "text": phrase}],
-                    "model": model,
-                }),
+                turn_params,
             )
             .await {
                 eprintln!("[AutoRecovery] Could not start continuation in {}: {error}", session.session_id);
@@ -1806,7 +1809,7 @@ async fn handle_account_switch_for_session(
             }
 
             #[cfg(any(target_os = "macos", target_os = "linux"))]
-            let recovery_model = Some(default_recovery_model().await?);
+            let recovery_model = default_recovery_model().await.ok();
             #[cfg(windows)]
             let recovery_model: Option<String> = None;
 
@@ -2123,7 +2126,7 @@ async fn handle_account_switch_for_session(
 
     let is_goal = is_session_goal_active(&session.session_id);
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let recovery_model = Some(default_recovery_model().await?);
+    let recovery_model = default_recovery_model().await.ok();
     #[cfg(windows)]
     let recovery_model: Option<String> = None;
 
