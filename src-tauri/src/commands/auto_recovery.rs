@@ -115,6 +115,7 @@ fn which_cmd(cmd: &str) -> Option<PathBuf> {
     None
 }
 
+#[allow(dead_code)]
 fn escape_shell_arg(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -724,6 +725,7 @@ async fn resolve_recovery_model(preferred: Option<&str>) -> Result<String> {
     result
 }
 
+#[allow(dead_code)]
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn default_recovery_model() -> Result<String> {
     resolve_recovery_model(None).await
@@ -1786,7 +1788,7 @@ while true; do
         fi
         rm -f "$RESTART_FILE"
         printf "\n\033[1;36m========================================================\033[0m\n"
-        printf "\033[1;32m [Codex Switcher] Account switched. Resuming in-place...\033[0m\n"
+        printf "\033[1;32m [Codex Switcher] Resuming in-place...\033[0m\n"
         printf "\033[1;36m========================================================\033[0m\n\n"
         sleep 1
         continue
@@ -2062,6 +2064,85 @@ pub async fn check_and_recover_sessions() -> Result<Option<RecoveryEventNotifica
     Ok(None)
 }
 
+/// Relaunch an active CLI session in-place using the terminal runner or launch a new terminal window.
+async fn relaunch_cli_session(
+    session: &ActiveCodexSession,
+    phrase: &str,
+    is_goal: bool,
+    settings: &AppSettings,
+) -> Result<bool> {
+    let (rollout_model, rollout_effort) = session
+        .rollout_path
+        .as_deref()
+        .map(|p| extract_session_model_and_effort(Path::new(p)))
+        .unwrap_or((None, None));
+    let (config_model, config_effort) = load_codex_config_model_and_effort();
+    let session_model = rollout_model.or(config_model);
+    let session_effort = rollout_effort.or(config_effort);
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    let recovery_model = resolve_recovery_model(session_model.as_deref()).await.ok();
+    #[cfg(windows)]
+    let recovery_model: Option<String> = None;
+
+    let restart_file = std::env::temp_dir()
+        .join(format!("codex-switcher-restart-{}", session.session_id));
+    let restart_content = format!(
+        "{}\n{}\n{}",
+        phrase,
+        recovery_model.as_deref().unwrap_or(""),
+        session_effort.as_deref().unwrap_or("")
+    );
+    let _ = fs::write(&restart_file, restart_content);
+
+    // Terminate stale process that is stopped on limit error
+    if session.pid > 0 {
+        terminate_process(session.pid);
+    }
+
+    if is_goal {
+        activate_session_goal(&session.session_id);
+    }
+
+    // Check if an existing terminal runner consumed the restart file
+    let mut consumed = false;
+    for _ in 0..15 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if !restart_file.exists() {
+            consumed = true;
+            break;
+        }
+    }
+
+    if !consumed {
+        let _ = fs::remove_file(&restart_file);
+        launch_session_in_terminal(
+            &session.session_id,
+            session.cwd.as_deref(),
+            phrase,
+            settings.preferred_terminal.as_deref(),
+            recovery_model.as_deref(),
+            session_effort.as_deref(),
+        )?;
+    }
+
+    if !is_goal {
+        let session_id_clone = session.session_id.clone();
+        let phrase_clone = phrase.to_string();
+        tokio::spawn(async move {
+            for attempt in 0..10 {
+                tokio::time::sleep(Duration::from_millis(800 + attempt * 400)).await;
+                if send_codex_queue_resume(&session_id_clone, &phrase_clone).await.is_ok() {
+                    println!("[AutoRecovery] Successfully queued '{phrase_clone}' to resumed session {session_id_clone}");
+                    break;
+                }
+            }
+        });
+    }
+
+    Ok(consumed)
+}
+
 /// Switch account and relaunch a session that hit limits
 async fn handle_account_switch_for_session(
     session: &ActiveCodexSession,
@@ -2080,7 +2161,7 @@ async fn handle_account_switch_for_session(
         tracker.last_account_switch.clone()
     };
 
-    if let Some((switch_time, target_id, was_reset_credit, switched_session_id)) = recent_switch {
+    if let Some((switch_time, _target_id, was_reset_credit, switched_session_id)) = recent_switch {
         if switch_time.elapsed() < Duration::from_secs(20) {
             // Anti-cascade: If this is the exact same session that just triggered the switch,
             // its rollout might still show the previous turn error while the new turn boots up.
@@ -2092,111 +2173,19 @@ async fn handle_account_switch_for_session(
             let phrase = resolve_session_resume_phrase(&session.session_id, &settings.continue_phrase);
             let is_goal = is_session_goal_active(&session.session_id);
 
-            // If the account was NOT changed (for example, limits were restored via reset credit on the same account),
-            // we do NOT need to terminate the process or launch a new terminal! The credentials in memory are still valid.
-            // We just queue the continue phrase to the existing running session.
-            if was_reset_credit || session.is_desktop {
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            let consumed = if session.is_desktop {
                 if is_goal {
                     activate_session_goal(&session.session_id);
                 } else {
                     send_codex_queue_resume(&session.session_id, &phrase).await?;
                 }
-
-                if let Ok(mut tracker) = TRACKER.lock() {
-                    let turn_key = session
-                        .last_error
-                        .as_ref()
-                        .and_then(|e| e.turn_id.clone())
-                        .unwrap_or_else(|| "default".to_string());
-                    tracker
-                        .handled_usage_limits
-                        .insert(session.session_id.clone(), turn_key);
-                }
-
-                let notification = RecoveryEventNotification {
-                    event_type: if was_reset_credit { "reset_credit_redeemed" } else { "account_switched" }.to_string(),
-                    session_id: session.session_id.clone(),
-                    message: format!(
-                        "Resumed session with '{phrase}' on account '{}' after {}s",
-                        target_id,
-                        switch_time.elapsed().as_secs()
-                    ),
-                    timestamp: Utc::now(),
-                };
-                if let Ok(mut tracker) = TRACKER.lock() {
-                    tracker.last_event = Some(notification.clone());
-                }
-                return Ok(Some(notification));
-            }
-
-            let (rollout_model, rollout_effort) = session
-                .rollout_path
-                .as_deref()
-                .map(|p| extract_session_model_and_effort(Path::new(p)))
-                .unwrap_or((None, None));
-            let (config_model, config_effort) = load_codex_config_model_and_effort();
-            let session_model = rollout_model.or(config_model);
-            let session_effort = rollout_effort.or(config_effort);
-
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            let recovery_model = resolve_recovery_model(session_model.as_deref()).await.ok();
-            #[cfg(windows)]
-            let recovery_model: Option<String> = None;
-
-            let restart_file = std::env::temp_dir()
-                .join(format!("codex-switcher-restart-{}", session.session_id));
-            let restart_content = format!(
-                "{}\n{}\n{}",
-                phrase,
-                recovery_model.as_deref().unwrap_or(""),
-                session_effort.as_deref().unwrap_or("")
-            );
-            let _ = fs::write(&restart_file, restart_content);
-
-            // Terminate stale process that still holds old credentials in memory
-            if session.pid > 0 {
-                terminate_process(session.pid);
-            }
-
-            if is_goal {
-                activate_session_goal(&session.session_id);
-            }
-
-            // Wait briefly to see if an existing terminal runner consumed the restart file
-            let mut consumed = false;
-            for _ in 0..15 {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                if !restart_file.exists() {
-                    consumed = true;
-                    break;
-                }
-            }
-
-            if !consumed {
-                let _ = fs::remove_file(&restart_file);
-                launch_session_in_terminal(
-                    &session.session_id,
-                    session.cwd.as_deref(),
-                    &phrase,
-                    settings.preferred_terminal.as_deref(),
-                    recovery_model.as_deref(),
-                    session_effort.as_deref(),
-                )?;
-            }
-
-            if !is_goal {
-                let session_id_clone = session.session_id.clone();
-                let phrase_clone = phrase.clone();
-                tokio::spawn(async move {
-                    for attempt in 0..10 {
-                        tokio::time::sleep(Duration::from_millis(800 + attempt * 400)).await;
-                        if send_codex_queue_resume(&session_id_clone, &phrase_clone).await.is_ok() {
-                            println!("[AutoRecovery] Successfully queued '{phrase_clone}' to resumed session {session_id_clone}");
-                            break;
-                        }
-                    }
-                });
-            }
+                false
+            } else {
+                relaunch_cli_session(session, &phrase, is_goal, settings).await?
+            };
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            let consumed = relaunch_cli_session(session, &phrase, is_goal, settings).await?;
 
             send_desktop_notification(
                 "Codex Session Reconnected",
@@ -2214,22 +2203,27 @@ async fn handle_account_switch_for_session(
                     .insert(session.session_id.clone(), turn_key);
             }
 
+            let reason_desc = if was_reset_credit { "after reset credit" } else { "on newly active account" };
             let notification = RecoveryEventNotification {
-                event_type: "account_switched".to_string(),
+                event_type: if was_reset_credit { "reset_credit_redeemed" } else { "account_switched" }.to_string(),
                 session_id: session.session_id.clone(),
                 message: if consumed {
                     format!(
-                        "Resumed session in-place with '{phrase}' on newly active account (switched {}s ago)",
+                        "Resumed session in-place with '{phrase}' {reason_desc} (switched {}s ago)",
                         switch_time.elapsed().as_secs()
                     )
                 } else {
                     format!(
-                        "Relaunched session with '{phrase}' on newly active account (switched {}s ago)",
+                        "Relaunched session with '{phrase}' {reason_desc} (switched {}s ago)",
                         switch_time.elapsed().as_secs()
                     )
                 },
                 timestamp: Utc::now(),
             };
+
+            if let Ok(mut tracker) = TRACKER.lock() {
+                tracker.last_event = Some(notification.clone());
+            }
 
             return Ok(Some(notification));
         }
@@ -2279,11 +2273,16 @@ async fn handle_account_switch_for_session(
                                 let phrase = resolve_session_resume_phrase(&session.session_id, &settings.continue_phrase);
                                 let is_goal = is_session_goal_active(&session.session_id);
 
-                                if is_goal {
-                                    activate_session_goal(&session.session_id);
+                                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                                let consumed = if session.is_desktop {
+                                    let desktop_reopen_token = close_desktop_for_handoff(&session.session_id).await?;
+                                    let _ = resume_desktop_after_handoff(desktop_reopen_token, std::slice::from_ref(session), settings).await?;
+                                    false
                                 } else {
-                                    let _ = send_codex_queue_resume(&session.session_id, &phrase).await;
-                                }
+                                    relaunch_cli_session(session, &phrase, is_goal, settings).await?
+                                };
+                                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                                let consumed = relaunch_cli_session(session, &phrase, is_goal, settings).await?;
 
                                 send_desktop_notification(
                                     "Reset Credit Redeemed",
@@ -2310,10 +2309,17 @@ async fn handle_account_switch_for_session(
                                 let notification = RecoveryEventNotification {
                                     event_type: "reset_credit_redeemed".to_string(),
                                     session_id: session.session_id.clone(),
-                                    message: format!(
-                                        "Auto-redeemed reset credit on active account '{}' (limits refreshed). Resumed session in-place.",
-                                        curr_acc.name
-                                    ),
+                                    message: if consumed {
+                                        format!(
+                                            "Auto-redeemed reset credit on active account '{}' (limits refreshed). Resumed session in-place with '{}'.",
+                                            curr_acc.name, phrase
+                                        )
+                                    } else {
+                                        format!(
+                                            "Auto-redeemed reset credit on active account '{}' (limits refreshed). Relaunched session with '{}'.",
+                                            curr_acc.name, phrase
+                                        )
+                                    },
                                     timestamp: Utc::now(),
                                 };
 
@@ -2485,78 +2491,8 @@ async fn handle_account_switch_for_session(
         }
     }
 
-    let (rollout_model, rollout_effort) = session
-        .rollout_path
-        .as_deref()
-        .map(|p| extract_session_model_and_effort(Path::new(p)))
-        .unwrap_or((None, None));
-    let (config_model, config_effort) = load_codex_config_model_and_effort();
-    let session_model = rollout_model.or(config_model);
-    let session_effort = rollout_effort.or(config_effort);
-
     let is_goal = is_session_goal_active(&session.session_id);
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let recovery_model = resolve_recovery_model(session_model.as_deref()).await.ok();
-    #[cfg(windows)]
-    let recovery_model: Option<String> = None;
-
-    let restart_file = std::env::temp_dir()
-        .join(format!("codex-switcher-restart-{}", session.session_id));
-    let restart_content = format!(
-        "{}\n{}\n{}",
-        phrase,
-        recovery_model.as_deref().unwrap_or(""),
-        session_effort.as_deref().unwrap_or("")
-    );
-    let _ = fs::write(&restart_file, restart_content);
-
-    // Codex CLI caches JWT tokens in process memory (CachedAuth) for the entire lifetime
-    // of the process. In-place queue messages on an existing process will reuse the stale token
-    // and fail again. We must terminate the old process and relaunch with `codex resume`
-    // so the new process initializes fresh AuthManager from the newly written auth.json.
-    if session.pid > 0 {
-        terminate_process(session.pid);
-    }
-
-    if is_goal {
-        activate_session_goal(&session.session_id);
-    }
-
-    // Check if an existing terminal runner consumed the restart file
-    let mut consumed = false;
-    for _ in 0..15 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        if !restart_file.exists() {
-            consumed = true;
-            break;
-        }
-    }
-
-    if !consumed {
-        let _ = fs::remove_file(&restart_file);
-        launch_session_in_terminal(
-            &session.session_id,
-            session.cwd.as_deref(),
-            &phrase,
-            settings.preferred_terminal.as_deref(),
-            recovery_model.as_deref(),
-            session_effort.as_deref(),
-        )?;
-    }
-
-    if !is_goal {
-        let session_id_clone = session.session_id.clone();
-        let phrase_clone = phrase.clone();
-        tokio::spawn(async move {
-            for attempt in 0..10 {
-                tokio::time::sleep(Duration::from_millis(800 + attempt * 400)).await;
-                if send_codex_queue_resume(&session_id_clone, &phrase_clone).await.is_ok() {
-                    println!("[AutoRecovery] Successfully queued '{phrase_clone}' to resumed session {session_id_clone}");
-                    break;
-                }
-            }
-        });
-    }
+    let consumed = relaunch_cli_session(session, &phrase, is_goal, settings).await?;
 
     send_desktop_notification(
         "Codex Account Switched",
@@ -4013,6 +3949,42 @@ mod tests {
         assert_eq!(status3, "complete");
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_relaunch_cli_session_in_place_consumed() {
+        let session_id = format!("test-session-{}", uuid::Uuid::new_v4());
+        let restart_file = std::env::temp_dir().join(format!("codex-switcher-restart-{}", session_id));
+        let _ = fs::remove_file(&restart_file);
+
+        let session = ActiveCodexSession {
+            session_id: session_id.clone(),
+            pid: 0,
+            cwd: None,
+            rollout_path: None,
+            last_error: None,
+            is_managed: false,
+            is_desktop: false,
+        };
+        let settings = AppSettings::default();
+
+        // Simulate terminal runner loop consuming the restart file
+        let rf_clone = restart_file.clone();
+        tokio::spawn(async move {
+            for _ in 0..200 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                if rf_clone.exists() {
+                    let content = fs::read_to_string(&rf_clone).unwrap_or_default();
+                    assert!(content.contains("/goal resume"));
+                    let _ = fs::remove_file(&rf_clone);
+                    break;
+                }
+            }
+        });
+
+        let consumed = relaunch_cli_session(&session, "/goal resume", true, &settings).await.unwrap();
+        assert!(consumed, "Expected terminal runner to consume restart file");
+        let _ = fs::remove_file(&restart_file);
     }
 
 }
