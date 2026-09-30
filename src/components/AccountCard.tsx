@@ -305,6 +305,11 @@ export function AccountCard({
               <BlurredText blur={masked}>{account.email}</BlurredText>
             </p>
           )}
+          {account.custom_provider && (
+            <p className="text-xs text-gray-500 dark:text-gray-400 truncate" title={masked ? undefined : account.custom_provider.base_url}>
+              <BlurredText blur={masked}>{account.custom_provider.name} · {account.custom_provider.model}</BlurredText>
+            </p>
+          )}
         </div>
 
         <div className="flex max-w-[60%] flex-wrap items-center justify-end gap-2">
@@ -398,17 +403,17 @@ export function AccountCard({
           onClick={() => {
             void onWarmup();
           }}
-          disabled={warmingUp}
+          disabled={warmingUp || !!account.custom_provider}
           className={`px-3 py-2 text-sm rounded-lg transition-colors ${
             warmingUp
               ? "bg-amber-100 dark:bg-amber-900/30 text-amber-500 dark:text-amber-300"
               : "bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-100 dark:hover:bg-amber-900/40 text-amber-700 dark:text-amber-300"
           }`}
-          title={warmingUp ? "Sending warm-up request..." : "Send minimal warm-up request"}
+          title={account.custom_provider ? "Warm-up unavailable for custom providers" : warmingUp ? "Sending warm-up request..." : "Send minimal warm-up request"}
         >
           ⚡
         </button>
-        {onToggleAutoWarmup && (
+        {onToggleAutoWarmup && !account.custom_provider && (
           <button
             onClick={onToggleAutoWarmup}
             disabled={autoWarmupManagedByAll}

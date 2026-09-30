@@ -3,6 +3,12 @@
 export type AuthMode = "api_key" | "chat_g_p_t";
 export type DockDisplayMode = "show_in_dock" | "menu_bar_only";
 
+export interface CustomProvider {
+  name: string;
+  base_url: string;
+  model: string;
+}
+
 export interface AccountInfo {
   id: string;
   name: string;
@@ -10,6 +16,7 @@ export interface AccountInfo {
   plan_type: string | null;
   subscription_expires_at: string | null;
   auth_mode: AuthMode;
+  custom_provider?: CustomProvider | null;
   is_active: boolean;
   created_at: string;
   last_used_at: string | null;

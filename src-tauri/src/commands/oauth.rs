@@ -62,10 +62,13 @@ pub async fn complete_login() -> Result<AccountInfo, String> {
     // Add the account to storage
     let stored = add_account(account).map_err(|e| e.to_string())?;
 
-    // Make it active and switch to it
-    set_active_account(&stored.id).map_err(|e| e.to_string())?;
-    switch_to_account(&stored).map_err(|e| e.to_string())?;
-    touch_account(&stored.id).map_err(|e| e.to_string())?;
+    // Save the login even while Codex is open. The normal Switch action can
+    // close/reopen it; never change the provider under a running desktop.
+    if super::process::ensure_codex_not_running().is_ok() {
+        switch_to_account(&stored).map_err(|e| e.to_string())?;
+        set_active_account(&stored.id).map_err(|e| e.to_string())?;
+        touch_account(&stored.id).map_err(|e| e.to_string())?;
+    }
 
     let store = load_accounts().map_err(|e| e.to_string())?;
     let active_id = store.active_account_id.as_deref();

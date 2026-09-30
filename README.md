@@ -27,7 +27,8 @@
 - **macOS Dock Control** – Keep Codex Switcher in the Dock or run it as a menu bar only app, with a first-close prompt and a tray fallback
 - **Rate-Limit Monitoring** – View real-time 5-hour session and weekly usage, reset timing, credits, and subscription expiry
 - **Blocked Switch Recovery** – Detect running Codex sessions and offer a force-close flow before retrying the account switch
-- **Dual Login Mode** – Authenticate with ChatGPT OAuth or import existing `auth.json` files
+- **Flexible Login** – Authenticate with ChatGPT OAuth, paste an API key, or import existing `auth.json` files
+- **Per-Account Providers** – Optionally pair API keys with a custom Responses API endpoint and default model, restoring your previous provider settings when switching back
 
 ## Installation
 
@@ -127,6 +128,43 @@ the last 7 days, while keeping the normal rate-limit refresh flow separate.
 
 ## Safe Account Switching
 
+### API keys and custom providers
+
+Choose **Account → Add Account → API Key** to paste a key directly. Leave
+**Override provider and model** off for regular OpenAI accounts. For a custom
+Responses API provider, enable it and enter the provider name, API base URL
+(for example `https://gateway.example/v1`), and default model ID. **Load models**
+requests the provider's `/models` endpoint with the entered key and offers model
+suggestions. You can enter an ID manually if model discovery is unavailable.
+This chooses a default in Switcher; it does not populate Codex's model picker.
+The same overrides are available when importing an API-key `auth.json` file.
+
+Adding credentials saves an account; use **Switch** to activate it. When Codex
+is running, use the existing close-and-reopen flow so it reads the new provider
+and credentials together. A new OAuth login is saved without activating it if
+Codex is still running.
+
+On the first custom-provider switch, Switcher saves the original provider/model
+selection in a private `.codex-switcher-provider.json` file in the Codex home.
+Switching among custom accounts retains that original selection. Switching back
+to a regular account restores it and removes the temporary provider entry and
+snapshot. Unrelated configuration and comments are preserved. Credential storage
+remains `file` so Codex uses the selected `auth.json` instead of stale keyring
+credentials. Start with your regular Codex provider configuration before using
+custom overrides for the first time.
+
+Provider settings travel with both backup formats. Older Switcher versions do
+not understand these settings; import custom-provider backups with this version
+or newer. Custom-provider usage and warm-up are unavailable; bulk and scheduled
+warm-ups skip these accounts. Provider IDs are stable across switches, but Codex
+itself may still filter existing tasks by provider.
+
+Configuration and credentials are staged privately and replaced atomically per
+file, with rollback on write errors. This is not a transaction across files if
+the process or machine crashes during switching.
+
+### ChatGPT sessions
+
 ChatGPT can replace an OAuth refresh token after using it. Once replaced, the
 older token may no longer be accepted. Before Codex Switcher writes another
 account to `~/.codex/auth.json`, it now saves the latest tokens from the account
@@ -216,3 +254,5 @@ pnpm release patch -- --push
 # For non-interactive use, pass the note explicitly.
 pnpm release patch -- --push --note "Fixed account switching issues"
 ```
+
+Provider presets can be registered by name and base URL in Add Account, then selected for other accounts. Presets are saved locally in this app/browser and contain no API keys; they are not included in account backups. Load models shows a selectable list that fills the account’s default model, with manual entry available.

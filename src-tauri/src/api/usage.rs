@@ -87,6 +87,11 @@ pub async fn get_account_usage(account: &StoredAccount) -> Result<UsageInfo> {
 
 /// Send a minimal authenticated request to warm up account traffic paths.
 pub async fn warmup_account(account: &StoredAccount) -> Result<()> {
+    // Custom gateways may implement different traffic/usage semantics. In
+    // particular, never send their credentials to the built-in OpenAI endpoint.
+    if account.custom_provider.is_some() {
+        anyhow::bail!("Warm-up is not supported for custom provider accounts");
+    }
     match &account.auth_data {
         AuthData::ApiKey { key } => warmup_with_api_key(key).await,
         AuthData::ChatGPT { .. } => warmup_with_chatgpt_auth(account).await,
