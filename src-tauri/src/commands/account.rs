@@ -24,6 +24,7 @@ use sha2::Sha256;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
+use std::process::Command;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -175,8 +176,35 @@ pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
     // Update last_used_at
     touch_account(account_id).map_err(|e| e.to_string())?;
 
-    // Restart Antigravity background process if it is running
-    // This allows it to pick up the new authorization file seamlessly
+    // Restart background services (app-server daemon, Antigravity/VS Code background helpers)
+    // This allows them to pick up the new authorization file seamlessly
+    restart_codex_background_services();
+
+    Ok(())
+}
+
+/// Restart or terminate background Codex services (app-server daemon, Antigravity/VS Code background helpers)
+/// to ensure newly written credentials in ~/.codex/auth.json are reloaded immediately.
+pub fn restart_codex_background_services() {
+    let codex_bin = crate::commands::auto_recovery::find_codex_binary();
+    let mut check_cmd = Command::new(&codex_bin);
+    check_cmd.env_remove("LD_LIBRARY_PATH");
+    let is_daemon_running = check_cmd
+        .args(["app-server", "daemon", "version"])
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false);
+
+    if is_daemon_running {
+        let mut stop_cmd = Command::new(&codex_bin);
+        stop_cmd.env_remove("LD_LIBRARY_PATH");
+        let _ = stop_cmd.args(["app-server", "daemon", "stop"]).output();
+
+        let mut start_cmd = Command::new(&codex_bin);
+        start_cmd.env_remove("LD_LIBRARY_PATH");
+        let _ = start_cmd.args(["app-server", "daemon", "start"]).output();
+    }
+
     if let Ok(pids) = find_antigravity_processes() {
         for pid in pids {
             #[cfg(unix)]
@@ -194,8 +222,6 @@ pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
             }
         }
     }
-
-    Ok(())
 }
 
 /// Remove an account

@@ -25,6 +25,10 @@ interface AccountCardProps {
   autoWarmupManagedByAll?: boolean;
   autoWarmupLabel?: string;
   onToggleAutoWarmup?: () => void;
+  resetCreditWarningDays?: number;
+  autoSwitchLimitEnabled?: boolean;
+  autoSwitchExcluded?: boolean;
+  onToggleAutoSwitchExclusion?: () => void;
 }
 
 function formatLastRefresh(date: Date | null): string {
@@ -112,6 +116,10 @@ export function AccountCard({
   autoWarmupManagedByAll = false,
   autoWarmupLabel,
   onToggleAutoWarmup,
+  resetCreditWarningDays,
+  autoSwitchLimitEnabled = false,
+  autoSwitchExcluded = false,
+  onToggleAutoSwitchExclusion,
 }: AccountCardProps) {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(
@@ -196,13 +204,16 @@ export function AccountCard({
   };
 
   const planDisplay = account.plan_type
-    ? account.plan_type.charAt(0).toUpperCase() + account.plan_type.slice(1)
+    ? account.plan_type.toLowerCase() === "prolite"
+      ? "Pro Lite"
+      : account.plan_type.charAt(0).toUpperCase() + account.plan_type.slice(1)
     : account.auth_mode === "api_key"
       ? "API Key"
       : "Unknown";
 
   const planColors: Record<string, string> = {
-    pro: "bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-700",
+    pro: "bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-900/30 dark:text-purple-300 dark:border-purple-700",
+    prolite: "bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-900/30 dark:text-indigo-300 dark:border-indigo-700",
     plus: "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-300 dark:border-emerald-700",
     team: "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-700",
     enterprise: "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-700",
@@ -336,6 +347,37 @@ export function AccountCard({
               )}
             </button>
           )}
+          {/* Auto-switch toggle */}
+          {autoSwitchLimitEnabled && onToggleAutoSwitchExclusion && (
+            <button
+              onClick={onToggleAutoSwitchExclusion}
+              className={`p-1 transition-colors ${
+                autoSwitchExcluded
+                  ? "text-gray-400/60 dark:text-gray-500/60 hover:text-gray-600 dark:hover:text-gray-300"
+                  : "text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300"
+              }`}
+              title={
+                autoSwitchExcluded
+                  ? "Include in auto-switch rotation (currently excluded)"
+                  : "Exclude from auto-switch rotation"
+              }
+              aria-label={
+                autoSwitchExcluded
+                  ? "Include in auto-switch rotation"
+                  : "Exclude from auto-switch rotation"
+              }
+            >
+              {autoSwitchExcluded ? (
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7h14m0 0l-3.5-3.5M18 7l-3.5 3.5M20 17H6m0 0l3.5 3.5M6 17l3.5-3.5M3 3l18 18" />
+                </svg>
+              ) : (
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7h14m0 0l-3.5-3.5M18 7l-3.5 3.5M20 17H6m0 0l3.5 3.5M6 17l3.5-3.5" />
+                </svg>
+              )}
+            </button>
+          )}
           {/* Plan badge */}
           <span
             className={`px-2.5 py-1 text-xs font-medium rounded-full border ${planColorClass}`}
@@ -345,6 +387,12 @@ export function AccountCard({
           <ResetCreditsMenu
             compact={compactResetCredits}
             resetCredits={resetCredits}
+            warningDays={resetCreditWarningDays}
+            accountId={account.id}
+            onRedeemed={() => {
+              void loadResetCredits();
+              onRefresh();
+            }}
           />
         </div>
       </div>
