@@ -8,7 +8,7 @@ use std::{
 use tauri::{AppHandle, Manager, Runtime};
 
 use crate::{
-    auth::{load_app_settings, save_app_settings},
+    auth::{load_app_settings, mutate_app_settings},
     types::{DockDisplayMode, TrayDisplayMode, UsageInfo},
 };
 
@@ -173,11 +173,14 @@ pub fn complete_close_behavior(
 ) -> Result<Option<DockDisplayMode>, String> {
     #[cfg(target_os = "macos")]
     {
-        let mut settings = crate::app_menu::set_dock_display_mode(&app, mode)
+        let settings = crate::app_menu::set_dock_display_mode(&app, mode)
             .map_err(|error| error.to_string())?;
         if dont_ask_again {
-            settings.close_behavior_prompt_enabled = false;
-            save_app_settings(&settings).map_err(|error| error.to_string())?;
+            mutate_app_settings(|settings| {
+                settings.close_behavior_prompt_enabled = false;
+                Ok(())
+            })
+            .map_err(|error| error.to_string())?;
         }
         hide_main_window(&app);
         Ok(Some(settings.dock_display_mode))
