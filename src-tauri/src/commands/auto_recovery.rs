@@ -1441,10 +1441,14 @@ pub fn select_best_account(
     usage_map: &HashMap<String, UsageInfo>,
     resets_map: &HashMap<String, AccountResetCredits>,
     warning_days: u32,
+    excluded_account_ids: &[String],
 ) -> Option<StoredAccount> {
     let candidates: Vec<&StoredAccount> = accounts
         .iter()
-        .filter(|a| current_account_id.map_or(true, |curr| a.id != curr))
+        .filter(|a| {
+            current_account_id.map_or(true, |curr| a.id != curr)
+                && !excluded_account_ids.iter().any(|id| id == &a.id)
+        })
         .collect();
 
     if candidates.is_empty() {
@@ -2232,7 +2236,8 @@ async fn handle_account_switch_for_session(
     // If auto_redeem_reset_credits is enabled, check if the currently active account has available reset credits
     if settings.auto_redeem_reset_credits {
         if let Some(curr_acc_id) = current_id {
-            if let Some(curr_acc) = store.accounts.iter().find(|a| a.id == curr_acc_id) {
+            if !settings.auto_switch_excluded_account_ids.iter().any(|id| id == curr_acc_id) {
+                if let Some(curr_acc) = store.accounts.iter().find(|a| a.id == curr_acc_id) {
                 if let Ok(Ok(stats)) = tokio::time::timeout(
                     Duration::from_secs(10),
                     crate::commands::account_stats::get_account_usage_stats(curr_acc.id.clone()),
@@ -2337,6 +2342,7 @@ async fn handle_account_switch_for_session(
                     }
                 }
             }
+            }
         }
     }
 
@@ -2346,7 +2352,10 @@ async fn handle_account_switch_for_session(
 
     // One stalled profile request must not block every recovery cycle. Fetch
     // candidates concurrently and bound each account's total lookup time.
-    let candidates = store.accounts.iter().filter(|acc| Some(acc.id.as_str()) != current_id);
+    let candidates = store.accounts.iter().filter(|acc| {
+        Some(acc.id.as_str()) != current_id
+            && !settings.auto_switch_excluded_account_ids.iter().any(|id| id == &acc.id)
+    });
     let snapshots = futures::future::join_all(candidates.map(|acc| async {
         let account_id = acc.id.clone();
         let snapshot = tokio::time::timeout(Duration::from_secs(10), async {
@@ -2382,6 +2391,7 @@ async fn handle_account_switch_for_session(
         &usage_map,
         &resets_map,
         settings.reset_credit_warning_days,
+        &settings.auto_switch_excluded_account_ids,
     );
 
     let Some(target) = target_account else {
@@ -2622,6 +2632,34 @@ pub fn set_auto_switch_limit_enabled(enabled: bool) -> Result<AppSettings, Strin
     Ok(settings)
 }
 
+/// Toggle whether an account is excluded from automatic switching rotation.
+#[tauri::command]
+pub fn toggle_account_auto_switch_exclusion(account_id: String) -> Result<AppSettings, String> {
+    let mut settings = load_app_settings().map_err(|e| e.to_string())?;
+    if let Some(pos) = settings.auto_switch_excluded_account_ids.iter().position(|id| id == &account_id) {
+        settings.auto_switch_excluded_account_ids.remove(pos);
+    } else {
+        settings.auto_switch_excluded_account_ids.push(account_id);
+    }
+    save_app_settings(&settings).map_err(|e| e.to_string())?;
+    Ok(settings)
+}
+
+/// Set whether an account is excluded from automatic switching rotation.
+#[tauri::command]
+pub fn set_account_auto_switch_excluded(account_id: String, excluded: bool) -> Result<AppSettings, String> {
+    let mut settings = load_app_settings().map_err(|e| e.to_string())?;
+    let is_currently_excluded = settings.auto_switch_excluded_account_ids.iter().any(|id| id == &account_id);
+    if excluded && !is_currently_excluded {
+        settings.auto_switch_excluded_account_ids.push(account_id);
+        save_app_settings(&settings).map_err(|e| e.to_string())?;
+    } else if !excluded && is_currently_excluded {
+        settings.auto_switch_excluded_account_ids.retain(|id| id != &account_id);
+        save_app_settings(&settings).map_err(|e| e.to_string())?;
+    }
+    Ok(settings)
+}
+
 /// Save auto-recovery configuration
 #[tauri::command]
 pub async fn save_auto_recovery_settings(
@@ -2635,6 +2673,7 @@ pub async fn save_auto_recovery_settings(
     continue_phrase: String,
     reset_credit_warning_days: u32,
     preferred_terminal: Option<String>,
+    auto_switch_excluded_account_ids: Option<Vec<String>>,
 ) -> Result<AppSettings, String> {
     let mut settings = load_app_settings().unwrap_or_default();
     settings.auto_retry_capacity_enabled = auto_retry_capacity_enabled;
@@ -2651,6 +2690,9 @@ pub async fn save_auto_recovery_settings(
     };
     settings.reset_credit_warning_days = reset_credit_warning_days.max(1);
     settings.preferred_terminal = preferred_terminal;
+    if let Some(ids) = auto_switch_excluded_account_ids {
+        settings.auto_switch_excluded_account_ids = ids;
+    }
 
     save_app_settings(&settings).map_err(|e| e.to_string())?;
     Ok(settings)
@@ -3141,6 +3183,7 @@ mod tests {
             &usage_map,
             &resets_map,
             3,
+            &[],
         );
 
         assert!(selected.is_some());
@@ -3220,6 +3263,7 @@ mod tests {
             &usage_map,
             &resets_map,
             3,
+            &[],
         );
 
         assert!(selected.is_some());
@@ -3520,6 +3564,7 @@ mod tests {
             &usage_map,
             &resets_map,
             3,
+            &[],
         );
 
         assert_eq!(
@@ -3702,6 +3747,7 @@ mod tests {
             &usage_map,
             &resets_map,
             3,
+            &[],
         );
 
         assert_eq!(
@@ -3985,6 +4031,93 @@ mod tests {
         let consumed = relaunch_cli_session(&session, "/goal resume", true, &settings).await.unwrap();
         assert!(consumed, "Expected terminal runner to consume restart file");
         let _ = fs::remove_file(&restart_file);
+    }
+
+    #[test]
+    fn test_select_best_account_skips_excluded_accounts() {
+        let now = Utc::now();
+        let acc1 = make_test_account_with_plan("acc_top", "Top Pro with Reset", "pro", Some(now + ChronoDuration::days(30)));
+        let acc2 = make_test_account_with_plan("acc_backup", "Backup Plus", "plus", Some(now + ChronoDuration::days(10)));
+
+        let mut usage_map = HashMap::new();
+        let mut resets_map = HashMap::new();
+
+        usage_map.insert("acc_top".to_string(), UsageInfo {
+            account_id: "acc_top".to_string(),
+            plan_type: Some("pro".to_string()),
+            primary_used_percent: Some(20.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: Some(now.timestamp() + 3600),
+            secondary_used_percent: Some(30.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 86400),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        });
+        usage_map.insert("acc_backup".to_string(), UsageInfo {
+            account_id: "acc_backup".to_string(),
+            plan_type: Some("plus".to_string()),
+            primary_used_percent: Some(10.0),
+            primary_window_minutes: Some(300),
+            primary_resets_at: Some(now.timestamp() + 3600),
+            secondary_used_percent: Some(20.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: Some(now.timestamp() + 86400),
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: None,
+        });
+
+        // 1. Without exclusion, acc_backup (Plus) is chosen first over Pro in SmartBalanced
+        let selected = select_best_account(
+            &[acc1.clone(), acc2.clone()],
+            None,
+            AutoSwitchStrategy::SmartBalanced,
+            &usage_map,
+            &resets_map,
+            3,
+            &[],
+        );
+        assert_eq!(selected.unwrap().id, "acc_backup");
+
+        // 2. If acc_backup is excluded, acc_top is chosen
+        let selected_excluded_backup = select_best_account(
+            &[acc1.clone(), acc2.clone()],
+            None,
+            AutoSwitchStrategy::SmartBalanced,
+            &usage_map,
+            &resets_map,
+            3,
+            &["acc_backup".to_string()],
+        );
+        assert_eq!(selected_excluded_backup.unwrap().id, "acc_top");
+
+        // 3. If acc_top is excluded in RoundRobin, it picks acc_backup
+        let selected_rr = select_best_account(
+            &[acc1.clone(), acc2.clone()],
+            None,
+            AutoSwitchStrategy::RoundRobin,
+            &usage_map,
+            &resets_map,
+            3,
+            &["acc_top".to_string()],
+        );
+        assert_eq!(selected_rr.unwrap().id, "acc_backup");
+
+        // 4. If all candidates are excluded, returns None
+        let selected_none = select_best_account(
+            &[acc1.clone(), acc2.clone()],
+            None,
+            AutoSwitchStrategy::SmartBalanced,
+            &usage_map,
+            &resets_map,
+            3,
+            &["acc_top".to_string(), "acc_backup".to_string()],
+        );
+        assert!(selected_none.is_none());
     }
 
 }

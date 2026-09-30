@@ -107,6 +107,8 @@ pub struct AppSettings {
     pub reset_credit_warning_days: u32,
     #[serde(default)]
     pub preferred_terminal: Option<String>,
+    #[serde(default)]
+    pub auto_switch_excluded_account_ids: Vec<String>,
 }
 
 impl Default for AppSettings {
@@ -125,6 +127,7 @@ impl Default for AppSettings {
             continue_phrase: default_continue_phrase(),
             reset_credit_warning_days: 3,
             preferred_terminal: None,
+            auto_switch_excluded_account_ids: Vec::new(),
         }
     }
 }

@@ -114,6 +114,8 @@ pub fn run() {
             // Auto Recovery & Session Automation
             commands::get_app_settings,
             commands::set_auto_switch_limit_enabled,
+            commands::toggle_account_auto_switch_exclusion,
+            commands::set_account_auto_switch_excluded,
             commands::get_auto_recovery_status,
             commands::trigger_auto_recovery_check,
             commands::launch_codex_session,

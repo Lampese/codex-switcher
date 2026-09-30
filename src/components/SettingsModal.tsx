@@ -104,6 +104,7 @@ export function SettingsModal({
         continuePhrase: next.continue_phrase,
         resetCreditWarningDays: next.reset_credit_warning_days,
         preferredTerminal: next.preferred_terminal,
+        autoSwitchExcludedAccountIds: next.auto_switch_excluded_account_ids,
       });
     } catch (err) {
       setError(String(err));
@@ -272,6 +273,14 @@ export function SettingsModal({
                       When the active account hits its limit, automatically consumes an available reset credit to restore 100% quota before switching accounts.
                     </p>
                   </div>
+
+                  {(appSettings?.auto_switch_excluded_account_ids?.length ?? 0) > 0 && (
+                    <div className="pt-2 border-t border-gray-200/60 dark:border-gray-700/60">
+                      <p className="text-[11px] text-amber-600 dark:text-amber-400 font-medium">
+                        {appSettings!.auto_switch_excluded_account_ids!.length} account{appSettings!.auto_switch_excluded_account_ids!.length > 1 ? "s" : ""} currently excluded from auto-switch rotation (configured on account cards).
+                      </p>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

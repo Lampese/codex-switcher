@@ -646,6 +646,20 @@ function App() {
     }
   }, [appSettings, autoSwitchSaving, loadAppSettings, showWarmupToast]);
 
+  const handleToggleAutoSwitchExclusion = useCallback(async (accountId: string) => {
+    try {
+      const updated = await invokeBackend<AppSettings>("toggle_account_auto_switch_exclusion", {
+        accountId,
+      });
+      setAppSettings(updated);
+      const isExcluded = updated.auto_switch_excluded_account_ids?.includes(accountId) ?? false;
+      showWarmupToast(`Account ${isExcluded ? "excluded from" : "restored to"} auto-switch queue.`);
+    } catch (err) {
+      showWarmupToast(`Could not update auto-switch exclusion: ${String(err)}`, true);
+      void loadAppSettings();
+    }
+  }, [loadAppSettings, showWarmupToast]);
+
   useEffect(() => {
     if (!isTauriRuntime()) return;
     let disposed = false;
@@ -1948,6 +1962,13 @@ function App() {
                     )}
                     onToggleAutoWarmup={() => toggleAutoWarmupAccount(activeAccount.id)}
                     resetCreditWarningDays={appSettings?.reset_credit_warning_days ?? 3}
+                    autoSwitchLimitEnabled={appSettings?.auto_switch_limit_enabled ?? false}
+                    autoSwitchExcluded={
+                      appSettings?.auto_switch_excluded_account_ids?.includes(activeAccount.id) ?? false
+                    }
+                    onToggleAutoSwitchExclusion={() =>
+                      void handleToggleAutoSwitchExclusion(activeAccount.id)
+                    }
                   />
                 </section>
               )}
@@ -2046,6 +2067,13 @@ function App() {
                       )}
                       onToggleAutoWarmup={() => toggleAutoWarmupAccount(account.id)}
                       resetCreditWarningDays={appSettings?.reset_credit_warning_days ?? 3}
+                      autoSwitchLimitEnabled={appSettings?.auto_switch_limit_enabled ?? false}
+                      autoSwitchExcluded={
+                        appSettings?.auto_switch_excluded_account_ids?.includes(account.id) ?? false
+                      }
+                      onToggleAutoSwitchExclusion={() =>
+                        void handleToggleAutoSwitchExclusion(account.id)
+                      }
                     />
                   ))}
                 </div>

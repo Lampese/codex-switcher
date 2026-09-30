@@ -26,6 +26,9 @@ interface AccountCardProps {
   autoWarmupLabel?: string;
   onToggleAutoWarmup?: () => void;
   resetCreditWarningDays?: number;
+  autoSwitchLimitEnabled?: boolean;
+  autoSwitchExcluded?: boolean;
+  onToggleAutoSwitchExclusion?: () => void;
 }
 
 function formatLastRefresh(date: Date | null): string {
@@ -114,6 +117,9 @@ export function AccountCard({
   autoWarmupLabel,
   onToggleAutoWarmup,
   resetCreditWarningDays,
+  autoSwitchLimitEnabled = false,
+  autoSwitchExcluded = false,
+  onToggleAutoSwitchExclusion,
 }: AccountCardProps) {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(
@@ -337,6 +343,37 @@ export function AccountCard({
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                </svg>
+              )}
+            </button>
+          )}
+          {/* Auto-switch toggle */}
+          {autoSwitchLimitEnabled && onToggleAutoSwitchExclusion && (
+            <button
+              onClick={onToggleAutoSwitchExclusion}
+              className={`p-1 transition-colors ${
+                autoSwitchExcluded
+                  ? "text-gray-400/60 dark:text-gray-500/60 hover:text-gray-600 dark:hover:text-gray-300"
+                  : "text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300"
+              }`}
+              title={
+                autoSwitchExcluded
+                  ? "Include in auto-switch rotation (currently excluded)"
+                  : "Exclude from auto-switch rotation"
+              }
+              aria-label={
+                autoSwitchExcluded
+                  ? "Include in auto-switch rotation"
+                  : "Exclude from auto-switch rotation"
+              }
+            >
+              {autoSwitchExcluded ? (
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7h14m0 0l-3.5-3.5M18 7l-3.5 3.5M20 17H6m0 0l3.5 3.5M6 17l3.5-3.5M3 3l18 18" />
+                </svg>
+              ) : (
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7h14m0 0l-3.5-3.5M18 7l-3.5 3.5M20 17H6m0 0l3.5 3.5M6 17l3.5-3.5" />
                 </svg>
               )}
             </button>

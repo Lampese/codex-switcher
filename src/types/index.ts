@@ -144,4 +144,5 @@ export interface AppSettings {
   continue_phrase: string;
   reset_credit_warning_days: number;
   preferred_terminal: string | null;
+  auto_switch_excluded_account_ids?: string[];
 }
