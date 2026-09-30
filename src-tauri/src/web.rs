@@ -14,9 +14,9 @@ use crate::commands::{
     complete_login, delete_account, export_accounts_full_encrypted_bytes,
     export_accounts_slim_text, fetch_usage, get_account_usage_stats, get_active_account_info,
     get_masked_account_ids, import_accounts_full_encrypted_bytes, import_accounts_slim_text,
-    kill_codex_processes, list_accounts, redeem_account_reset_credit,
-    refresh_account_metadata, refresh_all_accounts_usage, rename_account, set_masked_account_ids,
-    start_login, switch_account, warmup_account, warmup_all_accounts,
+    kill_codex_processes, list_accounts, redeem_account_reset_credit, refresh_account_metadata,
+    refresh_all_accounts_usage, rename_account, set_masked_account_ids, start_login,
+    switch_account, warmup_account, warmup_all_accounts,
 };
 
 #[derive(Debug, Deserialize)]

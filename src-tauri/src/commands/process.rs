@@ -577,7 +577,8 @@ pub(crate) fn is_linux_codex_desktop_process(command: &str) -> bool {
         || first.ends_with("/codex-desktop")
         || first == "chatgpt"
         || first == "codex-desktop"
-        || (cmd.starts_with('/') && (cmd.contains("/usr/lib/chatgpt/chatgpt") || cmd.contains("/usr/lib/codex/codex")))
+        || (cmd.starts_with('/')
+            && (cmd.contains("/usr/lib/chatgpt/chatgpt") || cmd.contains("/usr/lib/codex/codex")))
 }
 
 fn is_macos_codex_desktop_process(
@@ -848,12 +849,22 @@ mod tests {
 
     #[test]
     fn detects_linux_codex_desktop_root_process() {
-        assert!(super::is_linux_codex_desktop_process("/usr/lib/chatgpt/ChatGPT"));
-        assert!(super::is_linux_codex_desktop_process("/usr/bin/codex-desktop"));
+        assert!(super::is_linux_codex_desktop_process(
+            "/usr/lib/chatgpt/ChatGPT"
+        ));
+        assert!(super::is_linux_codex_desktop_process(
+            "/usr/bin/codex-desktop"
+        ));
         assert!(super::is_linux_codex_desktop_process("/usr/bin/chatgpt"));
-        assert!(!super::is_linux_codex_desktop_process("/usr/lib/chatgpt/ChatGPT --type=renderer"));
-        assert!(!super::is_linux_codex_desktop_process("/usr/lib/chatgpt/ChatGPT --type=gpu-process"));
-        assert!(!super::is_linux_codex_desktop_process("/home/bn/.nvm/versions/node/v24.18.0/bin/codex resume session-id"));
+        assert!(!super::is_linux_codex_desktop_process(
+            "/usr/lib/chatgpt/ChatGPT --type=renderer"
+        ));
+        assert!(!super::is_linux_codex_desktop_process(
+            "/usr/lib/chatgpt/ChatGPT --type=gpu-process"
+        ));
+        assert!(!super::is_linux_codex_desktop_process(
+            "/home/bn/.nvm/versions/node/v24.18.0/bin/codex resume session-id"
+        ));
         assert!(!super::is_linux_codex_desktop_process("codex-switcher"));
     }
 
@@ -1199,7 +1210,11 @@ fn open_codex_app_blocking() -> Result<(), String> {
 
     #[cfg(target_os = "linux")]
     {
-        for candidate in ["/usr/bin/codex-desktop", "/usr/bin/chatgpt", "/usr/lib/chatgpt/ChatGPT"] {
+        for candidate in [
+            "/usr/bin/codex-desktop",
+            "/usr/bin/chatgpt",
+            "/usr/lib/chatgpt/ChatGPT",
+        ] {
             if std::path::Path::new(candidate).exists() {
                 if Command::new(candidate)
                     .stdin(std::process::Stdio::null())

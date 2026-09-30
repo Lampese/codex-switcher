@@ -20,10 +20,10 @@ use commands::{
     refresh_all_accounts_usage, rename_account, report_usage, set_dock_display_mode,
     set_masked_account_ids, start_login, switch_account, warmup_account, warmup_all_accounts,
 };
-use tauri::Emitter;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+use tauri::Emitter;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

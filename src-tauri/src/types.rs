@@ -623,7 +623,10 @@ mod tests {
         assert_eq!(settings.auto_retry_capacity_initial_delay_sec, 5);
         assert!(settings.auto_retry_capacity_escalate_to_switch);
         assert!(settings.auto_switch_limit_enabled);
-        assert_eq!(settings.auto_switch_strategy, AutoSwitchStrategy::SmartBalanced);
+        assert_eq!(
+            settings.auto_switch_strategy,
+            AutoSwitchStrategy::SmartBalanced
+        );
         assert_eq!(settings.continue_phrase, "continue");
         assert_eq!(settings.reset_credit_warning_days, 3);
     }

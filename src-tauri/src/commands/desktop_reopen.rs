@@ -138,7 +138,11 @@ pub(super) fn capture_desktops(pids: &[u32]) -> Result<Vec<CapturedDesktop>, Str
 
 #[cfg(any(target_os = "linux", test))]
 fn linux_desktop_executable_path(command: &str) -> String {
-    for candidate in ["/usr/bin/codex-desktop", "/usr/bin/chatgpt", "/usr/lib/chatgpt/ChatGPT"] {
+    for candidate in [
+        "/usr/bin/codex-desktop",
+        "/usr/bin/chatgpt",
+        "/usr/lib/chatgpt/ChatGPT",
+    ] {
         if std::path::Path::new(candidate).exists() {
             return candidate.to_string();
         }
@@ -360,14 +364,12 @@ fn launch_desktop(target: &DesktopTarget) -> bool {
             )
         }
         #[cfg(target_os = "linux")]
-        DesktopTarget::LinuxExecutable(path) => {
-            super::Command::new(path)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .is_ok()
-        }
+        DesktopTarget::LinuxExecutable(path) => super::Command::new(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok(),
         #[allow(unreachable_patterns)]
         _ => false,
     }

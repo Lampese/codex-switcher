@@ -306,10 +306,7 @@ pub async fn redeem_reset_credit(account: &StoredAccount, credit_id: &str) -> an
         let (retry_token, retry_account_id) = extract_chatgpt_auth(&refreshed_account)?;
         response = client
             .post(CHATGPT_RESET_CREDITS_CONSUME_URL)
-            .headers(build_reset_credits_headers(
-                retry_token,
-                retry_account_id,
-            )?)
+            .headers(build_reset_credits_headers(retry_token, retry_account_id)?)
             .json(&serde_json::json!({
                 "credit_id": credit_id,
                 "redeem_request_id": redeem_request_id,

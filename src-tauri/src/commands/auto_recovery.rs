@@ -10,12 +10,12 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-use std::process::Stdio;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -27,9 +27,7 @@ use crate::auth::{
     AUTH_OPERATION_LOCK,
 };
 use crate::commands::account_stats::AccountResetCredits;
-use crate::types::{
-    AppSettings, AutoSwitchStrategy, StoredAccount, UsageInfo,
-};
+use crate::types::{AppSettings, AutoSwitchStrategy, StoredAccount, UsageInfo};
 
 /// Type of error detected in a Codex session
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,16 +90,15 @@ struct SessionTrackerState {
     last_account_switch: Option<(Instant, String, bool, String)>,
 }
 
-static TRACKER: std::sync::LazyLock<Mutex<SessionTrackerState>> =
-    std::sync::LazyLock::new(|| {
-        Mutex::new(SessionTrackerState {
-            capacity_retries: HashMap::new(),
-            handled_usage_limits: HashMap::new(),
-            managed_pids: Vec::new(),
-            last_event: None,
-            last_account_switch: None,
-        })
-    });
+static TRACKER: std::sync::LazyLock<Mutex<SessionTrackerState>> = std::sync::LazyLock::new(|| {
+    Mutex::new(SessionTrackerState {
+        capacity_retries: HashMap::new(),
+        handled_usage_limits: HashMap::new(),
+        managed_pids: Vec::new(),
+        last_event: None,
+        last_account_switch: None,
+    })
+});
 
 fn which_cmd(cmd: &str) -> Option<PathBuf> {
     if let Ok(path_var) = std::env::var("PATH") {
@@ -138,14 +135,17 @@ fn macos_resume_command(
     } else {
         format!(" {}", escape_shell_arg(phrase))
     };
-    let model_arg = model.map(|m| format!(" --model {}", escape_shell_arg(m))).unwrap_or_default();
-    let effort_arg = effort.map(|e| format!(" -c model_reasoning_effort={}", escape_shell_arg(e))).unwrap_or_default();
+    let model_arg = model
+        .map(|m| format!(" --model {}", escape_shell_arg(m)))
+        .unwrap_or_default();
+    let effort_arg = effort
+        .map(|e| format!(" -c model_reasoning_effort={}", escape_shell_arg(e)))
+        .unwrap_or_default();
     let restart_file_arg = escape_shell_arg(&restart_file.to_string_lossy());
     format!(
         "cd {cwd} && while true; do {binary} resume{model_arg}{effort_arg} {session}{phrase_arg}; if [ -f {restart_file_arg} ]; then rm -f {restart_file_arg}; sleep 1; continue; fi; break; done; exit"
     )
 }
-
 
 /// Find the codex CLI executable in standard and user environments
 pub fn find_codex_binary() -> PathBuf {
@@ -181,7 +181,11 @@ pub fn find_codex_binary() -> PathBuf {
     }
 
     // Standard Unix fallbacks
-    for path in &["/usr/local/bin/codex", "/usr/bin/codex", "/opt/homebrew/bin/codex"] {
+    for path in &[
+        "/usr/local/bin/codex",
+        "/usr/bin/codex",
+        "/opt/homebrew/bin/codex",
+    ] {
         let p = PathBuf::from(path);
         if p.is_file() {
             return p;
@@ -253,9 +257,13 @@ pub fn find_active_sessions() -> Result<Vec<ActiveCodexSession>> {
         }
 
         // Canonical working directory: prefer rollout metadata, fallback to process cwd
-        let cwd = session_cwd
-            .map(|s| s.to_string())
-            .or_else(|| if pid > 0 { get_process_cwd(pid) } else { None });
+        let cwd = session_cwd.map(|s| s.to_string()).or_else(|| {
+            if pid > 0 {
+                get_process_cwd(pid)
+            } else {
+                None
+            }
+        });
 
         let is_managed = pid > 0 && managed_pids.contains(&pid);
 
@@ -263,7 +271,9 @@ pub fn find_active_sessions() -> Result<Vec<ActiveCodexSession>> {
             session_id: session_id.clone(),
             pid,
             cwd,
-            rollout_path: rollout_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+            rollout_path: rollout_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
             last_error: None,
             is_managed,
             is_desktop,
@@ -311,7 +321,11 @@ fn inspect_session_meta(rollout_path: &Path) -> Option<SessionRolloutMeta> {
             if cwd.is_none() {
                 if let Some(c) = payload
                     .and_then(|p| p.get("cwd"))
-                    .or_else(|| payload.and_then(|p| p.get("thread_settings")).and_then(|ts| ts.get("cwd")))
+                    .or_else(|| {
+                        payload
+                            .and_then(|p| p.get("thread_settings"))
+                            .and_then(|ts| ts.get("cwd"))
+                    })
                     .or_else(|| {
                         payload
                             .and_then(|p| p.get("state"))
@@ -349,17 +363,26 @@ pub fn locate_rollout_file(codex_home: &Path, session_id: &str) -> Option<PathBu
     let target_needle = format!("{session_id}.jsonl");
 
     // Scan years/months/days backwards from current date to minimize disk I/O
-    let mut years = fs::read_dir(&base).ok()?.filter_map(Result::ok).collect::<Vec<_>>();
+    let mut years = fs::read_dir(&base)
+        .ok()?
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
     years.sort_by_key(|e| e.file_name());
     years.reverse();
 
     for year in years {
-        let mut months = fs::read_dir(year.path()).ok()?.filter_map(Result::ok).collect::<Vec<_>>();
+        let mut months = fs::read_dir(year.path())
+            .ok()?
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
         months.sort_by_key(|e| e.file_name());
         months.reverse();
 
         for month in months {
-            let mut days = fs::read_dir(month.path()).ok()?.filter_map(Result::ok).collect::<Vec<_>>();
+            let mut days = fs::read_dir(month.path())
+                .ok()?
+                .filter_map(Result::ok)
+                .collect::<Vec<_>>();
             days.sort_by_key(|e| e.file_name());
             days.reverse();
 
@@ -380,7 +403,11 @@ pub fn locate_rollout_file(codex_home: &Path, session_id: &str) -> Option<PathBu
 }
 
 /// Find PID associated with a session ID via /proc, lsof, or working directory
-fn find_pid_for_session(session_id: &str, file_path: &Path, session_cwd: Option<&str>) -> Option<u32> {
+fn find_pid_for_session(
+    session_id: &str,
+    file_path: &Path,
+    session_cwd: Option<&str>,
+) -> Option<u32> {
     #[cfg(target_os = "linux")]
     {
         // 1. Check /proc/[pid]/cmdline for session ID without needing root permissions
@@ -412,7 +439,10 @@ fn find_pid_for_session(session_id: &str, file_path: &Path, session_cwd: Option<
                     if let Ok(pid) = line.trim().parse::<u32>() {
                         let Ok(output) = Command::new("ps")
                             .args(["-p", &pid.to_string(), "-o", "args="])
-                            .output() else { continue };
+                            .output()
+                        else {
+                            continue;
+                        };
                         if output.status.success()
                             && is_supported_cli_command(&String::from_utf8_lossy(&output.stdout))
                         {
@@ -443,14 +473,20 @@ fn find_cli_pid_by_cwd(target_cwd: &str) -> Option<u32> {
         if let Ok(entries) = fs::read_dir("/proc") {
             for entry in entries.filter_map(Result::ok) {
                 let name = entry.file_name();
-                let Ok(pid) = name.to_string_lossy().parse::<u32>() else { continue };
+                let Ok(pid) = name.to_string_lossy().parse::<u32>() else {
+                    continue;
+                };
                 let cmdline_path = entry.path().join("cmdline");
-                let Ok(cmdline_bytes) = fs::read(&cmdline_path) else { continue };
+                let Ok(cmdline_bytes) = fs::read(&cmdline_path) else {
+                    continue;
+                };
                 let cmdline = String::from_utf8_lossy(&cmdline_bytes);
                 if !is_supported_cli_command(&cmdline.replace('\0', " ")) {
                     continue;
                 }
-                let Ok(dest) = fs::read_link(format!("/proc/{pid}/cwd")) else { continue };
+                let Ok(dest) = fs::read_link(format!("/proc/{pid}/cwd")) else {
+                    continue;
+                };
                 let proc_path = fs::canonicalize(&dest).unwrap_or(dest);
                 if proc_path == target_path {
                     return Some(pid);
@@ -468,14 +504,19 @@ fn find_cli_pid_by_cwd(target_cwd: &str) -> Option<u32> {
                     for line in String::from_utf8_lossy(&output.stdout).lines() {
                         let line = line.trim();
                         let mut parts = line.split_whitespace();
-                        let Some(pid_str) = parts.next() else { continue };
+                        let Some(pid_str) = parts.next() else {
+                            continue;
+                        };
                         let command = parts.collect::<Vec<_>>().join(" ");
-                        let Ok(pid) = pid_str.parse::<u32>() else { continue };
+                        let Ok(pid) = pid_str.parse::<u32>() else {
+                            continue;
+                        };
                         if !is_supported_cli_command(&command) {
                             continue;
                         }
                         if let Some(proc_cwd) = get_process_cwd(pid) {
-                            let proc_path = fs::canonicalize(&proc_cwd).unwrap_or_else(|_| PathBuf::from(&proc_cwd));
+                            let proc_path = fs::canonicalize(&proc_cwd)
+                                .unwrap_or_else(|_| PathBuf::from(&proc_cwd));
                             if proc_path == target_path {
                                 return Some(pid);
                             }
@@ -536,8 +577,13 @@ fn rollout_has_active_turn(path: &Path) -> Result<bool> {
         {
             continue;
         }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-        match value.pointer("/payload/type").and_then(|kind| kind.as_str()) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match value
+            .pointer("/payload/type")
+            .and_then(|kind| kind.as_str())
+        {
             Some("task_started") => return Ok(true),
             Some("task_complete") | Some("turn_aborted") => return Ok(false),
             _ => {}
@@ -555,7 +601,10 @@ fn desktop_handoff_is_exclusive(session_id: &str) -> Result<()> {
         if !other.is_desktop {
             anyhow::bail!("Another CLI session is open; deferring desktop account handoff");
         }
-        let path = other.rollout_path.as_deref().context("Desktop session history is unavailable")?;
+        let path = other
+            .rollout_path
+            .as_deref()
+            .context("Desktop session history is unavailable")?;
         if rollout_has_active_turn(Path::new(path))? {
             anyhow::bail!("Another desktop turn is active; deferring account handoff");
         }
@@ -575,7 +624,9 @@ async fn close_desktop_for_handoff(session_id: &str) -> Result<String> {
     let closed = crate::commands::process::kill_codex_processes(Some(true), Some(false))
         .await
         .map_err(anyhow::Error::msg)?;
-    let token = closed.reopen_token.context("Could not record Codex desktop for reopening")?;
+    let token = closed
+        .reopen_token
+        .context("Could not record Codex desktop for reopening")?;
     if !closed.failed_pids.is_empty() {
         let _ = crate::commands::reopen_closed_codex_desktop(token).await;
         anyhow::bail!("Codex desktop did not close cleanly; account was not switched");
@@ -607,14 +658,24 @@ async fn close_idle_desktop_for_cli(session: &ActiveCodexSession) -> Result<bool
         .await
         .map_err(anyhow::Error::msg)?;
     let only_this_cli = processes.pids == vec![session.pid]
-        || (processes.pids.len() == 1 && is_same_or_related_cli_pid(processes.pids[0], session.pid));
+        || (processes.pids.len() == 1
+            && is_same_or_related_cli_pid(processes.pids[0], session.pid));
     if only_this_cli {
         return Ok(false);
     }
     desktop_handoff_is_exclusive(&session.session_id)?;
-    let contains_session = processes.pids.iter().any(|&p| is_same_or_related_cli_pid(p, session.pid));
-    if processes.pids.len() != 2 || !contains_session
-        || !processes.pids.iter().copied().any(|pid| pid != session.pid && is_desktop_root_pid(pid)) {
+    let contains_session = processes
+        .pids
+        .iter()
+        .any(|&p| is_same_or_related_cli_pid(p, session.pid));
+    if processes.pids.len() != 2
+        || !contains_session
+        || !processes
+            .pids
+            .iter()
+            .copied()
+            .any(|pid| pid != session.pid && is_desktop_root_pid(pid))
+    {
         anyhow::bail!("Another Codex process is running; deferring CLI account handoff");
     }
     #[cfg(target_os = "macos")]
@@ -628,8 +689,15 @@ async fn close_idle_desktop_for_cli(session: &ActiveCodexSession) -> Result<bool
     }
     #[cfg(target_os = "linux")]
     {
-        let desktop_pid = processes.pids.iter().copied().find(|&pid| pid != session.pid).unwrap();
-        let _ = Command::new("kill").args(["-TERM", &desktop_pid.to_string()]).status();
+        let desktop_pid = processes
+            .pids
+            .iter()
+            .copied()
+            .find(|&pid| pid != session.pid)
+            .unwrap();
+        let _ = Command::new("kill")
+            .args(["-TERM", &desktop_pid.to_string()])
+            .status();
     }
     for _ in 0..40 {
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -663,7 +731,10 @@ async fn app_server_response(
         if let Some(error) = value.get("error") {
             anyhow::bail!("Codex app-server request failed: {error}");
         }
-        return value.get("result").cloned().context("Codex app-server response has no result");
+        return value
+            .get("result")
+            .cloned()
+            .context("Codex app-server response has no result");
     }
 }
 
@@ -683,22 +754,37 @@ async fn app_server_request(
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn select_recovery_model(catalog: &serde_json::Value, preferred: Option<&str>) -> Result<String> {
-    let models = catalog.get("data").and_then(|value| value.as_array())
+    let models = catalog
+        .get("data")
+        .and_then(|value| value.as_array())
         .context("Codex returned no available models")?;
     let selected = preferred
-        .and_then(|name| models.iter().find(|model| model.get("model").and_then(|v| v.as_str()) == Some(name)))
+        .and_then(|name| {
+            models
+                .iter()
+                .find(|model| model.get("model").and_then(|v| v.as_str()) == Some(name))
+        })
         .or_else(|| {
             // If preferred has a tier suffix like "-sol" or "-luna", prefer matching suffix in available models
-            let suffix = preferred.and_then(|p| p.split_once('-').map(|(_, s)| s)).unwrap_or("");
+            let suffix = preferred
+                .and_then(|p| p.split_once('-').map(|(_, s)| s))
+                .unwrap_or("");
             if !suffix.is_empty() {
                 models.iter().find(|model| {
-                    model.get("model").and_then(|v| v.as_str()).map_or(false, |m| m.ends_with(suffix))
+                    model
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .map_or(false, |m| m.ends_with(suffix))
                 })
             } else {
                 None
             }
         })
-        .or_else(|| models.iter().find(|model| model.get("isDefault").and_then(|v| v.as_bool()) == Some(true)))
+        .or_else(|| {
+            models
+                .iter()
+                .find(|model| model.get("isDefault").and_then(|v| v.as_bool()) == Some(true))
+        })
         .or_else(|| models.first())
         .and_then(|model| model.get("model").and_then(|v| v.as_str()))
         .context("No supported Codex model is available for this account")?;
@@ -709,10 +795,24 @@ fn select_recovery_model(catalog: &serde_json::Value, preferred: Option<&str>) -
 async fn resolve_recovery_model(preferred: Option<&str>) -> Result<String> {
     let mut command = tokio::process::Command::new(find_codex_binary());
     command.env_remove("LD_LIBRARY_PATH");
-    let mut child = command.arg("app-server").stdin(Stdio::piped()).stdout(Stdio::piped())
-        .stderr(Stdio::null()).spawn().context("Could not query Codex models")?;
-    let mut stdin = child.stdin.take().context("Codex app-server has no stdin")?;
-    let mut lines = BufReader::new(child.stdout.take().context("Codex app-server has no stdout")?).lines();
+    let mut child = command
+        .arg("app-server")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("Could not query Codex models")?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("Codex app-server has no stdin")?;
+    let mut lines = BufReader::new(
+        child
+            .stdout
+            .take()
+            .context("Codex app-server has no stdout")?,
+    )
+    .lines();
     let result = async {
         app_server_request(&mut stdin, &mut lines, 1, "initialize",
             serde_json::json!({"clientInfo":{"name":"codex-switcher","version":env!("CARGO_PKG_VERSION")}})).await?;
@@ -887,13 +987,21 @@ pub fn extract_session_model_and_effort(rollout_path: &Path) -> (Option<String>,
             for line in start_reader.lines().take(50).filter_map(Result::ok) {
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
                     let payload = val.get("payload");
-                    if payload.and_then(|p| p.get("type")).and_then(|t| t.as_str()) == Some("thread_settings_applied") {
+                    if payload.and_then(|p| p.get("type")).and_then(|t| t.as_str())
+                        == Some("thread_settings_applied")
+                    {
                         let ts = payload.and_then(|p| p.get("thread_settings"));
                         if found_model.is_none() {
-                            found_model = ts.and_then(|t| t.get("model")).and_then(|v| v.as_str()).map(String::from);
+                            found_model = ts
+                                .and_then(|t| t.get("model"))
+                                .and_then(|v| v.as_str())
+                                .map(String::from);
                         }
                         if found_effort.is_none() {
-                            found_effort = ts.and_then(|t| t.get("reasoning_effort")).and_then(|v| v.as_str()).map(String::from);
+                            found_effort = ts
+                                .and_then(|t| t.get("reasoning_effort"))
+                                .and_then(|v| v.as_str())
+                                .map(String::from);
                         }
                     }
                 }
@@ -909,7 +1017,6 @@ pub fn extract_session_model_and_effort(rollout_path: &Path) -> (Option<String>,
     (found_model, found_effort)
 }
 
-
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn resume_desktop_after_handoff(
     token: String,
@@ -919,9 +1026,14 @@ async fn resume_desktop_after_handoff(
     // The desktop app owns the writer locks while open. Start real turns on a
     // temporary app-server after closing it, then reopen the desktop UI.
     #[cfg(target_os = "macos")]
-    let desktop_binary = PathBuf::from("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex");
+    let desktop_binary =
+        PathBuf::from("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex");
     #[cfg(target_os = "macos")]
-    let binary = if desktop_binary.is_file() { desktop_binary } else { find_codex_binary() };
+    let binary = if desktop_binary.is_file() {
+        desktop_binary
+    } else {
+        find_codex_binary()
+    };
     #[cfg(not(target_os = "macos"))]
     let binary = find_codex_binary();
     let mut app_server_cmd = tokio::process::Command::new(binary);
@@ -933,8 +1045,14 @@ async fn resume_desktop_after_handoff(
         .stderr(Stdio::null())
         .spawn()
         .context("Could not start Codex app-server for desktop continuation")?;
-    let mut stdin = child.stdin.take().context("Codex app-server has no stdin")?;
-    let stdout = child.stdout.take().context("Codex app-server has no stdout")?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("Codex app-server has no stdin")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("Codex app-server has no stdout")?;
     let mut lines = BufReader::new(stdout).lines();
     let result: Result<Vec<String>> = async {
         app_server_request(
@@ -1008,8 +1126,14 @@ async fn resume_desktop_after_handoff(
                         Ok(Some(line)) => {
                             if serde_json::from_str::<serde_json::Value>(&line)
                                 .ok()
-                                .and_then(|value| value.get("method").and_then(|m| m.as_str()).map(str::to_owned))
-                                .as_deref() == Some("turn/completed")
+                                .and_then(|value| {
+                                    value
+                                        .get("method")
+                                        .and_then(|m| m.as_str())
+                                        .map(str::to_owned)
+                                })
+                                .as_deref()
+                                == Some("turn/completed")
                             {
                                 completed += 1;
                             }
@@ -1017,7 +1141,8 @@ async fn resume_desktop_after_handoff(
                         _ => break,
                     }
                 }
-            }).await;
+            })
+            .await;
             let _ = child.kill().await;
         });
     } else {
@@ -1045,7 +1170,10 @@ fn is_desktop_app_server_command(command: &str) -> bool {
 fn is_desktop_root_pid(pid: u32) -> bool {
     let Ok(output) = Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "args="])
-        .output() else { return false };
+        .output()
+    else {
+        return false;
+    };
     if !output.status.success() {
         return false;
     }
@@ -1071,7 +1199,9 @@ fn is_desktop_root_command(command: &str) -> bool {
             || first.ends_with("/codex-desktop")
             || first == "chatgpt"
             || first == "codex-desktop"
-            || (command.starts_with('/') && (command.contains("/usr/lib/chatgpt/chatgpt") || command.contains("/usr/lib/codex/codex")))
+            || (command.starts_with('/')
+                && (command.contains("/usr/lib/chatgpt/chatgpt")
+                    || command.contains("/usr/lib/codex/codex")))
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     false
@@ -1079,15 +1209,24 @@ fn is_desktop_root_command(command: &str) -> bool {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn find_desktop_pid_for_session(lock_path: &Path) -> Option<u32> {
-    let output = Command::new("lsof").arg("-t").arg(lock_path).output().ok()?;
+    let output = Command::new("lsof")
+        .arg("-t")
+        .arg(lock_path)
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
     for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let Ok(pid) = line.trim().parse::<u32>() else { continue };
+        let Ok(pid) = line.trim().parse::<u32>() else {
+            continue;
+        };
         let Ok(process) = Command::new("ps")
             .args(["-p", &pid.to_string(), "-o", "args="])
-            .output() else { continue };
+            .output()
+        else {
+            continue;
+        };
         if process.status.success()
             && is_desktop_app_server_command(&String::from_utf8_lossy(&process.stdout))
         {
@@ -1133,7 +1272,10 @@ fn get_process_cwd(pid: u32) -> Option<String> {
 }
 
 /// Inspect the tail of a rollout jsonl file for recent errors
-pub fn check_rollout_for_errors(rollout_path: &Path, session_id: &str) -> Option<DetectedSessionError> {
+pub fn check_rollout_for_errors(
+    rollout_path: &Path,
+    session_id: &str,
+) -> Option<DetectedSessionError> {
     let file = fs::File::open(rollout_path).ok()?;
     let metadata = file.metadata().ok()?;
     let file_size = metadata.len();
@@ -1195,7 +1337,10 @@ pub fn check_rollout_for_errors(rollout_path: &Path, session_id: &str) -> Option
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let turn_id = payload.get("turn_id").and_then(|v| v.as_str()).map(String::from);
+            let turn_id = payload
+                .get("turn_id")
+                .and_then(|v| v.as_str())
+                .map(String::from);
 
             let kind = match codex_error_info {
                 Some("usage_limit_exceeded") => Some(SessionErrorKind::UsageLimitExceeded),
@@ -1288,9 +1433,8 @@ pub fn calculate_account_score(
                     if days <= warning_days as f64 {
                         has_urgent_reset = true;
                     }
-                    closest_reset_days = Some(
-                        closest_reset_days.map_or(days, |curr| curr.min(days)),
-                    );
+                    closest_reset_days =
+                        Some(closest_reset_days.map_or(days, |curr| curr.min(days)));
                 }
             }
         }
@@ -1371,7 +1515,12 @@ pub fn calculate_account_score(
     // More expensive accounts ($100 Pro Lite, $200 ChatGPT Pro) should be held in reserve
     // and spent after standard $20 Plus accounts, unless they have banked reset credits
     // or upcoming weekly resets that should be burned first.
-    let tier_reserve_penalty = match account.plan_type.as_deref().map(|s| s.to_lowercase()).as_deref() {
+    let tier_reserve_penalty = match account
+        .plan_type
+        .as_deref()
+        .map(|s| s.to_lowercase())
+        .as_deref()
+    {
         Some("prolite") => 3000.0,
         Some("pro") => 6000.0,
         Some("enterprise") => 4000.0,
@@ -1512,7 +1661,10 @@ pub fn is_session_goal_active(session_id: &str) -> bool {
         for entry in entries.flatten() {
             let path = entry.path();
             if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                if file_name.starts_with("goals_") && file_name.ends_with(".sqlite") && path != primary_db {
+                if file_name.starts_with("goals_")
+                    && file_name.ends_with(".sqlite")
+                    && path != primary_db
+                {
                     if is_session_goal_active_in_db(&path, session_id) {
                         return true;
                     }
@@ -1535,7 +1687,8 @@ pub fn is_session_goal_active_in_db(db_path: &Path, session_id: &str) -> bool {
     };
 
     let query = "SELECT status FROM thread_goals WHERE thread_id = ?1";
-    let status: Result<String, _> = conn.query_row(query, rusqlite::params![session_id], |row| row.get(0));
+    let status: Result<String, _> =
+        conn.query_row(query, rusqlite::params![session_id], |row| row.get(0));
 
     match status {
         Ok(s) => s != "complete",
@@ -1561,7 +1714,10 @@ pub fn activate_session_goal(session_id: &str) -> bool {
         for entry in entries.flatten() {
             let path = entry.path();
             if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                if file_name.starts_with("goals_") && file_name.ends_with(".sqlite") && path != primary_db {
+                if file_name.starts_with("goals_")
+                    && file_name.ends_with(".sqlite")
+                    && path != primary_db
+                {
                     if activate_session_goal_in_db(&path, session_id) {
                         updated = true;
                     }
@@ -1645,7 +1801,9 @@ pub fn terminate_process(pid: u32) {
                         if ppid > 1 {
                             if let Ok(cmd) = fs::read_to_string(format!("/proc/{ppid}/cmdline")) {
                                 if cmd.contains("node") && cmd.contains("codex") {
-                                    let _ = Command::new("kill").args(["-TERM", &ppid.to_string()]).status();
+                                    let _ = Command::new("kill")
+                                        .args(["-TERM", &ppid.to_string()])
+                                        .status();
                                 }
                             }
                         }
@@ -1653,13 +1811,19 @@ pub fn terminate_process(pid: u32) {
                 }
             }
         }
-        let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+        let _ = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
         std::thread::sleep(Duration::from_millis(300));
-        let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
+        let _ = Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status();
     }
     #[cfg(windows)]
     {
-        let _ = Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]).status();
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .status();
     }
 }
 
@@ -1670,7 +1834,14 @@ pub fn send_desktop_notification(title: &str, body: &str) {
         let mut cmd = Command::new("notify-send");
         cmd.env_remove("LD_LIBRARY_PATH");
         let _ = cmd
-            .args(["-a", "Codex Switcher", "-i", "dialog-information", title, body])
+            .args([
+                "-a",
+                "Codex Switcher",
+                "-i",
+                "dialog-information",
+                title,
+                body,
+            ])
             .spawn();
     }
     #[cfg(target_os = "macos")]
@@ -1710,7 +1881,10 @@ fn focus_terminal_window(pid: u32) {
         // 2. Fallback: try xdotool by PID
         let mut xdotool_cmd = Command::new("xdotool");
         xdotool_cmd.env_remove("LD_LIBRARY_PATH");
-        if let Ok(output) = xdotool_cmd.args(["search", "--pid", &pid.to_string()]).output() {
+        if let Ok(output) = xdotool_cmd
+            .args(["search", "--pid", &pid.to_string()])
+            .output()
+        {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if let Some(win_id) = stdout.lines().last() {
                 if !win_id.trim().is_empty() {
@@ -1742,8 +1916,8 @@ pub fn launch_session_in_terminal(
     // Check preferred or detected terminal
     #[cfg(target_os = "linux")]
     {
-        let restart_file = std::env::temp_dir()
-            .join(format!("codex-switcher-restart-{}", session_id));
+        let restart_file =
+            std::env::temp_dir().join(format!("codex-switcher-restart-{}", session_id));
         let restart_file_str = restart_file.to_string_lossy().to_string();
 
         let runner_script = r#"
@@ -1806,7 +1980,13 @@ exec $SHELL
         if let Some(preferred) = preferred_terminal.and_then(which_cmd) {
             candidates.push(preferred);
         }
-        for name in &["ghostty", "alacritty", "kitty", "gnome-terminal", "x-terminal-emulator"] {
+        for name in &[
+            "ghostty",
+            "alacritty",
+            "kitty",
+            "gnome-terminal",
+            "x-terminal-emulator",
+        ] {
             if let Some(p) = which_cmd(name) {
                 if !candidates.contains(&p) {
                     candidates.push(p);
@@ -1845,9 +2025,7 @@ exec $SHELL
                     .arg("-e")
                     .args(args_bundle);
             } else if term_name.contains("kitty") {
-                cmd.arg("--directory")
-                    .arg(&default_cwd)
-                    .args(args_bundle);
+                cmd.arg("--directory").arg(&default_cwd).args(args_bundle);
             } else if term_name.contains("alacritty") {
                 cmd.arg("--working-directory")
                     .arg(&default_cwd)
@@ -1858,9 +2036,7 @@ exec $SHELL
                     .arg("--")
                     .args(args_bundle);
             } else {
-                cmd.current_dir(&default_cwd)
-                    .arg("-e")
-                    .args(args_bundle);
+                cmd.current_dir(&default_cwd).arg("-e").args(args_bundle);
             }
 
             match cmd.spawn() {
@@ -1881,7 +2057,9 @@ exec $SHELL
                     return Ok(pid);
                 }
                 Err(e) => {
-                    eprintln!("[AutoRecovery] Failed to spawn {term_name}: {e}, trying next fallback...");
+                    eprintln!(
+                        "[AutoRecovery] Failed to spawn {term_name}: {e}, trying next fallback..."
+                    );
                 }
             }
         }
@@ -1889,11 +2067,12 @@ exec $SHELL
 
     #[cfg(target_os = "macos")]
     {
-        let restart_file = std::env::temp_dir()
-            .join(format!("codex-switcher-restart-{}", session_id));
+        let restart_file =
+            std::env::temp_dir().join(format!("codex-switcher-restart-{}", session_id));
         // Pass the command as an AppleScript argument instead of interpolating
         // it into source code. Shell-quote each value separately above.
-        let script = "on run argv\n  tell application \"Terminal\" to do script (item 1 of argv)\nend run";
+        let script =
+            "on run argv\n  tell application \"Terminal\" to do script (item 1 of argv)\nend run";
         let command = macos_resume_command(
             &codex_bin,
             &default_cwd,
@@ -1916,10 +2095,14 @@ exec $SHELL
         } else {
             format!(" {}", escape_shell_arg(phrase))
         };
-        let model_arg = model.map(|model| format!(" --model {}", escape_shell_arg(model))).unwrap_or_default();
-        let effort_arg = effort.map(|e| format!(" -c model_reasoning_effort={}", escape_shell_arg(e))).unwrap_or_default();
+        let model_arg = model
+            .map(|model| format!(" --model {}", escape_shell_arg(model)))
+            .unwrap_or_default();
+        let effort_arg = effort
+            .map(|e| format!(" -c model_reasoning_effort={}", escape_shell_arg(e)))
+            .unwrap_or_default();
         let codex_cmd = format!(
-            "{} resume{}{}{} {}{}",
+            "{} resume{}{} {}{}",
             escape_shell_arg(&codex_bin.to_string_lossy()),
             model_arg,
             effort_arg,
@@ -1936,7 +2119,6 @@ exec $SHELL
 
     anyhow::bail!("No supported terminal emulator found")
 }
-
 
 /// Perform one automated recovery cycle
 pub async fn check_and_recover_sessions() -> Result<Option<RecoveryEventNotification>> {
@@ -1969,7 +2151,7 @@ pub async fn check_and_recover_sessions() -> Result<Option<RecoveryEventNotifica
                     let mut tracker = TRACKER
                         .lock()
                         .map_err(|_| anyhow::anyhow!("Tracker poisoned"))?;
-                    
+
                     // entry: (last_retried_turn_id, consecutive_attempts, last_attempt_time)
                     let entry = tracker
                         .capacity_retries
@@ -1981,7 +2163,10 @@ pub async fn check_and_recover_sessions() -> Result<Option<RecoveryEventNotifica
                         entry.1 = 0;
                     }
 
-                    let current_turn_id = error.turn_id.clone().or_else(|| Some("unknown_turn".to_string()));
+                    let current_turn_id = error
+                        .turn_id
+                        .clone()
+                        .or_else(|| Some("unknown_turn".to_string()));
 
                     // If this exact turn error has ALREADY been sent to the queue, do NOT queue duplicate continue messages!
                     if entry.0 == current_turn_id {
@@ -1990,8 +2175,7 @@ pub async fn check_and_recover_sessions() -> Result<Option<RecoveryEventNotifica
 
                     // Calculate delay for this consecutive attempt
                     let delay_needed = Duration::from_secs(
-                        (settings.auto_retry_capacity_initial_delay_sec as u64)
-                            .max(1)
+                        (settings.auto_retry_capacity_initial_delay_sec as u64).max(1)
                             * (entry.1 as u64 + 1),
                     );
 
@@ -2020,7 +2204,10 @@ pub async fn check_and_recover_sessions() -> Result<Option<RecoveryEventNotifica
                 }
 
                 if should_retry {
-                    let phrase = resolve_session_resume_phrase(&session.session_id, &settings.continue_phrase);
+                    let phrase = resolve_session_resume_phrase(
+                        &session.session_id,
+                        &settings.continue_phrase,
+                    );
 
                     send_codex_queue_resume(&session.session_id, &phrase).await?;
 
@@ -2089,8 +2276,8 @@ async fn relaunch_cli_session(
     #[cfg(windows)]
     let recovery_model: Option<String> = None;
 
-    let restart_file = std::env::temp_dir()
-        .join(format!("codex-switcher-restart-{}", session.session_id));
+    let restart_file =
+        std::env::temp_dir().join(format!("codex-switcher-restart-{}", session.session_id));
     let restart_content = format!(
         "{}\n{}\n{}",
         phrase,
@@ -2136,7 +2323,10 @@ async fn relaunch_cli_session(
         tokio::spawn(async move {
             for attempt in 0..10 {
                 tokio::time::sleep(Duration::from_millis(800 + attempt * 400)).await;
-                if send_codex_queue_resume(&session_id_clone, &phrase_clone).await.is_ok() {
+                if send_codex_queue_resume(&session_id_clone, &phrase_clone)
+                    .await
+                    .is_ok()
+                {
                     println!("[AutoRecovery] Successfully queued '{phrase_clone}' to resumed session {session_id_clone}");
                     break;
                 }
@@ -2174,7 +2364,8 @@ async fn handle_account_switch_for_session(
                 return Ok(None);
             }
 
-            let phrase = resolve_session_resume_phrase(&session.session_id, &settings.continue_phrase);
+            let phrase =
+                resolve_session_resume_phrase(&session.session_id, &settings.continue_phrase);
             let is_goal = is_session_goal_active(&session.session_id);
 
             #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -2207,9 +2398,18 @@ async fn handle_account_switch_for_session(
                     .insert(session.session_id.clone(), turn_key);
             }
 
-            let reason_desc = if was_reset_credit { "after reset credit" } else { "on newly active account" };
+            let reason_desc = if was_reset_credit {
+                "after reset credit"
+            } else {
+                "on newly active account"
+            };
             let notification = RecoveryEventNotification {
-                event_type: if was_reset_credit { "reset_credit_redeemed" } else { "account_switched" }.to_string(),
+                event_type: if was_reset_credit {
+                    "reset_credit_redeemed"
+                } else {
+                    "account_switched"
+                }
+                .to_string(),
                 session_id: session.session_id.clone(),
                 message: if consumed {
                     format!(
@@ -2236,60 +2436,80 @@ async fn handle_account_switch_for_session(
     // If auto_redeem_reset_credits is enabled, check if the currently active account has available reset credits
     if settings.auto_redeem_reset_credits {
         if let Some(curr_acc_id) = current_id {
-            if !settings.auto_switch_excluded_account_ids.iter().any(|id| id == curr_acc_id) {
+            if !settings
+                .auto_switch_excluded_account_ids
+                .iter()
+                .any(|id| id == curr_acc_id)
+            {
                 if let Some(curr_acc) = store.accounts.iter().find(|a| a.id == curr_acc_id) {
-                if let Ok(Ok(stats)) = tokio::time::timeout(
-                    Duration::from_secs(10),
-                    crate::commands::account_stats::get_account_usage_stats(curr_acc.id.clone()),
-                )
-                .await
-                {
-                    if let Some(resets) = stats.reset_credits {
-                        let mut available_credits: Vec<_> = resets
-                            .credits
-                            .into_iter()
-                            .filter(|c| c.status.to_lowercase() == "available")
-                            .collect();
+                    if let Ok(Ok(stats)) = tokio::time::timeout(
+                        Duration::from_secs(10),
+                        crate::commands::account_stats::get_account_usage_stats(
+                            curr_acc.id.clone(),
+                        ),
+                    )
+                    .await
+                    {
+                        if let Some(resets) = stats.reset_credits {
+                            let mut available_credits: Vec<_> = resets
+                                .credits
+                                .into_iter()
+                                .filter(|c| c.status.to_lowercase() == "available")
+                                .collect();
 
-                        // Sort by earliest expires_at (FIFO)
-                        available_credits.sort_by(|a, b| match (&a.expires_at, &b.expires_at) {
-                            (Some(ea), Some(eb)) => ea.cmp(eb),
-                            (Some(_), None) => std::cmp::Ordering::Less,
-                            (None, Some(_)) => std::cmp::Ordering::Greater,
-                            (None, None) => std::cmp::Ordering::Equal,
-                        });
+                            // Sort by earliest expires_at (FIFO)
+                            available_credits.sort_by(|a, b| {
+                                match (&a.expires_at, &b.expires_at) {
+                                    (Some(ea), Some(eb)) => ea.cmp(eb),
+                                    (Some(_), None) => std::cmp::Ordering::Less,
+                                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                                    (None, None) => std::cmp::Ordering::Equal,
+                                }
+                            });
 
-                        if let Some(credit_to_redeem) = available_credits.first() {
-                            println!(
+                            if let Some(credit_to_redeem) = available_credits.first() {
+                                println!(
                                 "[AutoRecovery] Attempting auto-redeem of reset credit {} for account {}",
                                 credit_to_redeem.id, curr_acc.name
                             );
-                            if let Ok(()) = crate::commands::account_stats::redeem_reset_credit(
-                                curr_acc,
-                                &credit_to_redeem.id,
-                            )
-                            .await
-                            {
-                                println!(
+                                if let Ok(()) = crate::commands::account_stats::redeem_reset_credit(
+                                    curr_acc,
+                                    &credit_to_redeem.id,
+                                )
+                                .await
+                                {
+                                    println!(
                                     "[AutoRecovery] Successfully redeemed reset credit for account {}",
                                     curr_acc.name
                                 );
 
-                                let phrase = resolve_session_resume_phrase(&session.session_id, &settings.continue_phrase);
-                                let is_goal = is_session_goal_active(&session.session_id);
+                                    let phrase = resolve_session_resume_phrase(
+                                        &session.session_id,
+                                        &settings.continue_phrase,
+                                    );
+                                    let is_goal = is_session_goal_active(&session.session_id);
 
-                                #[cfg(any(target_os = "macos", target_os = "linux"))]
-                                let consumed = if session.is_desktop {
-                                    let desktop_reopen_token = close_desktop_for_handoff(&session.session_id).await?;
-                                    let _ = resume_desktop_after_handoff(desktop_reopen_token, std::slice::from_ref(session), settings).await?;
-                                    false
-                                } else {
-                                    relaunch_cli_session(session, &phrase, is_goal, settings).await?
-                                };
-                                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-                                let consumed = relaunch_cli_session(session, &phrase, is_goal, settings).await?;
+                                    #[cfg(any(target_os = "macos", target_os = "linux"))]
+                                    let consumed = if session.is_desktop {
+                                        let desktop_reopen_token =
+                                            close_desktop_for_handoff(&session.session_id).await?;
+                                        let _ = resume_desktop_after_handoff(
+                                            desktop_reopen_token,
+                                            std::slice::from_ref(session),
+                                            settings,
+                                        )
+                                        .await?;
+                                        false
+                                    } else {
+                                        relaunch_cli_session(session, &phrase, is_goal, settings)
+                                            .await?
+                                    };
+                                    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                                    let consumed =
+                                        relaunch_cli_session(session, &phrase, is_goal, settings)
+                                            .await?;
 
-                                send_desktop_notification(
+                                    send_desktop_notification(
                                     "Reset Credit Redeemed",
                                     &format!(
                                         "Auto-redeemed 1 reset credit for '{}'. Limits restored to 100%.",
@@ -2297,51 +2517,56 @@ async fn handle_account_switch_for_session(
                                     ),
                                 );
 
-                                if let Ok(mut tracker) = TRACKER.lock() {
-                                    let turn_key = session
-                                        .last_error
-                                        .as_ref()
-                                        .and_then(|e| e.turn_id.clone())
-                                        .unwrap_or_else(|| "default".to_string());
-                                    tracker
-                                        .handled_usage_limits
-                                        .insert(session.session_id.clone(), turn_key);
-                                    // Update last_account_switch with curr_acc.id so other concurrent sessions
-                                    // don't immediately trigger a cascade switch to another account!
-                                    tracker.last_account_switch = Some((Instant::now(), curr_acc.id.clone(), true, session.session_id.clone()));
-                                }
+                                    if let Ok(mut tracker) = TRACKER.lock() {
+                                        let turn_key = session
+                                            .last_error
+                                            .as_ref()
+                                            .and_then(|e| e.turn_id.clone())
+                                            .unwrap_or_else(|| "default".to_string());
+                                        tracker
+                                            .handled_usage_limits
+                                            .insert(session.session_id.clone(), turn_key);
+                                        // Update last_account_switch with curr_acc.id so other concurrent sessions
+                                        // don't immediately trigger a cascade switch to another account!
+                                        tracker.last_account_switch = Some((
+                                            Instant::now(),
+                                            curr_acc.id.clone(),
+                                            true,
+                                            session.session_id.clone(),
+                                        ));
+                                    }
 
-                                let notification = RecoveryEventNotification {
-                                    event_type: "reset_credit_redeemed".to_string(),
-                                    session_id: session.session_id.clone(),
-                                    message: if consumed {
-                                        format!(
+                                    let notification = RecoveryEventNotification {
+                                        event_type: "reset_credit_redeemed".to_string(),
+                                        session_id: session.session_id.clone(),
+                                        message: if consumed {
+                                            format!(
                                             "Auto-redeemed reset credit on active account '{}' (limits refreshed). Resumed session in-place with '{}'.",
                                             curr_acc.name, phrase
                                         )
-                                    } else {
-                                        format!(
+                                        } else {
+                                            format!(
                                             "Auto-redeemed reset credit on active account '{}' (limits refreshed). Relaunched session with '{}'.",
                                             curr_acc.name, phrase
                                         )
-                                    },
-                                    timestamp: Utc::now(),
-                                };
+                                        },
+                                        timestamp: Utc::now(),
+                                    };
 
-                                if let Ok(mut tracker) = TRACKER.lock() {
-                                    tracker.last_event = Some(notification.clone());
-                                }
+                                    if let Ok(mut tracker) = TRACKER.lock() {
+                                        tracker.last_event = Some(notification.clone());
+                                    }
 
-                                return Ok(Some(notification));
-                            } else {
-                                eprintln!(
+                                    return Ok(Some(notification));
+                                } else {
+                                    eprintln!(
                                     "[AutoRecovery] Failed to auto-redeem reset credit, falling back to account switch"
                                 );
+                                }
                             }
                         }
                     }
                 }
-            }
             }
         }
     }
@@ -2354,16 +2579,20 @@ async fn handle_account_switch_for_session(
     // candidates concurrently and bound each account's total lookup time.
     let candidates = store.accounts.iter().filter(|acc| {
         Some(acc.id.as_str()) != current_id
-            && !settings.auto_switch_excluded_account_ids.iter().any(|id| id == &acc.id)
+            && !settings
+                .auto_switch_excluded_account_ids
+                .iter()
+                .any(|id| id == &acc.id)
     });
     let snapshots = futures::future::join_all(candidates.map(|acc| async {
         let account_id = acc.id.clone();
         let snapshot = tokio::time::timeout(Duration::from_secs(10), async {
             let usage = crate::commands::usage::fetch_usage(&account_id).await.ok();
-            let resets = crate::commands::account_stats::get_account_usage_stats(account_id.clone())
-                .await
-                .ok()
-                .and_then(|stats| stats.reset_credits);
+            let resets =
+                crate::commands::account_stats::get_account_usage_stats(account_id.clone())
+                    .await
+                    .ok()
+                    .and_then(|stats| stats.reset_credits);
             (usage, resets)
         })
         .await;
@@ -2400,11 +2629,20 @@ async fn handle_account_switch_for_session(
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     let desktop_sessions = if session.is_desktop {
-        let mut affected: Vec<_> = find_active_sessions()?.into_iter()
-            .filter(|candidate| candidate.is_desktop && candidate.last_error.as_ref()
-                .is_some_and(|error| error.kind == SessionErrorKind::UsageLimitExceeded))
+        let mut affected: Vec<_> = find_active_sessions()?
+            .into_iter()
+            .filter(|candidate| {
+                candidate.is_desktop
+                    && candidate
+                        .last_error
+                        .as_ref()
+                        .is_some_and(|error| error.kind == SessionErrorKind::UsageLimitExceeded)
+            })
             .collect();
-        if !affected.iter().any(|candidate| candidate.session_id == session.session_id) {
+        if !affected
+            .iter()
+            .any(|candidate| candidate.session_id == session.session_id)
+        {
             affected.push(session.clone());
         }
         affected
@@ -2414,9 +2652,13 @@ async fn handle_account_switch_for_session(
 
     let desktop_reopen_token: Option<String> = if session.is_desktop {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        { Some(close_desktop_for_handoff(&session.session_id).await?) }
+        {
+            Some(close_desktop_for_handoff(&session.session_id).await?)
+        }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        { anyhow::bail!("Desktop recovery is not supported on this platform") }
+        {
+            anyhow::bail!("Desktop recovery is not supported on this platform")
+        }
     } else {
         None
     };
@@ -2449,7 +2691,8 @@ async fn handle_account_switch_for_session(
         save_accounts(&updated_store)?;
         crate::commands::account::restart_codex_background_services();
         Ok(target)
-    }.await;
+    }
+    .await;
     let target = match switch_result {
         Ok(target) => target,
         Err(error) => {
@@ -2470,22 +2713,36 @@ async fn handle_account_switch_for_session(
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     if let Some(token) = desktop_reopen_token {
         if let Ok(mut tracker) = TRACKER.lock() {
-            tracker.last_account_switch = Some((Instant::now(), target.id.clone(), false, session.session_id.clone()));
+            tracker.last_account_switch = Some((
+                Instant::now(),
+                target.id.clone(),
+                false,
+                session.session_id.clone(),
+            ));
         }
         let started = resume_desktop_after_handoff(token, &desktop_sessions, settings).await?;
         if let Ok(mut tracker) = TRACKER.lock() {
             for recovered in &desktop_sessions {
                 if started.contains(&recovered.session_id) {
-                    let turn_key = recovered.last_error.as_ref().and_then(|e| e.turn_id.clone())
+                    let turn_key = recovered
+                        .last_error
+                        .as_ref()
+                        .and_then(|e| e.turn_id.clone())
                         .unwrap_or_else(|| "default".to_string());
-                    tracker.handled_usage_limits.insert(recovered.session_id.clone(), turn_key);
+                    tracker
+                        .handled_usage_limits
+                        .insert(recovered.session_id.clone(), turn_key);
                 }
             }
         }
         let notification = RecoveryEventNotification {
             event_type: "account_switched".to_string(),
             session_id: session.session_id.clone(),
-            message: format!("Switched to '{}' and started continuations in {} desktop sessions", target.name, started.len()),
+            message: format!(
+                "Switched to '{}' and started continuations in {} desktop sessions",
+                target.name,
+                started.len()
+            ),
             timestamp: Utc::now(),
         };
         if let Ok(mut tracker) = TRACKER.lock() {
@@ -2519,7 +2776,12 @@ async fn handle_account_switch_for_session(
         tracker
             .handled_usage_limits
             .insert(session.session_id.clone(), turn_key);
-        tracker.last_account_switch = Some((Instant::now(), target.id.clone(), false, session.session_id.clone()));
+        tracker.last_account_switch = Some((
+            Instant::now(),
+            target.id.clone(),
+            false,
+            session.session_id.clone(),
+        ));
     }
 
     let notification = RecoveryEventNotification {
@@ -2636,7 +2898,11 @@ pub fn set_auto_switch_limit_enabled(enabled: bool) -> Result<AppSettings, Strin
 #[tauri::command]
 pub fn toggle_account_auto_switch_exclusion(account_id: String) -> Result<AppSettings, String> {
     let mut settings = load_app_settings().map_err(|e| e.to_string())?;
-    if let Some(pos) = settings.auto_switch_excluded_account_ids.iter().position(|id| id == &account_id) {
+    if let Some(pos) = settings
+        .auto_switch_excluded_account_ids
+        .iter()
+        .position(|id| id == &account_id)
+    {
         settings.auto_switch_excluded_account_ids.remove(pos);
     } else {
         settings.auto_switch_excluded_account_ids.push(account_id);
@@ -2647,14 +2913,22 @@ pub fn toggle_account_auto_switch_exclusion(account_id: String) -> Result<AppSet
 
 /// Set whether an account is excluded from automatic switching rotation.
 #[tauri::command]
-pub fn set_account_auto_switch_excluded(account_id: String, excluded: bool) -> Result<AppSettings, String> {
+pub fn set_account_auto_switch_excluded(
+    account_id: String,
+    excluded: bool,
+) -> Result<AppSettings, String> {
     let mut settings = load_app_settings().map_err(|e| e.to_string())?;
-    let is_currently_excluded = settings.auto_switch_excluded_account_ids.iter().any(|id| id == &account_id);
+    let is_currently_excluded = settings
+        .auto_switch_excluded_account_ids
+        .iter()
+        .any(|id| id == &account_id);
     if excluded && !is_currently_excluded {
         settings.auto_switch_excluded_account_ids.push(account_id);
         save_app_settings(&settings).map_err(|e| e.to_string())?;
     } else if !excluded && is_currently_excluded {
-        settings.auto_switch_excluded_account_ids.retain(|id| id != &account_id);
+        settings
+            .auto_switch_excluded_account_ids
+            .retain(|id| id != &account_id);
         save_app_settings(&settings).map_err(|e| e.to_string())?;
     }
     Ok(settings)
@@ -2712,12 +2986,17 @@ mod tests {
             "/usr/lib/chatgpt/resources/codex -c features.code_mode_host=true app-server --analytics-default-enabled"
         ));
         assert!(!is_supported_cli_command("/usr/local/bin/codex app-server"));
-        assert!(is_supported_cli_command("/usr/local/bin/codex resume session-id"));
-        assert!(is_supported_cli_command("node /home/user/.nvm/versions/node/v24.18.0/bin/codex"));
-        assert!(is_supported_cli_command("node /usr/local/bin/codex resume session-id"));
+        assert!(is_supported_cli_command(
+            "/usr/local/bin/codex resume session-id"
+        ));
+        assert!(is_supported_cli_command(
+            "node /home/user/.nvm/versions/node/v24.18.0/bin/codex"
+        ));
+        assert!(is_supported_cli_command(
+            "node /usr/local/bin/codex resume session-id"
+        ));
         assert!(is_supported_cli_command("/usr/bin/node /usr/bin/codex"));
     }
-
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
@@ -2728,7 +3007,9 @@ mod tests {
         assert!(is_desktop_app_server_command(
             "/usr/lib/chatgpt/resources/codex -c features.code_mode_host=true app-server --analytics-default-enabled"
         ));
-        assert!(!is_desktop_app_server_command("/usr/local/bin/codex app-server"));
+        assert!(!is_desktop_app_server_command(
+            "/usr/local/bin/codex app-server"
+        ));
         assert!(!is_desktop_app_server_command(
             "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
         ));
@@ -2737,22 +3018,33 @@ mod tests {
             assert!(is_desktop_root_command(
                 "/Users/test/Applications With Spaces/ChatGPT.app/Contents/MacOS/ChatGPT"
             ));
-            assert!(!is_desktop_root_command("/usr/local/bin/codex resume thread"));
+            assert!(!is_desktop_root_command(
+                "/usr/local/bin/codex resume thread"
+            ));
         }
         #[cfg(target_os = "linux")]
         {
             assert!(is_desktop_root_command("/usr/lib/chatgpt/ChatGPT"));
             assert!(is_desktop_root_command("/usr/bin/codex-desktop"));
             assert!(is_desktop_root_command("/usr/bin/chatgpt"));
-            assert!(!is_desktop_root_command("/usr/lib/chatgpt/ChatGPT --type=renderer"));
-            assert!(!is_desktop_root_command("/usr/local/bin/codex resume thread"));
+            assert!(!is_desktop_root_command(
+                "/usr/lib/chatgpt/ChatGPT --type=renderer"
+            ));
+            assert!(!is_desktop_root_command(
+                "/usr/local/bin/codex resume thread"
+            ));
         }
     }
 
     #[test]
     fn detects_another_turn_before_desktop_handoff() {
-        let path = std::env::temp_dir().join(format!("codex_handoff_{}.jsonl", uuid::Uuid::new_v4()));
-        fs::write(&path, "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n").unwrap();
+        let path =
+            std::env::temp_dir().join(format!("codex_handoff_{}.jsonl", uuid::Uuid::new_v4()));
+        fs::write(
+            &path,
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+        )
+        .unwrap();
         assert!(rollout_has_active_turn(&path).unwrap());
         fs::write(&path, "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n").unwrap();
         assert!(!rollout_has_active_turn(&path).unwrap());
@@ -2786,16 +3078,26 @@ mod tests {
             {"model": "gpt-6-astra", "isDefault": true},
             {"model": "gpt-5.6-sol", "isDefault": false}
         ]});
-        assert_eq!(select_recovery_model(&catalog, Some("gpt-5.6-sol")).unwrap(), "gpt-5.6-sol");
+        assert_eq!(
+            select_recovery_model(&catalog, Some("gpt-5.6-sol")).unwrap(),
+            "gpt-5.6-sol"
+        );
         // Matches -sol family before jumping to expensive default astra
-        assert_eq!(select_recovery_model(&catalog, Some("gpt-6-sol")).unwrap(), "gpt-5.6-sol");
+        assert_eq!(
+            select_recovery_model(&catalog, Some("gpt-6-sol")).unwrap(),
+            "gpt-5.6-sol"
+        );
         // When completely unknown tier, falls back to default
-        assert_eq!(select_recovery_model(&catalog, Some("unknown-tier")).unwrap(), "gpt-6-astra");
+        assert_eq!(
+            select_recovery_model(&catalog, Some("unknown-tier")).unwrap(),
+            "gpt-6-astra"
+        );
     }
 
     #[test]
     fn test_extract_session_model_and_effort() {
-        let temp_dir = std::env::temp_dir().join(format!("codex-test-rollout-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("codex-test-rollout-{}", uuid::Uuid::new_v4()));
         let _ = fs::create_dir_all(&temp_dir);
         let rollout_file = temp_dir.join("rollout.jsonl");
 
@@ -2850,14 +3152,8 @@ mod tests {
             }],
         };
 
-        let score1 = calculate_account_score(
-            &acc1,
-            AutoSwitchStrategy::SmartBalanced,
-            None,
-            None,
-            3,
-            now,
-        );
+        let score1 =
+            calculate_account_score(&acc1, AutoSwitchStrategy::SmartBalanced, None, None, 3, now);
 
         let score2 = calculate_account_score(
             &acc2,
@@ -2868,7 +3164,10 @@ mod tests {
             now,
         );
 
-        assert!(score2 > score1, "Account with urgent reset should score significantly higher");
+        assert!(
+            score2 > score1,
+            "Account with urgent reset should score significantly higher"
+        );
     }
 
     #[test]
@@ -2897,7 +3196,10 @@ mod tests {
             now,
         );
 
-        assert!(score_exp > score_fut, "Expiring/expired subscription should be utilized first");
+        assert!(
+            score_exp > score_fut,
+            "Expiring/expired subscription should be utilized first"
+        );
     }
 
     #[test]
@@ -3103,78 +3405,105 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 9, 23, 14, 0, 0).unwrap();
 
         // Exact accounts from user's screenshot
-        let active_acc = make_test_account("acc_active", "rjandjf", Some(now + ChronoDuration::days(26)));
-        let top_left = make_test_account("acc_tl", "lqslhdcghu", Some(now + ChronoDuration::days(25)));
-        let bottom_left = make_test_account("acc_bl", "rqmboyj", Some(now + ChronoDuration::days(25)));
-        let bottom_right = make_test_account("acc_br", "sonyamcmillan", Some(now + ChronoDuration::days(27)));
+        let active_acc = make_test_account(
+            "acc_active",
+            "rjandjf",
+            Some(now + ChronoDuration::days(26)),
+        );
+        let top_left =
+            make_test_account("acc_tl", "lqslhdcghu", Some(now + ChronoDuration::days(25)));
+        let bottom_left =
+            make_test_account("acc_bl", "rqmboyj", Some(now + ChronoDuration::days(25)));
+        let bottom_right = make_test_account(
+            "acc_br",
+            "sonyamcmillan",
+            Some(now + ChronoDuration::days(27)),
+        );
 
-        let accounts = vec![active_acc.clone(), top_left.clone(), bottom_left.clone(), bottom_right.clone()];
+        let accounts = vec![
+            active_acc.clone(),
+            top_left.clone(),
+            bottom_left.clone(),
+            bottom_right.clone(),
+        ];
 
         let mut usage_map = HashMap::new();
         let mut resets_map = HashMap::new();
 
         // Top-left: 84% weekly left, 161h to reset, 0 resets
-        usage_map.insert("acc_tl".into(), UsageInfo {
-            account_id: "acc_tl".into(),
-            plan_type: Some("plus".into()),
-            primary_used_percent: Some(0.0),
-            primary_window_minutes: Some(300),
-            primary_resets_at: Some(now.timestamp() + 18000),
-            secondary_used_percent: Some(16.0),
-            secondary_window_minutes: Some(10080),
-            secondary_resets_at: Some(now.timestamp() + 161 * 3600),
-            has_credits: None,
-            unlimited_credits: None,
-            credits_balance: None,
-            error: None,
-        });
+        usage_map.insert(
+            "acc_tl".into(),
+            UsageInfo {
+                account_id: "acc_tl".into(),
+                plan_type: Some("plus".into()),
+                primary_used_percent: Some(0.0),
+                primary_window_minutes: Some(300),
+                primary_resets_at: Some(now.timestamp() + 18000),
+                secondary_used_percent: Some(16.0),
+                secondary_window_minutes: Some(10080),
+                secondary_resets_at: Some(now.timestamp() + 161 * 3600),
+                has_credits: None,
+                unlimited_credits: None,
+                credits_balance: None,
+                error: None,
+            },
+        );
 
         // Bottom-left: 7% weekly left, 104h to reset, 1 banked reset (expires in 29d)
-        usage_map.insert("acc_bl".into(), UsageInfo {
-            account_id: "acc_bl".into(),
-            plan_type: Some("plus".into()),
-            primary_used_percent: Some(0.0),
-            primary_window_minutes: Some(300),
-            primary_resets_at: Some(now.timestamp() + 18000),
-            secondary_used_percent: Some(93.0),
-            secondary_window_minutes: Some(10080),
-            secondary_resets_at: Some(now.timestamp() + 104 * 3600),
-            has_credits: None,
-            unlimited_credits: None,
-            credits_balance: None,
-            error: None,
-        });
-        resets_map.insert("acc_bl".into(), AccountResetCredits {
-            available_count: 1,
-            next_expires_at: Some((now + ChronoDuration::days(29)).to_rfc3339()),
-            credits: vec![crate::commands::account_stats::AccountResetCredit {
-                id: "rc_bl".into(),
-                reset_type: "standard".into(),
-                status: "available".into(),
-                granted_at: None,
-                expires_at: Some((now + ChronoDuration::days(29)).to_rfc3339()),
-                redeem_started_at: None,
-                redeemed_at: None,
-                title: None,
-                description: None,
-            }],
-        });
+        usage_map.insert(
+            "acc_bl".into(),
+            UsageInfo {
+                account_id: "acc_bl".into(),
+                plan_type: Some("plus".into()),
+                primary_used_percent: Some(0.0),
+                primary_window_minutes: Some(300),
+                primary_resets_at: Some(now.timestamp() + 18000),
+                secondary_used_percent: Some(93.0),
+                secondary_window_minutes: Some(10080),
+                secondary_resets_at: Some(now.timestamp() + 104 * 3600),
+                has_credits: None,
+                unlimited_credits: None,
+                credits_balance: None,
+                error: None,
+            },
+        );
+        resets_map.insert(
+            "acc_bl".into(),
+            AccountResetCredits {
+                available_count: 1,
+                next_expires_at: Some((now + ChronoDuration::days(29)).to_rfc3339()),
+                credits: vec![crate::commands::account_stats::AccountResetCredit {
+                    id: "rc_bl".into(),
+                    reset_type: "standard".into(),
+                    status: "available".into(),
+                    granted_at: None,
+                    expires_at: Some((now + ChronoDuration::days(29)).to_rfc3339()),
+                    redeem_started_at: None,
+                    redeemed_at: None,
+                    title: None,
+                    description: None,
+                }],
+            },
+        );
 
         // Bottom-right: 84% weekly left, 159h to reset, 0 resets
-        usage_map.insert("acc_br".into(), UsageInfo {
-            account_id: "acc_br".into(),
-            plan_type: Some("plus".into()),
-            primary_used_percent: Some(0.0),
-            primary_window_minutes: Some(300),
-            primary_resets_at: Some(now.timestamp() + 18000),
-            secondary_used_percent: Some(16.0),
-            secondary_window_minutes: Some(10080),
-            secondary_resets_at: Some(now.timestamp() + 159 * 3600),
-            has_credits: None,
-            unlimited_credits: None,
-            credits_balance: None,
-            error: None,
-        });
+        usage_map.insert(
+            "acc_br".into(),
+            UsageInfo {
+                account_id: "acc_br".into(),
+                plan_type: Some("plus".into()),
+                primary_used_percent: Some(0.0),
+                primary_window_minutes: Some(300),
+                primary_resets_at: Some(now.timestamp() + 18000),
+                secondary_used_percent: Some(16.0),
+                secondary_window_minutes: Some(10080),
+                secondary_resets_at: Some(now.timestamp() + 159 * 3600),
+                has_credits: None,
+                unlimited_credits: None,
+                credits_balance: None,
+                error: None,
+            },
+        );
 
         let selected = select_best_account(
             &accounts,
@@ -3203,58 +3532,72 @@ mod tests {
         let bottom_left = make_test_account("acc_bl", "rqmboyj", None);
         let bottom_right = make_test_account("acc_br", "sonyamcmillan", None);
 
-        let accounts = vec![active_acc.clone(), top_left.clone(), bottom_left.clone(), bottom_right.clone()];
+        let accounts = vec![
+            active_acc.clone(),
+            top_left.clone(),
+            bottom_left.clone(),
+            bottom_right.clone(),
+        ];
 
         let mut usage_map = HashMap::new();
         let resets_map = HashMap::new(); // NO resets for any account!
 
         // Top-left: 84% weekly left, 161h to reset
-        usage_map.insert("acc_tl".into(), UsageInfo {
-            account_id: "acc_tl".into(),
-            plan_type: Some("plus".into()),
-            primary_used_percent: Some(0.0),
-            primary_window_minutes: Some(300),
-            primary_resets_at: Some(now.timestamp() + 18000),
-            secondary_used_percent: Some(16.0),
-            secondary_window_minutes: Some(10080),
-            secondary_resets_at: Some(now.timestamp() + 161 * 3600),
-            has_credits: None,
-            unlimited_credits: None,
-            credits_balance: None,
-            error: None,
-        });
+        usage_map.insert(
+            "acc_tl".into(),
+            UsageInfo {
+                account_id: "acc_tl".into(),
+                plan_type: Some("plus".into()),
+                primary_used_percent: Some(0.0),
+                primary_window_minutes: Some(300),
+                primary_resets_at: Some(now.timestamp() + 18000),
+                secondary_used_percent: Some(16.0),
+                secondary_window_minutes: Some(10080),
+                secondary_resets_at: Some(now.timestamp() + 161 * 3600),
+                has_credits: None,
+                unlimited_credits: None,
+                credits_balance: None,
+                error: None,
+            },
+        );
 
         // Bottom-left: 7% weekly left, 104h to reset, NO resets!
-        usage_map.insert("acc_bl".into(), UsageInfo {
-            account_id: "acc_bl".into(),
-            plan_type: Some("plus".into()),
-            primary_used_percent: Some(0.0),
-            primary_window_minutes: Some(300),
-            primary_resets_at: Some(now.timestamp() + 18000),
-            secondary_used_percent: Some(93.0),
-            secondary_window_minutes: Some(10080),
-            secondary_resets_at: Some(now.timestamp() + 104 * 3600),
-            has_credits: None,
-            unlimited_credits: None,
-            credits_balance: None,
-            error: None,
-        });
+        usage_map.insert(
+            "acc_bl".into(),
+            UsageInfo {
+                account_id: "acc_bl".into(),
+                plan_type: Some("plus".into()),
+                primary_used_percent: Some(0.0),
+                primary_window_minutes: Some(300),
+                primary_resets_at: Some(now.timestamp() + 18000),
+                secondary_used_percent: Some(93.0),
+                secondary_window_minutes: Some(10080),
+                secondary_resets_at: Some(now.timestamp() + 104 * 3600),
+                has_credits: None,
+                unlimited_credits: None,
+                credits_balance: None,
+                error: None,
+            },
+        );
 
         // Bottom-right: 84% weekly left, 159h to reset
-        usage_map.insert("acc_br".into(), UsageInfo {
-            account_id: "acc_br".into(),
-            plan_type: Some("plus".into()),
-            primary_used_percent: Some(0.0),
-            primary_window_minutes: Some(300),
-            primary_resets_at: Some(now.timestamp() + 18000),
-            secondary_used_percent: Some(16.0),
-            secondary_window_minutes: Some(10080),
-            secondary_resets_at: Some(now.timestamp() + 159 * 3600),
-            has_credits: None,
-            unlimited_credits: None,
-            credits_balance: None,
-            error: None,
-        });
+        usage_map.insert(
+            "acc_br".into(),
+            UsageInfo {
+                account_id: "acc_br".into(),
+                plan_type: Some("plus".into()),
+                primary_used_percent: Some(0.0),
+                primary_window_minutes: Some(300),
+                primary_resets_at: Some(now.timestamp() + 18000),
+                secondary_used_percent: Some(16.0),
+                secondary_window_minutes: Some(10080),
+                secondary_resets_at: Some(now.timestamp() + 159 * 3600),
+                has_credits: None,
+                unlimited_credits: None,
+                credits_balance: None,
+                error: None,
+            },
+        );
 
         let selected = select_best_account(
             &accounts,
@@ -3526,36 +3869,42 @@ mod tests {
         let resets_map = HashMap::new();
 
         // acc1: 99% weekly used, 0 resets -> should be skipped!
-        usage_map.insert("acc1".into(), UsageInfo {
-            account_id: "acc1".into(),
-            plan_type: Some("plus".into()),
-            primary_used_percent: Some(0.0),
-            primary_window_minutes: Some(300),
-            primary_resets_at: None,
-            secondary_used_percent: Some(99.0),
-            secondary_window_minutes: Some(10080),
-            secondary_resets_at: None,
-            has_credits: None,
-            unlimited_credits: None,
-            credits_balance: None,
-            error: None,
-        });
+        usage_map.insert(
+            "acc1".into(),
+            UsageInfo {
+                account_id: "acc1".into(),
+                plan_type: Some("plus".into()),
+                primary_used_percent: Some(0.0),
+                primary_window_minutes: Some(300),
+                primary_resets_at: None,
+                secondary_used_percent: Some(99.0),
+                secondary_window_minutes: Some(10080),
+                secondary_resets_at: None,
+                has_credits: None,
+                unlimited_credits: None,
+                credits_balance: None,
+                error: None,
+            },
+        );
 
         // acc2: 20% weekly used -> healthy!
-        usage_map.insert("acc2".into(), UsageInfo {
-            account_id: "acc2".into(),
-            plan_type: Some("plus".into()),
-            primary_used_percent: Some(0.0),
-            primary_window_minutes: Some(300),
-            primary_resets_at: None,
-            secondary_used_percent: Some(20.0),
-            secondary_window_minutes: Some(10080),
-            secondary_resets_at: None,
-            has_credits: None,
-            unlimited_credits: None,
-            credits_balance: None,
-            error: None,
-        });
+        usage_map.insert(
+            "acc2".into(),
+            UsageInfo {
+                account_id: "acc2".into(),
+                plan_type: Some("plus".into()),
+                primary_used_percent: Some(0.0),
+                primary_window_minutes: Some(300),
+                primary_resets_at: None,
+                secondary_used_percent: Some(20.0),
+                secondary_window_minutes: Some(10080),
+                secondary_resets_at: None,
+                has_credits: None,
+                unlimited_credits: None,
+                credits_balance: None,
+                error: None,
+            },
+        );
 
         let selected = select_best_account(
             &[acc1.clone(), acc2.clone()],
@@ -3585,7 +3934,11 @@ mod tests {
         // Case 1: Session has a task_complete with capacity error
         {
             let mut f = fs::File::create(&rollout_file).unwrap();
-            writeln!(f, r#"{{"type":"event_msg","payload":{{"type":"task_started","turn_id":"turn-1"}}}}"#).unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"event_msg","payload":{{"type":"task_started","turn_id":"turn-1"}}}}"#
+            )
+            .unwrap();
             writeln!(f, r#"{{"type":"event_msg","payload":{{"type":"task_complete","turn_id":"turn-1","error":{{"message":"Selected model is at capacity. Please try a different model.","codex_error_info":"server_overloaded"}}}}}}"#).unwrap();
         }
 
@@ -3597,27 +3950,54 @@ mod tests {
 
         // Case 2: A new turn starts (task_started added) -> session is working, should return None!
         {
-            let mut f = fs::OpenOptions::new().append(true).open(&rollout_file).unwrap();
-            writeln!(f, r#"{{"type":"event_msg","payload":{{"type":"task_started","turn_id":"turn-2"}}}}"#).unwrap();
-            writeln!(f, r#"{{"type":"event_msg","payload":{{"type":"item_completed","turn_id":"turn-2"}}}}"#).unwrap();
+            let mut f = fs::OpenOptions::new()
+                .append(true)
+                .open(&rollout_file)
+                .unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"event_msg","payload":{{"type":"task_started","turn_id":"turn-2"}}}}"#
+            )
+            .unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"event_msg","payload":{{"type":"item_completed","turn_id":"turn-2"}}}}"#
+            )
+            .unwrap();
         }
 
         let detected = check_rollout_for_errors(&rollout_file, "sess-1");
-        assert!(detected.is_none(), "When a new turn is in progress, check_rollout_for_errors must return None");
+        assert!(
+            detected.is_none(),
+            "When a new turn is in progress, check_rollout_for_errors must return None"
+        );
 
         // Case 3: The turn completes successfully (error: null) -> session healthy, should return None!
         {
-            let mut f = fs::OpenOptions::new().append(true).open(&rollout_file).unwrap();
+            let mut f = fs::OpenOptions::new()
+                .append(true)
+                .open(&rollout_file)
+                .unwrap();
             writeln!(f, r#"{{"type":"event_msg","payload":{{"type":"task_complete","turn_id":"turn-2","last_agent_message":"Done!","error":null}}}}"#).unwrap();
         }
 
         let detected = check_rollout_for_errors(&rollout_file, "sess-1");
-        assert!(detected.is_none(), "When latest task completed successfully, check_rollout_for_errors must return None");
+        assert!(
+            detected.is_none(),
+            "When latest task completed successfully, check_rollout_for_errors must return None"
+        );
 
         // Case 4: Another turn hits usage limit
         {
-            let mut f = fs::OpenOptions::new().append(true).open(&rollout_file).unwrap();
-            writeln!(f, r#"{{"type":"event_msg","payload":{{"type":"task_started","turn_id":"turn-3"}}}}"#).unwrap();
+            let mut f = fs::OpenOptions::new()
+                .append(true)
+                .open(&rollout_file)
+                .unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"event_msg","payload":{{"type":"task_started","turn_id":"turn-3"}}}}"#
+            )
+            .unwrap();
             writeln!(f, r#"{{"type":"event_msg","payload":{{"type":"task_complete","turn_id":"turn-3","error":{{"message":"You've hit your usage limit","codex_error_info":"usage_limit_exceeded"}}}}}}"#).unwrap();
         }
 
@@ -3629,18 +4009,37 @@ mod tests {
 
         // Case 5: A turn is started and then aborted by user -> session not in error state, should return None!
         {
-            let mut f = fs::OpenOptions::new().append(true).open(&rollout_file).unwrap();
-            writeln!(f, r#"{{"type":"event_msg","payload":{{"type":"task_started","turn_id":"turn-4"}}}}"#).unwrap();
-            writeln!(f, r#"{{"type":"event_msg","payload":{{"type":"turn_aborted","turn_id":"turn-4"}}}}"#).unwrap();
+            let mut f = fs::OpenOptions::new()
+                .append(true)
+                .open(&rollout_file)
+                .unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"event_msg","payload":{{"type":"task_started","turn_id":"turn-4"}}}}"#
+            )
+            .unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"event_msg","payload":{{"type":"turn_aborted","turn_id":"turn-4"}}}}"#
+            )
+            .unwrap();
         }
 
         let detected = check_rollout_for_errors(&rollout_file, "sess-1");
-        assert!(detected.is_none(), "When latest turn was aborted by user, check_rollout_for_errors must return None");
+        assert!(
+            detected.is_none(),
+            "When latest turn was aborted by user, check_rollout_for_errors must return None"
+        );
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
-    fn make_test_account_with_plan(id: &str, name: &str, plan: &str, expires_at: Option<DateTime<Utc>>) -> StoredAccount {
+    fn make_test_account_with_plan(
+        id: &str,
+        name: &str,
+        plan: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> StoredAccount {
         let mut acc = make_test_account(id, name, expires_at);
         acc.plan_type = Some(plan.into());
         acc
@@ -3668,9 +4067,30 @@ mod tests {
             error: None,
         };
 
-        let score_plus = calculate_account_score(&acc_plus, AutoSwitchStrategy::SmartBalanced, Some(&usage_healthy), None, 3, now);
-        let score_prolite = calculate_account_score(&acc_prolite, AutoSwitchStrategy::SmartBalanced, Some(&usage_healthy), None, 3, now);
-        let score_pro = calculate_account_score(&acc_pro, AutoSwitchStrategy::SmartBalanced, Some(&usage_healthy), None, 3, now);
+        let score_plus = calculate_account_score(
+            &acc_plus,
+            AutoSwitchStrategy::SmartBalanced,
+            Some(&usage_healthy),
+            None,
+            3,
+            now,
+        );
+        let score_prolite = calculate_account_score(
+            &acc_prolite,
+            AutoSwitchStrategy::SmartBalanced,
+            Some(&usage_healthy),
+            None,
+            3,
+            now,
+        );
+        let score_pro = calculate_account_score(
+            &acc_pro,
+            AutoSwitchStrategy::SmartBalanced,
+            Some(&usage_healthy),
+            None,
+            3,
+            now,
+        );
 
         assert!(
             score_plus > score_prolite,
@@ -3693,52 +4113,61 @@ mod tests {
         let resets_map = HashMap::new();
 
         // Plus is exhausted (100% 5h limit used)
-        usage_map.insert("acc_plus".into(), UsageInfo {
-            account_id: "acc_plus".into(),
-            plan_type: Some("plus".into()),
-            primary_used_percent: Some(100.0),
-            primary_window_minutes: Some(300),
-            primary_resets_at: Some(now.timestamp() + 3600),
-            secondary_used_percent: Some(50.0),
-            secondary_window_minutes: Some(10080),
-            secondary_resets_at: Some(now.timestamp() + 72 * 3600),
-            has_credits: None,
-            unlimited_credits: None,
-            credits_balance: None,
-            error: None,
-        });
+        usage_map.insert(
+            "acc_plus".into(),
+            UsageInfo {
+                account_id: "acc_plus".into(),
+                plan_type: Some("plus".into()),
+                primary_used_percent: Some(100.0),
+                primary_window_minutes: Some(300),
+                primary_resets_at: Some(now.timestamp() + 3600),
+                secondary_used_percent: Some(50.0),
+                secondary_window_minutes: Some(10080),
+                secondary_resets_at: Some(now.timestamp() + 72 * 3600),
+                has_credits: None,
+                unlimited_credits: None,
+                credits_balance: None,
+                error: None,
+            },
+        );
 
         // Pro Lite has 80% left on weekly limit (no 5h limit)
-        usage_map.insert("acc_prolite".into(), UsageInfo {
-            account_id: "acc_prolite".into(),
-            plan_type: Some("prolite".into()),
-            primary_used_percent: None,
-            primary_window_minutes: None,
-            primary_resets_at: None,
-            secondary_used_percent: Some(20.0),
-            secondary_window_minutes: Some(10080),
-            secondary_resets_at: Some(now.timestamp() + 158 * 3600),
-            has_credits: None,
-            unlimited_credits: None,
-            credits_balance: None,
-            error: None,
-        });
+        usage_map.insert(
+            "acc_prolite".into(),
+            UsageInfo {
+                account_id: "acc_prolite".into(),
+                plan_type: Some("prolite".into()),
+                primary_used_percent: None,
+                primary_window_minutes: None,
+                primary_resets_at: None,
+                secondary_used_percent: Some(20.0),
+                secondary_window_minutes: Some(10080),
+                secondary_resets_at: Some(now.timestamp() + 158 * 3600),
+                has_credits: None,
+                unlimited_credits: None,
+                credits_balance: None,
+                error: None,
+            },
+        );
 
         // Pro has 80% left on weekly limit
-        usage_map.insert("acc_pro".into(), UsageInfo {
-            account_id: "acc_pro".into(),
-            plan_type: Some("pro".into()),
-            primary_used_percent: None,
-            primary_window_minutes: None,
-            primary_resets_at: None,
-            secondary_used_percent: Some(20.0),
-            secondary_window_minutes: Some(10080),
-            secondary_resets_at: Some(now.timestamp() + 158 * 3600),
-            has_credits: None,
-            unlimited_credits: None,
-            credits_balance: None,
-            error: None,
-        });
+        usage_map.insert(
+            "acc_pro".into(),
+            UsageInfo {
+                account_id: "acc_pro".into(),
+                plan_type: Some("pro".into()),
+                primary_used_percent: None,
+                primary_window_minutes: None,
+                primary_resets_at: None,
+                secondary_used_percent: Some(20.0),
+                secondary_window_minutes: Some(10080),
+                secondary_resets_at: Some(now.timestamp() + 158 * 3600),
+                has_credits: None,
+                unlimited_credits: None,
+                credits_balance: None,
+                error: None,
+            },
+        );
 
         let selected = select_best_account(
             &[acc_plus, acc_prolite, acc_pro],
@@ -3809,8 +4238,22 @@ mod tests {
             }],
         };
 
-        let score_plus = calculate_account_score(&acc_plus, AutoSwitchStrategy::SmartBalanced, Some(&usage_plus), None, 3, now);
-        let score_prolite = calculate_account_score(&acc_prolite, AutoSwitchStrategy::SmartBalanced, Some(&usage_prolite), Some(&resets_prolite), 3, now);
+        let score_plus = calculate_account_score(
+            &acc_plus,
+            AutoSwitchStrategy::SmartBalanced,
+            Some(&usage_plus),
+            None,
+            3,
+            now,
+        );
+        let score_prolite = calculate_account_score(
+            &acc_prolite,
+            AutoSwitchStrategy::SmartBalanced,
+            Some(&usage_prolite),
+            Some(&resets_prolite),
+            3,
+            now,
+        );
 
         assert!(
             score_prolite > score_plus,
@@ -3856,8 +4299,22 @@ mod tests {
             error: None,
         };
 
-        let score_plus = calculate_account_score(&acc_plus, AutoSwitchStrategy::SmartBalanced, Some(&usage_plus), None, 3, now);
-        let score_prolite = calculate_account_score(&acc_prolite, AutoSwitchStrategy::SmartBalanced, Some(&usage_prolite), None, 3, now);
+        let score_plus = calculate_account_score(
+            &acc_plus,
+            AutoSwitchStrategy::SmartBalanced,
+            Some(&usage_plus),
+            None,
+            3,
+            now,
+        );
+        let score_prolite = calculate_account_score(
+            &acc_prolite,
+            AutoSwitchStrategy::SmartBalanced,
+            Some(&usage_prolite),
+            None,
+            3,
+            now,
+        );
 
         assert!(
             score_prolite > score_plus,
@@ -3886,7 +4343,14 @@ mod tests {
             error: None,
         };
 
-        let score = calculate_account_score(&acc_prolite, AutoSwitchStrategy::SmartBalanced, Some(&usage_prolite), None, 3, now);
+        let score = calculate_account_score(
+            &acc_prolite,
+            AutoSwitchStrategy::SmartBalanced,
+            Some(&usage_prolite),
+            None,
+            3,
+            now,
+        );
 
         // Immediate left is 80, tier penalty is -3000 -> score is 80 - 3000 = -2920
         assert_eq!(score, 80.0 - 3000.0);
@@ -3925,12 +4389,18 @@ mod tests {
         // Active/paused/usage_limited/blocked goals must evaluate to true
         assert!(is_session_goal_active_in_db(&db_path, "thread_active"));
         assert!(is_session_goal_active_in_db(&db_path, "thread_paused"));
-        assert!(is_session_goal_active_in_db(&db_path, "thread_usage_limited"));
+        assert!(is_session_goal_active_in_db(
+            &db_path,
+            "thread_usage_limited"
+        ));
         assert!(is_session_goal_active_in_db(&db_path, "thread_blocked"));
 
         // Completed goal or non-existent thread must evaluate to false
         assert!(!is_session_goal_active_in_db(&db_path, "thread_complete"));
-        assert!(!is_session_goal_active_in_db(&db_path, "thread_non_existent"));
+        assert!(!is_session_goal_active_in_db(
+            &db_path,
+            "thread_non_existent"
+        ));
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
@@ -3946,10 +4416,7 @@ mod tests {
             resolve_session_resume_phrase("non_existent_thread_xyz", "   "),
             "continue"
         );
-        assert_eq!(
-            resolve_session_resume_phrase("", "продолжи"),
-            "продолжи"
-        );
+        assert_eq!(resolve_session_resume_phrase("", "продолжи"), "продолжи");
     }
 
     #[test]
@@ -3981,15 +4448,36 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        assert!(activate_session_goal_in_db(&db_path, "thread_usage_limited"));
+        assert!(activate_session_goal_in_db(
+            &db_path,
+            "thread_usage_limited"
+        ));
         assert!(activate_session_goal_in_db(&db_path, "thread_paused"));
         assert!(!activate_session_goal_in_db(&db_path, "thread_complete"));
         assert!(!activate_session_goal_in_db(&db_path, "non_existent"));
 
         let conn = rusqlite::Connection::open(&db_path).unwrap();
-        let status1: String = conn.query_row("SELECT status FROM thread_goals WHERE thread_id = 'thread_usage_limited'", [], |r| r.get(0)).unwrap();
-        let status2: String = conn.query_row("SELECT status FROM thread_goals WHERE thread_id = 'thread_paused'", [], |r| r.get(0)).unwrap();
-        let status3: String = conn.query_row("SELECT status FROM thread_goals WHERE thread_id = 'thread_complete'", [], |r| r.get(0)).unwrap();
+        let status1: String = conn
+            .query_row(
+                "SELECT status FROM thread_goals WHERE thread_id = 'thread_usage_limited'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let status2: String = conn
+            .query_row(
+                "SELECT status FROM thread_goals WHERE thread_id = 'thread_paused'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let status3: String = conn
+            .query_row(
+                "SELECT status FROM thread_goals WHERE thread_id = 'thread_complete'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(status1, "active");
         assert_eq!(status2, "active");
         assert_eq!(status3, "complete");
@@ -4000,7 +4488,8 @@ mod tests {
     #[tokio::test]
     async fn test_relaunch_cli_session_in_place_consumed() {
         let session_id = format!("test-session-{}", uuid::Uuid::new_v4());
-        let restart_file = std::env::temp_dir().join(format!("codex-switcher-restart-{}", session_id));
+        let restart_file =
+            std::env::temp_dir().join(format!("codex-switcher-restart-{}", session_id));
         let _ = fs::remove_file(&restart_file);
 
         let session = ActiveCodexSession {
@@ -4028,7 +4517,9 @@ mod tests {
             }
         });
 
-        let consumed = relaunch_cli_session(&session, "/goal resume", true, &settings).await.unwrap();
+        let consumed = relaunch_cli_session(&session, "/goal resume", true, &settings)
+            .await
+            .unwrap();
         assert!(consumed, "Expected terminal runner to consume restart file");
         let _ = fs::remove_file(&restart_file);
     }
@@ -4036,40 +4527,56 @@ mod tests {
     #[test]
     fn test_select_best_account_skips_excluded_accounts() {
         let now = Utc::now();
-        let acc1 = make_test_account_with_plan("acc_top", "Top Pro with Reset", "pro", Some(now + ChronoDuration::days(30)));
-        let acc2 = make_test_account_with_plan("acc_backup", "Backup Plus", "plus", Some(now + ChronoDuration::days(10)));
+        let acc1 = make_test_account_with_plan(
+            "acc_top",
+            "Top Pro with Reset",
+            "pro",
+            Some(now + ChronoDuration::days(30)),
+        );
+        let acc2 = make_test_account_with_plan(
+            "acc_backup",
+            "Backup Plus",
+            "plus",
+            Some(now + ChronoDuration::days(10)),
+        );
 
         let mut usage_map = HashMap::new();
         let mut resets_map = HashMap::new();
 
-        usage_map.insert("acc_top".to_string(), UsageInfo {
-            account_id: "acc_top".to_string(),
-            plan_type: Some("pro".to_string()),
-            primary_used_percent: Some(20.0),
-            primary_window_minutes: Some(300),
-            primary_resets_at: Some(now.timestamp() + 3600),
-            secondary_used_percent: Some(30.0),
-            secondary_window_minutes: Some(10080),
-            secondary_resets_at: Some(now.timestamp() + 86400),
-            has_credits: None,
-            unlimited_credits: None,
-            credits_balance: None,
-            error: None,
-        });
-        usage_map.insert("acc_backup".to_string(), UsageInfo {
-            account_id: "acc_backup".to_string(),
-            plan_type: Some("plus".to_string()),
-            primary_used_percent: Some(10.0),
-            primary_window_minutes: Some(300),
-            primary_resets_at: Some(now.timestamp() + 3600),
-            secondary_used_percent: Some(20.0),
-            secondary_window_minutes: Some(10080),
-            secondary_resets_at: Some(now.timestamp() + 86400),
-            has_credits: None,
-            unlimited_credits: None,
-            credits_balance: None,
-            error: None,
-        });
+        usage_map.insert(
+            "acc_top".to_string(),
+            UsageInfo {
+                account_id: "acc_top".to_string(),
+                plan_type: Some("pro".to_string()),
+                primary_used_percent: Some(20.0),
+                primary_window_minutes: Some(300),
+                primary_resets_at: Some(now.timestamp() + 3600),
+                secondary_used_percent: Some(30.0),
+                secondary_window_minutes: Some(10080),
+                secondary_resets_at: Some(now.timestamp() + 86400),
+                has_credits: None,
+                unlimited_credits: None,
+                credits_balance: None,
+                error: None,
+            },
+        );
+        usage_map.insert(
+            "acc_backup".to_string(),
+            UsageInfo {
+                account_id: "acc_backup".to_string(),
+                plan_type: Some("plus".to_string()),
+                primary_used_percent: Some(10.0),
+                primary_window_minutes: Some(300),
+                primary_resets_at: Some(now.timestamp() + 3600),
+                secondary_used_percent: Some(20.0),
+                secondary_window_minutes: Some(10080),
+                secondary_resets_at: Some(now.timestamp() + 86400),
+                has_credits: None,
+                unlimited_credits: None,
+                credits_balance: None,
+                error: None,
+            },
+        );
 
         // 1. Without exclusion, acc_backup (Plus) is chosen first over Pro in SmartBalanced
         let selected = select_best_account(
@@ -4119,5 +4626,4 @@ mod tests {
         );
         assert!(selected_none.is_none());
     }
-
 }
