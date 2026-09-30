@@ -2,11 +2,34 @@
 
 use crate::api::usage::{
     fetch_chatgpt_account_metadata, get_account_usage, refresh_all_usage,
-    warmup_account as send_warmup,
+    warmup_account as send_warmup, ChatGptAccountMetadata,
 };
-use crate::auth::{get_account, load_accounts, refresh_chatgpt_tokens, update_account_metadata};
+use crate::auth::{
+    ensure_chatgpt_tokens_fresh, get_account, load_accounts, update_account_metadata,
+};
 use crate::types::{AccountInfo, AuthData, UsageInfo, WarmupSummary};
 use futures::{stream, StreamExt};
+use std::{
+    collections::HashMap,
+    sync::{LazyLock, Mutex},
+};
+
+static ACCOUNT_METADATA_CACHE: LazyLock<Mutex<HashMap<String, ChatGptAccountMetadata>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub(crate) fn apply_cached_account_metadata(account: &mut AccountInfo) {
+    let Ok(cache) = ACCOUNT_METADATA_CACHE.lock() else {
+        return;
+    };
+    let Some(metadata) = cache.get(&account.id) else {
+        return;
+    };
+
+    if metadata.plan_type.is_some() {
+        account.plan_type = metadata.plan_type.clone();
+    }
+    account.subscription_expires_at = metadata.subscription_expires_at;
+}
 
 /// Fetch usage info for a specific account (shared by the Tauri command and web mode).
 pub async fn fetch_usage(account_id: &str) -> Result<UsageInfo, String> {
@@ -31,8 +54,8 @@ pub async fn get_usage(app: tauri::AppHandle, account_id: String) -> Result<Usag
     Ok(usage)
 }
 
-/// Force-refresh account metadata for a specific account.
-/// For ChatGPT accounts this refreshes OAuth tokens and pulls live subscription metadata.
+/// Refresh account metadata for a specific account.
+/// For ChatGPT accounts this ensures OAuth tokens are valid and pulls live subscription metadata.
 /// For API key accounts this is a no-op.
 #[tauri::command]
 pub async fn refresh_account_metadata(account_id: String) -> Result<AccountInfo, String> {
@@ -40,10 +63,10 @@ pub async fn refresh_account_metadata(account_id: String) -> Result<AccountInfo,
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Account not found: {account_id}"))?;
 
-    let updated = match &account.auth_data {
-        AuthData::ApiKey { .. } => account,
+    let (updated, live_metadata) = match &account.auth_data {
+        AuthData::ApiKey { .. } => (account, None),
         AuthData::ChatGPT { .. } => {
-            let refreshed = refresh_chatgpt_tokens(&account)
+            let refreshed = ensure_chatgpt_tokens_fresh(&account)
                 .await
                 .map_err(|e| e.to_string())?;
             let live_metadata = fetch_chatgpt_account_metadata(&refreshed)
@@ -54,16 +77,30 @@ pub async fn refresh_account_metadata(account_id: String) -> Result<AccountInfo,
                 &account_id,
                 None,
                 None,
-                live_metadata.plan_type,
-                Some(live_metadata.subscription_expires_at),
+                live_metadata.plan_type.clone(),
+                None,
             )
-            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+
+            ACCOUNT_METADATA_CACHE
+                .lock()
+                .map_err(|_| "Account metadata cache is unavailable".to_string())?
+                .insert(account_id.clone(), live_metadata.clone());
+
+            (refreshed, Some(live_metadata))
         }
     };
 
     let store = load_accounts().map_err(|e| e.to_string())?;
     let active_id = store.active_account_id.as_deref();
-    Ok(AccountInfo::from_stored(&updated, active_id))
+    let mut info = AccountInfo::from_stored(&updated, active_id);
+    if let Some(metadata) = live_metadata {
+        if metadata.plan_type.is_some() {
+            info.plan_type = metadata.plan_type;
+        }
+        info.subscription_expires_at = metadata.subscription_expires_at;
+    }
+    Ok(info)
 }
 
 /// Refresh usage info for all accounts

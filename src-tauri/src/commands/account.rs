@@ -78,7 +78,11 @@ pub async fn list_accounts() -> Result<Vec<AccountInfo>, String> {
     let accounts: Vec<AccountInfo> = store
         .accounts
         .iter()
-        .map(|a| AccountInfo::from_stored(a, active_id))
+        .map(|a| {
+            let mut info = AccountInfo::from_stored(a, active_id);
+            super::usage::apply_cached_account_metadata(&mut info);
+            info
+        })
         .collect();
 
     Ok(accounts)
@@ -91,7 +95,9 @@ pub async fn get_active_account_info() -> Result<Option<AccountInfo>, String> {
     let active_id = store.active_account_id.as_deref();
 
     if let Some(active) = get_active_account().map_err(|e| e.to_string())? {
-        Ok(Some(AccountInfo::from_stored(&active, active_id)))
+        let mut info = AccountInfo::from_stored(&active, active_id);
+        super::usage::apply_cached_account_metadata(&mut info);
+        Ok(Some(info))
     } else {
         Ok(None)
     }

@@ -1,8 +1,8 @@
 //! Native application menu management.
 
 use tauri::{
-    menu::{AboutMetadata, CheckMenuItem, Menu, PredefinedMenuItem, Submenu},
-    AppHandle, Runtime,
+    menu::{AboutMetadata, CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
+    AppHandle, Emitter, Runtime,
 };
 
 #[cfg(target_os = "macos")]
@@ -15,6 +15,7 @@ use crate::{
 const TRAY_ICON_AND_SESSION_ID: &str = "tray-display-icon-and-session";
 const TRAY_ACTIVE_USAGE_TEXT_ID: &str = "tray-display-active-usage-text";
 const TRAY_HIDDEN_ID: &str = "tray-display-hidden";
+const DESKTOP_REOPEN_SETTINGS_ID: &str = "desktop-reopen-settings";
 #[cfg(target_os = "macos")]
 pub(crate) const DOCK_SHOW_IN_DOCK_ID: &str = "dock-display-show-in-dock";
 #[cfg(target_os = "macos")]
@@ -32,11 +33,22 @@ pub fn refresh<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let settings = load_app_settings().unwrap_or_default();
     let menu = build_menu(app, &settings)?;
     app.set_menu(menu)?;
+    if let Err(error) = app.emit("app-settings-changed", ()) {
+        eprintln!("Failed to notify settings changes: {error}");
+    }
     Ok(())
 }
 
 fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     let item_id = event.id();
+
+    if item_id.as_ref() == DESKTOP_REOPEN_SETTINGS_ID {
+        crate::commands::open_main_window(app.clone());
+        if let Err(error) = app.emit_to("main", "desktop-reopen-settings-requested", ()) {
+            eprintln!("Failed to open desktop reopen settings: {error}");
+        }
+        return;
+    }
 
     if let Some(mode) = tray_display_mode_for_item(item_id.as_ref()) {
         update_tray_display_mode(app, mode);
@@ -59,27 +71,26 @@ fn tray_display_mode_for_item(item_id: &str) -> Option<TrayDisplayMode> {
 }
 
 pub(crate) fn update_tray_display_mode(app: &AppHandle, mode: TrayDisplayMode) {
-    let mut settings = load_app_settings().unwrap_or_default();
-    if settings.tray_display_mode == mode {
-        return;
+    if let Err(error) = set_tray_display_mode(app, mode) {
+        eprintln!("Failed to update tray display mode: {error}");
     }
+}
 
+pub(crate) fn set_tray_display_mode(app: &AppHandle, mode: TrayDisplayMode) -> anyhow::Result<()> {
+    let mut settings = load_app_settings()?;
     settings.tray_display_mode = mode;
     #[cfg(target_os = "macos")]
     let dock_mode_changed = ensure_dock_entry_for_tray_mode(&mut settings);
-    if let Err(error) = save_app_settings(&settings) {
-        eprintln!("Failed to save app settings: {error}");
-        return;
-    }
+    save_app_settings(&settings)?;
 
     #[cfg(target_os = "macos")]
     if dock_mode_changed {
         apply_dock_display_mode(app, settings.dock_display_mode);
     }
-    if let Err(error) = refresh(app) {
-        eprintln!("Failed to refresh app menu: {error}");
-    }
+    let menu_result = refresh(app);
     crate::tray::refresh(app);
+    menu_result?;
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -247,12 +258,29 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
         ],
     )?;
 
+    let desktop_reopen_settings = MenuItem::with_id(
+        app,
+        DESKTOP_REOPEN_SETTINGS_ID,
+        "Reopen Codex after force close...",
+        cfg!(any(target_os = "macos", windows)),
+        None::<&str>,
+    )?;
+
     #[cfg(target_os = "macos")]
-    let settings_menu =
-        Submenu::with_items(app, "Settings", true, &[&tray_settings, &dock_settings])?;
+    let settings_menu = Submenu::with_items(
+        app,
+        "Settings",
+        true,
+        &[&tray_settings, &dock_settings, &desktop_reopen_settings],
+    )?;
 
     #[cfg(not(target_os = "macos"))]
-    let settings_menu = Submenu::with_items(app, "Settings", true, &[&tray_settings])?;
+    let settings_menu = Submenu::with_items(
+        app,
+        "Settings",
+        true,
+        &[&tray_settings, &desktop_reopen_settings],
+    )?;
 
     let window_menu = Submenu::with_items(
         app,
@@ -328,6 +356,8 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
                 true,
                 &[&PredefinedMenuItem::fullscreen(app, None)?],
             )?,
+            #[cfg(not(target_os = "macos"))]
+            &settings_menu,
             &window_menu,
             &help_menu,
         ],

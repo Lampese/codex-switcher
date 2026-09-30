@@ -13,6 +13,7 @@ export function useAccounts() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const accountsRef = useRef<AccountWithUsage[]>([]);
+  const metadataRefreshInFlightRef = useRef(new Set<string>());
   const maxConcurrentUsageRequests = 10;
 
   useEffect(() => {
@@ -94,30 +95,67 @@ export function useAccounts() {
     }
   }, []);
 
+  const refreshMetadata = useCallback(
+    async (
+      accountList?: AccountInfo[] | AccountWithUsage[]
+    ) => {
+      const list = accountList ?? accountsRef.current;
+      const dueAccounts = list.filter(
+        (account) => !metadataRefreshInFlightRef.current.has(account.id)
+      );
+
+      // Mark attempts before starting requests so overlapping refresh cycles
+      // cannot issue duplicate metadata calls for the same account.
+      dueAccounts.forEach((account) => {
+        metadataRefreshInFlightRef.current.add(account.id);
+      });
+
+      await runWithConcurrency(
+        dueAccounts,
+        async (account) => {
+          try {
+            const metadata = await invokeBackend<AccountInfo>("refresh_account_metadata", {
+              accountId: account.id,
+            });
+            setAccounts((prev) =>
+              prev.map((item) =>
+                item.id === account.id
+                  ? {
+                      ...item,
+                      plan_type: metadata.plan_type,
+                      subscription_expires_at: metadata.subscription_expires_at,
+                    }
+                  : item
+              )
+            );
+          } catch (err) {
+            console.warn("Failed to refresh account metadata:", err);
+          } finally {
+            metadataRefreshInFlightRef.current.delete(account.id);
+          }
+        },
+        maxConcurrentUsageRequests
+      );
+    },
+    [maxConcurrentUsageRequests, runWithConcurrency]
+  );
+
   const refreshUsage = useCallback(
     async (
       accountList?: AccountInfo[] | AccountWithUsage[],
       options?: { refreshMetadata?: boolean }
     ) => {
       try {
-        let list = accountList ?? accountsRef.current;
+        const list = accountList ?? accountsRef.current;
         if (list.length === 0) {
           return;
         }
 
-        if (options?.refreshMetadata) {
-          await runWithConcurrency(
-            list,
-            async (account) => {
-              await invokeBackend<AccountInfo>("refresh_account_metadata", {
-                accountId: account.id,
-              });
-            },
-            maxConcurrentUsageRequests
-          );
-
-          list = await loadAccounts(true);
-        }
+        // Explicit refreshes include metadata, but run it beside usage so a
+        // slow accounts endpoint never delays healthy rate-limit updates.
+        const metadataPromise = options?.refreshMetadata
+          ? refreshMetadata(list)
+          : Promise.resolve();
 
         const accountIds = list.map((account) => account.id);
         const accountIdSet = new Set(accountIds);
@@ -164,12 +202,19 @@ export function useAccounts() {
         );
 
         reportUsageToTray(Array.from(usageResults.values()));
+        await metadataPromise;
       } catch (err) {
         console.error("Failed to refresh usage:", err);
         throw err;
       }
     },
-    [buildUsageError, loadAccounts, maxConcurrentUsageRequests, reportUsageToTray, runWithConcurrency]
+    [
+      buildUsageError,
+      maxConcurrentUsageRequests,
+      refreshMetadata,
+      reportUsageToTray,
+      runWithConcurrency,
+    ]
   );
 
   const refreshSingleUsage = useCallback(async (
@@ -177,10 +222,10 @@ export function useAccounts() {
     options?: { refreshMetadata?: boolean }
   ) => {
     try {
-      if (options?.refreshMetadata) {
-        await invokeBackend<AccountInfo>("refresh_account_metadata", { accountId });
-        await loadAccounts(true);
-      }
+      const account = accountsRef.current.find((item) => item.id === accountId);
+      const metadataPromise = options?.refreshMetadata && account
+        ? refreshMetadata([account])
+        : Promise.resolve();
 
       setAccounts((prev) =>
         prev.map((a) =>
@@ -194,6 +239,7 @@ export function useAccounts() {
         )
       );
       reportUsageToTray([usage]);
+      await metadataPromise;
       return usage;
     } catch (err) {
       console.error("Failed to refresh single usage:", err);
@@ -211,7 +257,7 @@ export function useAccounts() {
       );
       throw err;
     }
-  }, [buildUsageError, loadAccounts, reportUsageToTray]);
+  }, [buildUsageError, refreshMetadata, reportUsageToTray]);
 
   const warmupAccount = useCallback(async (accountId: string) => {
     try {
@@ -400,15 +446,29 @@ export function useAccounts() {
   }, []);
 
   useEffect(() => {
-    loadAccounts().then((accountList) => refreshUsage(accountList));
+    loadAccounts().then((accountList) => {
+      void refreshUsage(accountList);
+      // Populate live expiry immediately. The native background process keeps
+      // its cache current while a desktop webview is hidden or suspended.
+      void refreshMetadata(accountList);
+    });
     
     // Auto-refresh usage every 60 seconds (same as official Codex CLI)
-    const interval = setInterval(() => {
+    const usageInterval = setInterval(() => {
       refreshUsage().catch(() => {});
     }, 60000);
+
+    const metadataInterval = !isTauriRuntime()
+      ? setInterval(() => {
+          refreshMetadata().catch(() => {});
+        }, 6 * 60 * 60 * 1000)
+      : undefined;
     
-    return () => clearInterval(interval);
-  }, [loadAccounts, refreshUsage]);
+    return () => {
+      clearInterval(usageInterval);
+      if (metadataInterval !== undefined) clearInterval(metadataInterval);
+    };
+  }, [loadAccounts, refreshMetadata, refreshUsage]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;

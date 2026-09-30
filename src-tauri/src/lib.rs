@@ -60,7 +60,11 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            commands::get_display_settings,
+            commands::set_tray_display_mode,
             commands::open_codex_app,
+            commands::get_codex_reopen_info,
+            commands::reopen_closed_codex_desktop,
             // Account management
             list_accounts,
             get_active_account_info,

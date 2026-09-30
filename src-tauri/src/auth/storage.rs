@@ -272,24 +272,41 @@ pub fn update_account_metadata(
         .find(|a| a.id == account_id)
         .context("Account not found")?;
 
+    let mut changed = false;
+
     if let Some(new_name) = name {
-        account.name = new_name;
+        if account.name != new_name {
+            account.name = new_name;
+            changed = true;
+        }
     }
 
-    if email.is_some() {
-        account.email = email;
+    if let Some(new_email) = email {
+        if account.email.as_ref() != Some(&new_email) {
+            account.email = Some(new_email);
+            changed = true;
+        }
     }
 
-    if plan_type.is_some() {
-        account.plan_type = plan_type;
+    if let Some(new_plan_type) = plan_type {
+        if account.plan_type.as_ref() != Some(&new_plan_type) {
+            account.plan_type = Some(new_plan_type);
+            changed = true;
+        }
     }
 
     if let Some(subscription_expires_at) = subscription_expires_at {
-        account.subscription_expires_at = subscription_expires_at;
+        if account.subscription_expires_at != subscription_expires_at {
+            account.subscription_expires_at = subscription_expires_at;
+            changed = true;
+        }
     }
 
     let updated = account.clone();
-    save_accounts(&store)?;
+    if changed {
+        save_accounts(&store)?;
+        println!("[Account] Saved updated metadata for: {}", updated.name);
+    }
     Ok(updated)
 }
 

@@ -66,37 +66,27 @@ struct AccountsCheckEntitlement {
 
 /// Get usage information for an account
 pub async fn get_account_usage(account: &StoredAccount) -> Result<UsageInfo> {
-    println!("[Usage] Fetching usage for account: {}", account.name);
-
     match &account.auth_data {
-        AuthData::ApiKey { .. } => {
-            println!("[Usage] API key accounts don't support usage info");
-            Ok(UsageInfo {
-                account_id: account.id.clone(),
-                plan_type: Some("api_key".to_string()),
-                primary_used_percent: None,
-                primary_window_minutes: None,
-                primary_resets_at: None,
-                secondary_used_percent: None,
-                secondary_window_minutes: None,
-                secondary_resets_at: None,
-                has_credits: None,
-                unlimited_credits: None,
-                credits_balance: None,
-                error: Some("Usage info not available for API key accounts".to_string()),
-            })
-        }
+        AuthData::ApiKey { .. } => Ok(UsageInfo {
+            account_id: account.id.clone(),
+            plan_type: Some("api_key".to_string()),
+            primary_used_percent: None,
+            primary_window_minutes: None,
+            primary_resets_at: None,
+            secondary_used_percent: None,
+            secondary_window_minutes: None,
+            secondary_resets_at: None,
+            has_credits: None,
+            unlimited_credits: None,
+            credits_balance: None,
+            error: Some("Usage info not available for API key accounts".to_string()),
+        }),
         AuthData::ChatGPT { .. } => get_usage_with_chatgpt_auth(account).await,
     }
 }
 
 /// Send a minimal authenticated request to warm up account traffic paths.
 pub async fn warmup_account(account: &StoredAccount) -> Result<()> {
-    println!(
-        "[Warmup] Sending warm-up request for account: {}",
-        account.name
-    );
-
     match &account.auth_data {
         AuthData::ApiKey { key } => warmup_with_api_key(key).await,
         AuthData::ChatGPT { .. } => warmup_with_chatgpt_auth(account).await,
@@ -181,11 +171,8 @@ async fn parse_usage_response(
     response: reqwest::Response,
 ) -> Result<UsageInfo> {
     let status = response.status();
-    println!("[Usage] Response status: {status}");
 
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        println!("[Usage] Error response: {body}");
         return Ok(UsageInfo::error(
             account_id.to_string(),
             format!("API error: {status}"),
@@ -196,21 +183,12 @@ async fn parse_usage_response(
         .text()
         .await
         .context("Failed to read response body")?;
-    println!(
-        "[Usage] Response body: {}",
-        &body_text[..body_text.len().min(200)]
-    );
 
     let payload: RateLimitStatusPayload =
         serde_json::from_str(&body_text).context("Failed to parse usage response")?;
 
-    println!("[Usage] Parsed plan_type: {}", payload.plan_type);
-
     let usage = convert_payload_to_usage_info(account_id, payload);
-    println!(
-        "[Usage] {} - primary: {:?}%, plan: {:?}",
-        account_name, usage.primary_used_percent, usage.plan_type
-    );
+    println!("[Usage] Refreshed account: {account_name}");
 
     Ok(usage)
 }
@@ -347,7 +325,6 @@ fn build_chatgpt_headers(
     }
 
     if let Some(acc_id) = chatgpt_account_id {
-        println!("[Usage] Using ChatGPT Account ID: {acc_id}");
         if let Ok(header_name) = HeaderName::from_bytes(b"chatgpt-account-id") {
             if let Ok(header_value) = HeaderValue::from_str(acc_id) {
                 headers.insert(header_name, header_value);
@@ -388,7 +365,6 @@ async fn send_chatgpt_get_request(
 ) -> Result<reqwest::Response> {
     let client = reqwest::Client::new();
     let headers = build_chatgpt_headers(access_token, chatgpt_account_id)?;
-    println!("[Usage] Requesting: {url}");
 
     client
         .get(url)
@@ -563,8 +539,6 @@ fn extract_credits(credits: Option<CreditStatusDetails>) -> Option<CreditStatusD
 
 /// Refresh all account usage
 pub async fn refresh_all_usage(accounts: &[StoredAccount]) -> Vec<UsageInfo> {
-    println!("[Usage] Refreshing usage for {} accounts", accounts.len());
-
     let concurrency = accounts.len().min(10).max(1);
     let results: Vec<UsageInfo> = stream::iter(accounts.iter().cloned())
         .map(|account| async move {
@@ -580,7 +554,6 @@ pub async fn refresh_all_usage(accounts: &[StoredAccount]) -> Vec<UsageInfo> {
         .collect()
         .await;
 
-    println!("[Usage] Refresh complete");
     results
 }
 

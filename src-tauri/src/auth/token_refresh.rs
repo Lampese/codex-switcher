@@ -65,10 +65,6 @@ pub(crate) async fn ensure_chatgpt_tokens_fresh_locked(
             ..
         } => {
             if chatgpt_tokens_need_refresh_at(id_token, access_token, Utc::now().timestamp()) {
-                println!(
-                    "[Auth] OAuth token expired/near expiry for account {}, refreshing",
-                    current.name
-                );
                 refresh_chatgpt_tokens_locked(&current).await
             } else {
                 Ok(current)
@@ -91,10 +87,6 @@ async fn refresh_chatgpt_tokens_locked(account: &StoredAccount) -> Result<Stored
     let (current, is_active) = load_account_reconciling_live_auth(&account.id)?;
 
     if is_active && crate::commands::process::ensure_codex_not_running().is_err() {
-        println!(
-            "[Auth] Using the running app's live credentials for active account {}",
-            current.name
-        );
         return Ok(current);
     }
 
@@ -133,6 +125,7 @@ async fn refresh_chatgpt_tokens_locked(account: &StoredAccount) -> Result<Stored
         claims.plan_type,
         claims.subscription_expires_at,
     )?;
+    println!("[Auth] Refreshed OAuth tokens for: {}", updated.name);
 
     // Refresh tokens can be single-use. Persist a rotated replacement before
     // reporting an unusable ID token, so a later retry can still recover.

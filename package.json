@@ -1,13 +1,16 @@
 {
   "name": "codex-switcher",
   "private": true,
-  "version": "0.2.13",
+  "version": "0.2.20",
   "description": "A multi-account manager for Codex CLI",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test:desktop-reopen": "node --experimental-strip-types --test tests/desktopReopen.test.ts",
+    "test:close-preference": "node --experimental-strip-types --test tests/codexClosePreference.test.ts",
     "test:reset-credits": "node --experimental-strip-types --test tests/resetCredits.test.ts",
+    "test:updater": "node --experimental-strip-types --test tests/updateInstallation.test.ts tests/updaterToolchain.test.ts",
     "preview": "vite preview",
     "tauri": "sh ./scripts/tauri.sh",
     "tauri:win": "tauri",
@@ -19,7 +22,8 @@
     "release": "node scripts/release.mjs",
     "release:patch": "node scripts/release.mjs patch",
     "release:minor": "node scripts/release.mjs minor",
-    "release:major": "node scripts/release.mjs major"
+    "release:major": "node scripts/release.mjs major",
+    "test": "node --experimental-strip-types --test tests/*.test.*"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.0",
@@ -32,7 +36,7 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.18",
-    "@tauri-apps/cli": "^2",
+    "@tauri-apps/cli": "^2.10.1",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",

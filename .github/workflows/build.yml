@@ -88,7 +88,9 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             note="$INPUT_RELEASE_NOTE"
           else
-            note="$(git tag --list --format='%(contents)' "$RELEASE_TAG")"
+            remote_tag_ref="refs/release-tags/$RELEASE_TAG"
+            git fetch --force --no-tags origin "refs/tags/$RELEASE_TAG:$remote_tag_ref"
+            note="$(git for-each-ref --format='%(contents)' "$remote_tag_ref")"
           fi
           {
             echo 'note<<RELEASE_NOTE_EOF'

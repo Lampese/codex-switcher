@@ -1,6 +1,11 @@
 //! Process detection commands
 
 use std::process::Command;
+use std::time::{Duration, Instant};
+
+#[path = "desktop_reopen.rs"]
+mod desktop_reopen;
+pub use desktop_reopen::*;
 
 #[cfg(any(windows, test))]
 use anyhow::Context;
@@ -45,15 +50,16 @@ pub struct CodexProcessInfo {
     pub pids: Vec<u32>,
 }
 
-/// Summary of a force-close operation for active Codex processes.
+/// Summary of a close operation for active Codex processes.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct KillCodexProcessesResult {
     /// Number of active Codex sessions targeted before expanding child processes.
     pub targeted_count: usize,
-    /// Process IDs that were successfully signalled for termination.
+    /// Process IDs that were successfully force-signalled or observed closed.
     pub killed_pids: Vec<u32>,
     /// Process IDs that could not be terminated.
     pub failed_pids: Vec<u32>,
+    pub reopen_token: Option<String>,
 }
 
 #[cfg(unix)]
@@ -96,16 +102,35 @@ pub(crate) fn is_codex_running_switch_block(error: &str) -> bool {
     error.starts_with(CODEX_RUNNING_SWITCH_BLOCKED_PREFIX)
 }
 
-/// Force-close active Codex processes that currently block account switching.
+/// Close active Codex processes that currently block account switching.
+/// Graceful close is the default; force close must be explicitly requested.
 #[tauri::command]
-pub async fn kill_codex_processes() -> Result<KillCodexProcessesResult, String> {
-    tokio::task::spawn_blocking(kill_codex_processes_blocking)
-        .await
-        .map_err(|e| e.to_string())?
+pub async fn kill_codex_processes(
+    reopen_desktop: Option<bool>,
+    force_close: Option<bool>,
+) -> Result<KillCodexProcessesResult, String> {
+    tokio::task::spawn_blocking(move || {
+        close_codex_processes_blocking(
+            reopen_desktop.unwrap_or(false),
+            force_close.unwrap_or(false),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
-fn kill_codex_processes_blocking() -> Result<KillCodexProcessesResult, String> {
+fn close_codex_processes_blocking(
+    reopen_desktop: bool,
+    force_close: bool,
+) -> Result<KillCodexProcessesResult, String> {
     let (pids, _) = find_codex_processes().map_err(|e| e.to_string())?;
+    // Capture exact desktop identities before termination. Detection failure must
+    // never prevent the existing close-only flow.
+    let desktops = if reopen_desktop || (cfg!(target_os = "macos") && !force_close) {
+        desktop_reopen::capture_desktops(&pids).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let targeted_count = pids.len();
     let mut killed_pids = Vec::new();
     let mut failed_pids = Vec::new();
@@ -125,7 +150,27 @@ fn kill_codex_processes_blocking() -> Result<KillCodexProcessesResult, String> {
     #[cfg(target_os = "macos")]
     let current_uid = current_unix_uid();
 
-    for pid in targets {
+    #[cfg(target_os = "macos")]
+    let desktop_processes = if force_close {
+        HashSet::new()
+    } else {
+        let desktop_roots = desktop_reopen::desktop_pids(&desktops);
+        expand_process_targets(&desktop_roots, snapshot.as_ref())
+            .into_iter()
+            .collect::<HashSet<_>>()
+    };
+
+    #[cfg(target_os = "macos")]
+    if !force_close && !desktop_processes.is_empty() {
+        let _ = request_macos_codex_quit();
+    }
+
+    for pid in targets.iter().copied() {
+        #[cfg(target_os = "macos")]
+        if !force_close && desktop_processes.contains(&pid) {
+            continue;
+        }
+
         #[cfg(target_os = "macos")]
         if snapshot
             .as_ref()
@@ -137,7 +182,7 @@ fn kill_codex_processes_blocking() -> Result<KillCodexProcessesResult, String> {
             continue;
         }
 
-        if force_kill_process(pid) {
+        if close_process(pid, force_close) {
             killed_pids.push(pid);
         } else {
             failed_pids.push(pid);
@@ -151,7 +196,7 @@ fn kill_codex_processes_blocking() -> Result<KillCodexProcessesResult, String> {
         admin_targets.dedup();
 
         let mut still_failed = Vec::new();
-        if force_kill_processes_with_admin_privileges(&admin_targets) {
+        if close_processes_with_admin_privileges(&admin_targets, force_close) {
             for pid in admin_targets.iter().copied() {
                 if process_exists(pid) {
                     still_failed.push(pid);
@@ -170,10 +215,26 @@ fn kill_codex_processes_blocking() -> Result<KillCodexProcessesResult, String> {
         failed_pids = still_failed;
     }
 
+    if !force_close {
+        wait_for_processes_to_exit(&targets, Duration::from_secs(8));
+        killed_pids = targets
+            .iter()
+            .copied()
+            .filter(|pid| !process_exists(*pid))
+            .collect();
+        failed_pids = targets
+            .iter()
+            .copied()
+            .filter(|pid| process_exists(*pid))
+            .collect();
+    }
+
+    let reopen_token = desktop_reopen::remember_closed_desktops(desktops, &killed_pids);
     Ok(KillCodexProcessesResult {
         targeted_count,
         killed_pids,
         failed_pids,
+        reopen_token,
     })
 }
 
@@ -259,11 +320,11 @@ fn read_unix_process_snapshot() -> Option<UnixProcessSnapshot> {
     })
 }
 
-fn force_kill_process(pid: u32) -> bool {
+fn close_process(pid: u32, force: bool) -> bool {
     #[cfg(unix)]
     {
         let killed = Command::new("/bin/kill")
-            .arg("-9")
+            .arg(if force { "-9" } else { "-TERM" })
             .arg(pid.to_string())
             .status()
             .map(|status| status.success())
@@ -273,9 +334,13 @@ fn force_kill_process(pid: u32) -> bool {
 
     #[cfg(windows)]
     {
-        let killed = Command::new("taskkill")
-            .creation_flags(CREATE_NO_WINDOW)
-            .args(["/F", "/T", "/PID", &pid.to_string()])
+        let mut command = Command::new("taskkill");
+        command.creation_flags(CREATE_NO_WINDOW);
+        if force {
+            command.arg("/F");
+        }
+        let killed = command
+            .args(["/T", "/PID", &pid.to_string()])
             .status()
             .map(|status| status.success())
             .unwrap_or(false);
@@ -287,7 +352,7 @@ fn force_kill_process(pid: u32) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn force_kill_processes_with_admin_privileges(pids: &[u32]) -> bool {
+fn close_processes_with_admin_privileges(pids: &[u32], force: bool) -> bool {
     if pids.is_empty() {
         return true;
     }
@@ -297,8 +362,10 @@ fn force_kill_processes_with_admin_privileges(pids: &[u32]) -> bool {
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(" ");
+    let signal = if force { "-9" } else { "-TERM" };
+    let action = if force { "force close" } else { "close" };
     let script = format!(
-        r#"do shell script "for pid in {pid_args}; do /bin/kill -9 \"$pid\" 2>/dev/null || true; done" with administrator privileges with prompt "Codex Switcher needs permission to force close sudo/root Codex processes.""#
+        r#"do shell script "for pid in {pid_args}; do /bin/kill {signal} \"$pid\" 2>/dev/null || true; done" with administrator privileges with prompt "Codex Switcher needs permission to {action} sudo/root Codex processes.""#
     );
 
     Command::new("/usr/bin/osascript")
@@ -307,6 +374,22 @@ fn force_kill_processes_with_admin_privileges(pids: &[u32]) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn request_macos_codex_quit() -> bool {
+    Command::new("/usr/bin/osascript")
+        .args(["-e", r#"tell application id "com.openai.codex" to quit"#])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn wait_for_processes_to_exit(pids: &[u32], timeout: Duration) {
+    let started = Instant::now();
+    while pids.iter().any(|pid| process_exists(*pid)) && started.elapsed() < timeout {
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -542,6 +625,13 @@ fn read_macos_app_bundle_identifier(command: &str, process_name: Option<&str>) -
 
 #[cfg(windows)]
 fn find_windows_codex_processes() -> anyhow::Result<(Vec<u32>, usize)> {
+    Ok(classify_windows_codex_processes(
+        &read_windows_codex_processes()?,
+    ))
+}
+
+#[cfg(windows)]
+fn read_windows_codex_processes() -> anyhow::Result<Vec<WindowsCodexProcess>> {
     // tasklist counts every Electron helper (`--type=gpu-process`, crashpad, renderer, etc.),
     // which inflates the badge and incorrectly blocks switching. Use PowerShell so we can inspect
     // the command line and only count live top-level app instances.
@@ -587,9 +677,7 @@ Get-CimInstance Win32_Process |
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let processes = parse_windows_codex_processes(&stdout)?;
-
-    Ok(classify_windows_codex_processes(&processes))
+    parse_windows_codex_processes(&stdout)
 }
 
 #[cfg(any(windows, test))]
