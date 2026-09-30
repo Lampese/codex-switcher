@@ -92,6 +92,12 @@ pub struct StoredAccount {
     pub created_at: DateTime<Utc>,
     /// Last time this account was used
     pub last_used_at: Option<DateTime<Utc>>,
+    /// Last time these OAuth credentials were created or refreshed.
+    ///
+    /// This is intentionally separate from `last_used_at`: credential age is
+    /// an authentication policy signal, while account use is only activity.
+    #[serde(default)]
+    pub last_refresh_at: Option<DateTime<Utc>>,
 }
 
 impl StoredAccount {
@@ -133,6 +139,7 @@ impl StoredAccount {
             auth_data: AuthData::ApiKey { key: api_key },
             created_at: Utc::now(),
             last_used_at: None,
+            last_refresh_at: None,
         }
     }
 
@@ -146,6 +153,31 @@ impl StoredAccount {
         access_token: String,
         refresh_token: String,
         account_id: Option<String>,
+    ) -> Self {
+        Self::new_chatgpt_with_refresh_at(
+            name,
+            email,
+            plan_type,
+            subscription_expires_at,
+            id_token,
+            access_token,
+            refresh_token,
+            account_id,
+            Some(Utc::now()),
+        )
+    }
+
+    /// Create a ChatGPT OAuth account with an explicit credential age.
+    pub fn new_chatgpt_with_refresh_at(
+        name: String,
+        email: Option<String>,
+        plan_type: Option<String>,
+        subscription_expires_at: Option<DateTime<Utc>>,
+        id_token: String,
+        access_token: String,
+        refresh_token: String,
+        account_id: Option<String>,
+        last_refresh_at: Option<DateTime<Utc>>,
     ) -> Self {
         let name = Self::resolved_name(name, email.as_ref(), account_id.as_ref(), "ChatGPT");
         Self {
@@ -163,6 +195,7 @@ impl StoredAccount {
             },
             created_at: Utc::now(),
             last_used_at: None,
+            last_refresh_at,
         }
     }
 }
