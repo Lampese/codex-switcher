@@ -6,7 +6,7 @@ import { SettingsModal } from "./components/SettingsModal";
 import { finishForceClose, type DesktopReopenPreference } from "./lib/desktopReopen";
 import type { CodexClosePreference } from "./lib/codexClosePreference";
 import { useForceCloseCodexProcesses } from "./hooks/useForceCloseCodexProcesses";
-import { AccountCard, AddAccountModal, UpdateChecker } from "./components";
+import { AccountCard, AddAccountModal, UpdateChecker, WindowResizeBorders } from "./components";
 import type { AccountWithUsage, CodexProcessInfo, DockDisplayMode, UsageInfo } from "./types";
 import {
   exportFullBackupFile,
@@ -1349,6 +1349,7 @@ function App() {
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
+      <WindowResizeBorders isMaximized={isWindowMaximized} />
       <header className="sticky top-0 z-40 border-b border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-900">
         <div className="flex h-9 items-center bg-white px-3 dark:bg-gray-900">
           <div

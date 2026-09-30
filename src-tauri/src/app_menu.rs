@@ -1,20 +1,23 @@
-//! Native application menu management.
+#[cfg(target_os = "macos")]
+use tauri::menu::{AboutMetadata, CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::{AppHandle, Emitter, Runtime};
 
-use tauri::{
-    menu::{AboutMetadata, CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
-    AppHandle, Emitter, Runtime,
-};
-
+#[cfg(target_os = "macos")]
+use crate::types::AppSettings;
 #[cfg(target_os = "macos")]
 pub(crate) use crate::types::DockDisplayMode;
 use crate::{
     auth::{load_app_settings, save_app_settings},
-    types::{AppSettings, TrayDisplayMode},
+    types::TrayDisplayMode,
 };
 
+#[cfg(target_os = "macos")]
 const TRAY_ICON_AND_SESSION_ID: &str = "tray-display-icon-and-session";
+#[cfg(target_os = "macos")]
 const TRAY_ACTIVE_USAGE_TEXT_ID: &str = "tray-display-active-usage-text";
+#[cfg(target_os = "macos")]
 const TRAY_HIDDEN_ID: &str = "tray-display-hidden";
+#[cfg(target_os = "macos")]
 const DESKTOP_REOPEN_SETTINGS_ID: &str = "desktop-reopen-settings";
 #[cfg(target_os = "macos")]
 pub(crate) const DOCK_SHOW_IN_DOCK_ID: &str = "dock-display-show-in-dock";
@@ -23,22 +26,34 @@ pub(crate) const DOCK_MENU_BAR_ONLY_ID: &str = "dock-display-menu-bar-only";
 
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     #[cfg(target_os = "macos")]
-    apply_saved_dock_display_mode(app);
-    refresh(app)?;
-    app.on_menu_event(handle_menu_event);
+    {
+        apply_saved_dock_display_mode(app);
+        refresh(app)?;
+        app.on_menu_event(handle_menu_event);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // On non-macOS platforms, Codex Switcher uses a frameless custom UI (decorations: false).
+        // Settings are managed in the tray menu and in-app UI, so no native window menu is attached.
+        refresh(app)?;
+    }
     Ok(())
 }
 
 pub fn refresh<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
-    let settings = load_app_settings().unwrap_or_default();
-    let menu = build_menu(app, &settings)?;
-    app.set_menu(menu)?;
+    #[cfg(target_os = "macos")]
+    {
+        let settings = load_app_settings().unwrap_or_default();
+        let menu = build_menu(app, &settings)?;
+        app.set_menu(menu)?;
+    }
     if let Err(error) = app.emit("app-settings-changed", ()) {
         eprintln!("Failed to notify settings changes: {error}");
     }
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     let item_id = event.id();
 
@@ -61,6 +76,7 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn tray_display_mode_for_item(item_id: &str) -> Option<TrayDisplayMode> {
     Some(match item_id {
         TRAY_ICON_AND_SESSION_ID => TrayDisplayMode::IconAndSession,
@@ -70,6 +86,7 @@ fn tray_display_mode_for_item(item_id: &str) -> Option<TrayDisplayMode> {
     })
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn update_tray_display_mode(app: &AppHandle, mode: TrayDisplayMode) {
     if let Err(error) = set_tray_display_mode(app, mode) {
         eprintln!("Failed to update tray display mode: {error}");
@@ -186,6 +203,7 @@ fn apply_dock_display_mode<R: Runtime>(app: &AppHandle<R>, mode: DockDisplayMode
     }
 }
 
+#[cfg(target_os = "macos")]
 fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::Result<Menu<R>> {
     let pkg_info = app.package_info();
     let config = app.config();
