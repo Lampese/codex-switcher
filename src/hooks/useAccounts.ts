@@ -437,9 +437,9 @@ export function useAccounts() {
   useEffect(() => {
     loadAccounts().then((accountList) => {
       void refreshUsage(accountList);
-      // Desktop metadata is refreshed by the native background process so it
-      // continues while the webview is hidden. Web mode keeps a local poller.
-      if (!isTauriRuntime()) void refreshMetadata(accountList);
+      // Populate live expiry immediately. The native background process keeps
+      // its cache current while a desktop webview is hidden or suspended.
+      void refreshMetadata(accountList);
     });
     
     // Auto-refresh usage every 60 seconds (same as official Codex CLI)
