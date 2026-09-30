@@ -239,6 +239,7 @@ pub enum AuthMode {
     /// Using an OpenAI API key
     ApiKey,
     /// Using ChatGPT OAuth tokens
+    #[serde(alias = "chat_gpt", alias = "chatgpt", alias = "chat_g_pt")]
     ChatGPT,
 }
 
@@ -252,6 +253,7 @@ pub enum AuthData {
         key: String,
     },
     /// ChatGPT OAuth authentication
+    #[serde(alias = "chat_gpt", alias = "chatgpt", alias = "chat_g_pt")]
     ChatGPT {
         /// JWT ID token containing user info
         id_token: String,
@@ -545,5 +547,44 @@ mod tests {
         assert_eq!(settings.tray_display_mode, TrayDisplayMode::ActiveUsageText);
         assert_eq!(settings.dock_display_mode, DockDisplayMode::ShowInDock);
         assert!(settings.close_behavior_prompt_enabled);
+    }
+}
+
+#[cfg(test)]
+mod auth_deserialization_tests {
+    use super::*;
+
+    #[test]
+    fn test_legacy_chatgpt_spellings_deserialize() {
+        let legacy_spellings = ["chat_g_p_t", "chat_g_pt", "chat_gpt", "chatgpt"];
+
+        for spelling in legacy_spellings {
+            let mode_json = format!(""{}"", spelling);
+            let mode: Result<AuthMode, _> = serde_json::from_str(&mode_json);
+            assert_eq!(
+                mode.expect(&format!("Failed to deserialize AuthMode for {}", spelling)),
+                AuthMode::ChatGPT
+            );
+
+            let data_json = format!(
+                r#"{{"type": "{}", "id_token": "id", "access_token": "acc", "refresh_token": "ref", "account_id": null}}"#,
+                spelling
+            );
+            let data: Result<AuthData, _> = serde_json::from_str(&data_json);
+            match data.expect(&format!("Failed to deserialize AuthData for {}", spelling)) {
+                AuthData::ChatGPT {
+                    id_token,
+                    access_token,
+                    refresh_token,
+                    account_id,
+                } => {
+                    assert_eq!(id_token, "id");
+                    assert_eq!(access_token, "acc");
+                    assert_eq!(refresh_token, "ref");
+                    assert!(account_id.is_none());
+                }
+                _ => panic!("Expected AuthData::ChatGPT"),
+            }
+        }
     }
 }
