@@ -5,9 +5,9 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
 use crate::auth::oauth_server::{start_oauth_login, wait_for_oauth_login, OAuthLoginResult};
+use crate::auth::storage::acquire_auth_operation_lock;
 use crate::auth::{
     add_account, load_accounts, set_active_account, switch_to_account, touch_account,
-    AUTH_OPERATION_LOCK,
 };
 use crate::types::{AccountInfo, OAuthLoginInfo};
 
@@ -57,7 +57,9 @@ pub async fn complete_login() -> Result<AccountInfo, String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    let _auth_guard = AUTH_OPERATION_LOCK.lock().await;
+    let _auth_guard = acquire_auth_operation_lock()
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Add the account to storage
     let stored = add_account(account).map_err(|e| e.to_string())?;
