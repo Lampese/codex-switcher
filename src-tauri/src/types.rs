@@ -559,7 +559,7 @@ mod auth_deserialization_tests {
         let legacy_spellings = ["chat_g_p_t", "chat_g_pt", "chat_gpt", "chatgpt"];
 
         for spelling in legacy_spellings {
-            let mode_json = format!(""{}"", spelling);
+            let mode_json = format!("\"{}\"", spelling);
             let mode: Result<AuthMode, _> = serde_json::from_str(&mode_json);
             assert_eq!(
                 mode.expect(&format!("Failed to deserialize AuthMode for {}", spelling)),
