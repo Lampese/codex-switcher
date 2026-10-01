@@ -161,25 +161,122 @@ pub fn save_accounts(store: &AccountsStore) -> Result<()> {
     Ok(())
 }
 
-/// Add a new account to the store
-pub fn add_account(account: StoredAccount) -> Result<StoredAccount> {
-    let mut store = load_accounts()?;
+fn insert_or_replace_account(
+    store: &mut AccountsStore,
+    mut account: StoredAccount,
+    overwrite_existing: bool,
+) -> Result<StoredAccount> {
+    if let Some(existing) = store
+        .accounts
+        .iter_mut()
+        .find(|existing| existing.name == account.name)
+    {
+        if !overwrite_existing {
+            anyhow::bail!("An account with name '{}' already exists", account.name);
+        }
 
-    // Check for duplicate names
-    if store.accounts.iter().any(|a| a.name == account.name) {
-        anyhow::bail!("An account with name '{}' already exists", account.name);
+        // Keep the stable local identity so active-account and masking references remain valid.
+        account.id = existing.id.clone();
+        account.created_at = existing.created_at;
+        account.last_used_at = existing.last_used_at;
+        *existing = account.clone();
+        return Ok(account);
     }
 
     let account_clone = account.clone();
     store.accounts.push(account);
 
-    // If this is the first account, make it active
+    // If this is the first account, make it active.
     if store.accounts.len() == 1 {
         store.active_account_id = Some(account_clone.id.clone());
     }
 
-    save_accounts(&store)?;
     Ok(account_clone)
+}
+
+/// Add a new account, or explicitly replace an account with the same name.
+pub fn add_account(account: StoredAccount, overwrite_existing: bool) -> Result<StoredAccount> {
+    let mut store = load_accounts()?;
+    let stored = insert_or_replace_account(&mut store, account, overwrite_existing)?;
+    save_accounts(&store)?;
+    Ok(stored)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::insert_or_replace_account;
+    use crate::types::{AccountsStore, AuthData, StoredAccount};
+
+    fn account(name: &str, token_suffix: &str) -> StoredAccount {
+        StoredAccount::new_chatgpt(
+            name.to_string(),
+            Some(format!("{token_suffix}@example.com")),
+            Some("plus".to_string()),
+            None,
+            format!("id-{token_suffix}"),
+            format!("access-{token_suffix}"),
+            format!("refresh-{token_suffix}"),
+            Some(format!("account-{token_suffix}")),
+        )
+    }
+
+    #[test]
+    fn duplicate_name_is_rejected_without_explicit_overwrite() {
+        let existing = account("Work", "old");
+        let mut store = AccountsStore {
+            accounts: vec![existing.clone()],
+            active_account_id: Some(existing.id.clone()),
+            masked_account_ids: vec![existing.id.clone()],
+            ..AccountsStore::default()
+        };
+
+        let error = insert_or_replace_account(&mut store, account("Work", "new"), false)
+            .expect_err("duplicate name should require confirmation");
+
+        assert!(error.to_string().contains("already exists"));
+        assert_eq!(store.accounts.len(), 1);
+        assert_eq!(store.accounts[0].id, existing.id);
+    }
+
+    #[test]
+    fn explicit_overwrite_preserves_local_account_identity() {
+        let mut existing = account("Work", "old");
+        existing.last_used_at = Some(chrono::Utc::now());
+        let existing_id = existing.id.clone();
+        let existing_created_at = existing.created_at;
+        let existing_last_used_at = existing.last_used_at;
+        let mut store = AccountsStore {
+            accounts: vec![existing],
+            active_account_id: Some(existing_id.clone()),
+            masked_account_ids: vec![existing_id.clone()],
+            ..AccountsStore::default()
+        };
+
+        let replacement = insert_or_replace_account(&mut store, account("Work", "new"), true)
+            .expect("confirmed replacement should succeed");
+
+        assert_eq!(store.accounts.len(), 1);
+        assert_eq!(replacement.id, existing_id);
+        assert_eq!(replacement.created_at, existing_created_at);
+        assert_eq!(replacement.last_used_at, existing_last_used_at);
+        assert_eq!(
+            store.active_account_id.as_deref(),
+            Some(existing_id.as_str())
+        );
+        assert_eq!(store.masked_account_ids, vec![existing_id]);
+        assert_eq!(replacement.email.as_deref(), Some("new@example.com"));
+        match replacement.auth_data {
+            AuthData::ChatGPT {
+                access_token,
+                refresh_token,
+                ..
+            } => {
+                assert_eq!(access_token, "access-new");
+                assert_eq!(refresh_token, "refresh-new");
+            }
+            _ => panic!("expected ChatGPT account"),
+        }
+    }
 }
 
 /// Remove an account by ID

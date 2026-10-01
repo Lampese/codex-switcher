@@ -9,9 +9,10 @@ import {
 
 interface AddAccountModalProps {
   isOpen: boolean;
+  existingAccountNames: string[];
   onClose: () => void;
-  onImportFile: (source: FileSource, name: string) => Promise<void>;
-  onStartOAuth: (name: string) => Promise<{ auth_url: string }>;
+  onImportFile: (source: FileSource, name: string, overwriteExisting: boolean) => Promise<void>;
+  onStartOAuth: (name: string, overwriteExisting: boolean) => Promise<{ auth_url: string }>;
   onCompleteOAuth: () => Promise<unknown>;
   onCancelOAuth: () => Promise<void>;
 }
@@ -20,6 +21,7 @@ type Tab = "oauth" | "import";
 
 export function AddAccountModal({
   isOpen,
+  existingAccountNames,
   onClose,
   onImportFile,
   onStartOAuth,
@@ -36,6 +38,16 @@ export function AddAccountModal({
   const [copied, setCopied] = useState<boolean>(false);
   const isPrimaryDisabled = loading || (activeTab === "oauth" && oauthPending);
   const tauriRuntime = isTauriRuntime();
+
+  const confirmOverwrite = (trimmedName: string): boolean | null => {
+    if (!trimmedName || !existingAccountNames.includes(trimmedName)) return false;
+
+    return window.confirm(
+      `An account named "${trimmedName}" already exists. Replace its saved authorization?`
+    )
+      ? true
+      : null;
+  };
 
   const resetForm = () => {
     setName("");
@@ -55,10 +67,14 @@ export function AddAccountModal({
   };
 
   const handleOAuthLogin = async () => {
+    const trimmedName = name.trim();
+    const overwriteExisting = confirmOverwrite(trimmedName);
+    if (overwriteExisting === null) return;
+
     try {
       setLoading(true);
       setError(null);
-      const info = await onStartOAuth(name.trim());
+      const info = await onStartOAuth(trimmedName, overwriteExisting);
       setAuthUrl(info.auth_url);
       setOauthPending(true);
       setLoading(false);
@@ -88,10 +104,14 @@ export function AddAccountModal({
       return;
     }
 
+    const trimmedName = name.trim();
+    const overwriteExisting = confirmOverwrite(trimmedName);
+    if (overwriteExisting === null) return;
+
     try {
       setLoading(true);
       setError(null);
-      await onImportFile(fileSource, name.trim());
+      await onImportFile(fileSource, trimmedName, overwriteExisting);
       handleClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
