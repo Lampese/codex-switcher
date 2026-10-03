@@ -50,8 +50,9 @@ pub struct CodexProcessInfo {
     pub can_switch: bool,
     /// Process IDs of active Codex app instances
     pub pids: Vec<u32>,
-    /// Whether the Codex CLI daemon runs; switching stops it
-    pub cli_daemon_running: bool,
+    /// Whether the Codex CLI daemon runs; switching stops it.
+    /// None where the daemon cannot be detected.
+    pub cli_daemon_running: Option<bool>,
 }
 
 /// Summary of a close operation for active Codex processes.

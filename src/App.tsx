@@ -1430,13 +1430,27 @@ function App() {
                             : "0 Codex running"}
                         </span>
                       </span>
-                      {processInfo.cli_daemon_running && (
+                      {processInfo.cli_daemon_running !== null && (
                         <span
-                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs border bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-900/30 dark:text-sky-300 dark:border-sky-700"
-                          title="The Codex CLI daemon keeps the account it started with. Switching stops it, and the next CLI session starts it again with the new account."
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs border ${processInfo.cli_daemon_running
+                              ? "bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-900/30 dark:text-sky-300 dark:border-sky-700"
+                              : "bg-gray-50 text-gray-600 border-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:border-gray-700"
+                            }`}
+                          title={
+                            processInfo.cli_daemon_running
+                              ? "The Codex CLI daemon keeps the account it started with. Switching stops it, and the next CLI session starts it again with the new account."
+                              : "The Codex CLI daemon is not running. The next CLI session starts it with the active account."
+                          }
                         >
-                          <span className="inline-block w-1.5 h-1.5 rounded-full bg-sky-500"></span>
-                          <span>CLI daemon running</span>
+                          <span
+                            className={`inline-block w-1.5 h-1.5 rounded-full ${processInfo.cli_daemon_running ? "bg-sky-500" : "bg-gray-400"
+                              }`}
+                          ></span>
+                          <span>
+                            {processInfo.cli_daemon_running
+                              ? "CLI daemon running"
+                              : "CLI daemon not running"}
+                          </span>
                         </span>
                       )}
                       {hasRunningProcesses && (

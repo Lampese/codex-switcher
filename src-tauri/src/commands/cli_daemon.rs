@@ -9,11 +9,17 @@ use anyhow::{bail, Context};
 use crate::auth::get_codex_home;
 
 /// Whether the managed CLI daemon for the current Codex home is running.
-pub(crate) fn is_cli_daemon_running() -> bool {
-    get_codex_home()
+/// None where the daemon cannot be detected.
+pub(crate) fn is_cli_daemon_running() -> Option<bool> {
+    if cfg!(not(unix)) {
+        return None;
+    }
+
+    let running = get_codex_home()
         .ok()
         .and_then(|codex_home| running_daemon_pid(&codex_home))
-        .is_some()
+        .is_some();
+    Some(running)
 }
 
 /// Stop the managed CLI daemon so it cannot keep the previous account.
