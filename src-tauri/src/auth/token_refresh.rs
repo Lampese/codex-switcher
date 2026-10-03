@@ -16,6 +16,13 @@ use crate::types::{
 const DEFAULT_ISSUER: &str = "https://auth.openai.com";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const EXPIRY_SKEW_SECONDS: i64 = 60;
+/// Error prefix for an account that needs a new browser sign-in.
+const SIGN_IN_EXPIRED_PREFIX: &str = "Sign-in expired: ";
+
+/// Whether a token refresh error can only be fixed by a new sign-in.
+pub(crate) fn is_sign_in_expired_error(error: &str) -> bool {
+    error.starts_with(SIGN_IN_EXPIRED_PREFIX)
+}
 
 #[derive(Debug, serde::Deserialize)]
 struct RefreshTokenResponse {
@@ -246,7 +253,7 @@ fn resolve_refreshed_id_token(
         Some(id_token) => Ok(id_token),
         None if id_token_needs_refresh_at(&current_id_token, now) => {
             anyhow::bail!(
-                "Token refresh did not return a fresh id_token; sign in to the account again"
+                "{SIGN_IN_EXPIRED_PREFIX}Token refresh did not return a fresh id_token; sign in to the account again"
             )
         }
         None => Ok(current_id_token),
@@ -330,7 +337,7 @@ async fn refresh_tokens_with_refresh_token(refresh_token: &str) -> Result<Refres
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("Token refresh failed: {status} - {body}");
+        anyhow::bail!(refresh_failure_message(status, &body));
     }
 
     response
@@ -339,14 +346,26 @@ async fn refresh_tokens_with_refresh_token(refresh_token: &str) -> Result<Refres
         .context("Failed to parse token refresh response")
 }
 
+/// A 401 means the refresh token is expired, reused, or revoked.
+fn refresh_failure_message(status: reqwest::StatusCode, body: &str) -> String {
+    let message = format!("Token refresh failed: {status} - {body}");
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        format!("{SIGN_IN_EXPIRED_PREFIX}{message}")
+    } else {
+        message
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        chatgpt_tokens_need_refresh, chatgpt_tokens_need_refresh_at, merge_refresh_response,
-        reconcile_active_account_from_auth, resolve_refreshed_id_token, RefreshTokenResponse,
+        chatgpt_tokens_need_refresh, chatgpt_tokens_need_refresh_at, is_sign_in_expired_error,
+        merge_refresh_response, reconcile_active_account_from_auth, refresh_failure_message,
+        resolve_refreshed_id_token, RefreshTokenResponse,
     };
     use crate::types::{AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData};
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use reqwest::StatusCode;
 
     fn jwt_with_exp(exp: i64) -> String {
         let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{exp}}}"#));
@@ -409,6 +428,32 @@ mod tests {
         assert!(error
             .to_string()
             .contains("did not return a fresh id_token"));
+        assert!(is_sign_in_expired_error(&error.to_string()));
+    }
+
+    #[test]
+    fn a_rejected_refresh_token_asks_for_a_new_sign_in() {
+        let message = refresh_failure_message(
+            StatusCode::UNAUTHORIZED,
+            r#"{"error":{"code":"refresh_token_expired"}}"#,
+        );
+
+        assert!(is_sign_in_expired_error(&message), "{message}");
+        assert!(message.contains("401 Unauthorized"), "{message}");
+        assert!(message.contains("refresh_token_expired"), "{message}");
+    }
+
+    #[test]
+    fn other_refresh_failures_do_not_ask_for_a_new_sign_in() {
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            let message = refresh_failure_message(status, "");
+            assert!(!is_sign_in_expired_error(&message), "{message}");
+            assert!(message.starts_with("Token refresh failed: "), "{message}");
+        }
     }
 
     #[test]
