@@ -14,7 +14,9 @@ use tauri::{
 
 use crate::{
     api::usage::get_account_usage,
-    auth::{get_account, get_accounts_file, load_accounts, load_app_settings},
+    auth::{
+        get_account, get_accounts_file, is_sign_in_expired_error, load_accounts, load_app_settings,
+    },
     commands::{
         is_codex_running_switch_block, restore_main_window, switch_account_by_id,
         window::TRAY_WINDOW,
@@ -395,7 +397,7 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
                 if let Err(error) = switch_account_by_id(&account_id).await {
                     eprintln!("Failed to switch account from tray: {error}");
                     refresh_menu(&app);
-                    if is_codex_running_switch_block(&error) {
+                    if is_codex_running_switch_block(&error) || is_sign_in_expired_error(&error) {
                         show_main_window(&app);
                         let _ = app.emit(
                             SWITCH_ACCOUNT_BLOCKED_EVENT,
