@@ -109,6 +109,7 @@ export interface CodexProcessInfo {
   background_count: number;
   can_switch: boolean;
   pids: number[];
+  cli_daemon_running: boolean;
 }
 
 export interface WarmupSummary {

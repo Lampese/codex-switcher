@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 mod desktop_reopen;
 pub use desktop_reopen::*;
 
+use super::cli_daemon::is_cli_daemon_running;
+
 #[cfg(any(windows, test))]
 use anyhow::Context;
 
@@ -48,6 +50,8 @@ pub struct CodexProcessInfo {
     pub can_switch: bool,
     /// Process IDs of active Codex app instances
     pub pids: Vec<u32>,
+    /// Whether the Codex CLI daemon runs; switching stops it
+    pub cli_daemon_running: bool,
 }
 
 /// Summary of a close operation for active Codex processes.
@@ -81,6 +85,7 @@ pub async fn check_codex_processes() -> Result<CodexProcessInfo, String> {
         background_count: bg_count,
         can_switch: count == 0,
         pids,
+        cli_daemon_running: is_cli_daemon_running(),
     })
 }
 
