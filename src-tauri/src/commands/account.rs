@@ -8,6 +8,7 @@ use crate::auth::{
 };
 use crate::types::{AccountInfo, AccountsStore, AuthData, ImportAccountsSummary, StoredAccount};
 
+use super::cli_daemon::stop_cli_daemon_if_running;
 use super::process::ensure_codex_not_running;
 
 use anyhow::Context;
@@ -153,6 +154,16 @@ pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
     }
 
     ensure_codex_not_running()?;
+
+    // The CLI daemon keeps the account it loaded at start. Stop it before
+    // auth.json changes; the next CLI session starts a new daemon.
+    let daemon_stop = tokio::task::spawn_blocking(stop_cli_daemon_if_running).await;
+    if let Err(err) = daemon_stop
+        .map_err(anyhow::Error::from)
+        .and_then(|stopped| stopped)
+    {
+        println!("[Account] Failed to stop the Codex CLI daemon: {err:#}");
+    }
 
     // ChatGPT rotates single-use refresh tokens. Preserve the latest token
     // before replacing auth.json, otherwise switching back restores a stale one.
