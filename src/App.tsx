@@ -1447,9 +1447,7 @@ function App() {
                               }`}
                           ></span>
                           <span>
-                            {processInfo.cli_daemon_running
-                              ? "CLI daemon running"
-                              : "CLI daemon not running"}
+                            {processInfo.cli_daemon_running ? "CLI daemon on" : "CLI daemon off"}
                           </span>
                         </span>
                       )}
