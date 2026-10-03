@@ -2,6 +2,7 @@
 
 pub mod account;
 pub mod account_stats;
+pub mod cli_daemon;
 pub mod oauth;
 pub mod process;
 pub mod usage;
