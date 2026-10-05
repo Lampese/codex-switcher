@@ -6,7 +6,14 @@ import { SettingsModal } from "./components/SettingsModal";
 import { finishForceClose, type DesktopReopenPreference } from "./lib/desktopReopen";
 import type { CodexClosePreference } from "./lib/codexClosePreference";
 import { useForceCloseCodexProcesses } from "./hooks/useForceCloseCodexProcesses";
-import { AccountCard, AddAccountModal, UpdateChecker, WindowResizeBorders } from "./components";
+import {
+  AccountCard,
+  AddAccountModal,
+  ReauthorizeAccountModal,
+  UpdateChecker,
+  WindowResizeBorders,
+} from "./components";
+import { isSignInExpiredError } from "./lib/signInExpired";
 import type { AccountWithUsage, CodexProcessInfo, DockDisplayMode, UsageInfo } from "./types";
 import {
   exportFullBackupFile,
@@ -182,6 +189,7 @@ function App() {
     importAccountsSlimText,
     startOAuthLogin,
     completeOAuthLogin,
+    completeReauthorize,
     cancelOAuthLogin,
     loadMaskedAccountIds,
     saveMaskedAccountIds,
@@ -199,6 +207,7 @@ function App() {
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [processInfo, setProcessInfo] = useState<CodexProcessInfo | null>(null);
   const [pendingSwitchAccountId, setPendingSwitchAccountId] = useState<string | null>(null);
+  const [reauthAccountId, setReauthAccountId] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isOpeningCodex, setIsOpeningCodex] = useState(false);
   const [isExportingSlim, setIsExportingSlim] = useState(false);
@@ -569,6 +578,10 @@ function App() {
       await switchAccount(accountId);
     } catch (err) {
       console.error("Failed to switch account:", err);
+      if (isSignInExpiredError(err)) {
+        setReauthAccountId(accountId);
+        return;
+      }
       const latestProcessInfo = await checkProcesses();
       if (latestProcessInfo && !latestProcessInfo.can_switch) {
         setPendingSwitchAccountId(accountId);
@@ -703,6 +716,10 @@ function App() {
               showWarmupToast("Switched account from tray.");
             } catch (err) {
               console.error("Failed to retry tray account switch:", err);
+              if (isSignInExpiredError(err)) {
+                setReauthAccountId(accountId);
+                return;
+              }
               showWarmupToast(`Switch failed: ${formatWarmupError(err)}`, true);
             } finally {
               setSwitchingId(null);
@@ -1240,6 +1257,10 @@ function App() {
   const pendingSwitchAccount = useMemo(
     () => accounts.find((account) => account.id === pendingSwitchAccountId),
     [accounts, pendingSwitchAccountId]
+  );
+  const reauthAccount = useMemo(
+    () => accounts.find((account) => account.id === reauthAccountId),
+    [accounts, reauthAccountId]
   );
   const closeConfirmLabel = pendingSwitchAccount
     ? "Close and switch account"
@@ -2161,6 +2182,20 @@ function App() {
         onCompleteOAuth={completeOAuthLogin}
         onCancelOAuth={cancelOAuthLogin}
       />
+
+      {reauthAccount && (
+        <ReauthorizeAccountModal
+          accountLabel={reauthAccount.name}
+          onClose={() => setReauthAccountId(null)}
+          onStartOAuth={() => startOAuthLogin(reauthAccount.name)}
+          onCompleteOAuth={async () => {
+            await completeReauthorize(reauthAccount.id);
+            setReauthAccountId(null);
+            await handleSwitch(reauthAccount.id);
+          }}
+          onCancelOAuth={cancelOAuthLogin}
+        />
+      )}
 
       {/* Import/Export Config Modal */}
       {isConfigModalOpen && (

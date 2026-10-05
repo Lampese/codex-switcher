@@ -359,6 +359,19 @@ export function useAccounts() {
     }
   }, [loadAccounts, refreshUsage]);
 
+  const completeReauthorize = useCallback(
+    async (accountId: string) => {
+      try {
+        const account = await invokeBackend<AccountInfo>("complete_reauthorize", { accountId });
+        await loadAccounts(true); // Preserve usage data
+        return account;
+      } catch (err) {
+        throw err;
+      }
+    },
+    [loadAccounts]
+  );
+
   const exportAccountsSlimText = useCallback(async () => {
     try {
       return await invokeBackend<string>("export_accounts_slim_text");
@@ -494,6 +507,7 @@ export function useAccounts() {
     importAccountsFullEncryptedFile,
     startOAuthLogin,
     completeOAuthLogin,
+    completeReauthorize,
     cancelOAuthLogin,
     loadMaskedAccountIds,
     saveMaskedAccountIds,
