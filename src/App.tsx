@@ -2155,6 +2155,7 @@ function App() {
       {/* Add Account Modal */}
       <AddAccountModal
         isOpen={isAddModalOpen}
+        existingAccountNames={accounts.map((account) => account.name)}
         onClose={() => setIsAddModalOpen(false)}
         onImportFile={importFromFile}
         onStartOAuth={startOAuthLogin}
