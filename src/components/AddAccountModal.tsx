@@ -7,16 +7,27 @@ import {
   type FileSource,
 } from "../lib/platform";
 
+const ACCOUNT_REPLACE_CONFIRMATION_PREFIX = "ACCOUNT_REPLACE_CONFIRMATION_REQUIRED:";
+
+function getReplacementAccountName(error: unknown): string | null {
+  const message = error instanceof Error ? error.message : String(error);
+  const index = message.indexOf(ACCOUNT_REPLACE_CONFIRMATION_PREFIX);
+  if (index < 0) return null;
+  const name = message.slice(index + ACCOUNT_REPLACE_CONFIRMATION_PREFIX.length).trim();
+  return name || "this account";
+}
+
 interface AddAccountModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onImportFile: (source: FileSource, name: string) => Promise<void>;
+  onImportFile: (source: FileSource, name: string, forceReplace?: boolean) => Promise<void>;
   onStartOAuth: (name: string) => Promise<{ auth_url: string }>;
-  onCompleteOAuth: () => Promise<unknown>;
+  onCompleteOAuth: (forceReplace?: boolean) => Promise<unknown>;
   onCancelOAuth: () => Promise<void>;
 }
 
 type Tab = "oauth" | "import";
+type ReplacementConfirmation = { mode: Tab; accountName: string };
 
 export function AddAccountModal({
   isOpen,
@@ -34,7 +45,10 @@ export function AddAccountModal({
   const [oauthPending, setOauthPending] = useState(false);
   const [authUrl, setAuthUrl] = useState<string>("");
   const [copied, setCopied] = useState<boolean>(false);
-  const isPrimaryDisabled = loading || (activeTab === "oauth" && oauthPending);
+  const [replaceConfirmation, setReplaceConfirmation] =
+    useState<ReplacementConfirmation | null>(null);
+  const isPrimaryDisabled =
+    loading || (activeTab === "oauth" && oauthPending) || replaceConfirmation !== null;
   const tauriRuntime = isTauriRuntime();
 
   const resetForm = () => {
@@ -44,11 +58,14 @@ export function AddAccountModal({
     setLoading(false);
     setOauthPending(false);
     setAuthUrl("");
+    setReplaceConfirmation(null);
   };
 
   const handleClose = () => {
-    if (oauthPending) {
-      onCancelOAuth();
+    if (oauthPending || replaceConfirmation?.mode === "oauth") {
+      void onCancelOAuth().catch((err) => {
+        console.error("Failed to cancel login:", err);
+      });
     }
     resetForm();
     onClose();
@@ -63,10 +80,21 @@ export function AddAccountModal({
       setOauthPending(true);
       setLoading(false);
 
-      // Wait for completion
-      await onCompleteOAuth();
+      // Wait for completion. Stale OAuth duplicates are replaced by the backend;
+      // healthy duplicates return a confirmation request and keep the fresh
+      // credentials staged so we can retry without another browser login.
+      await onCompleteOAuth(false);
       handleClose();
     } catch (err) {
+      const replacementAccountName = getReplacementAccountName(err);
+      if (replacementAccountName) {
+        setReplaceConfirmation({ mode: "oauth", accountName: replacementAccountName });
+        setError(null);
+        setLoading(false);
+        setOauthPending(false);
+        return;
+      }
+
       setError(err instanceof Error ? err.message : String(err));
       setLoading(false);
       setOauthPending(false);
@@ -91,7 +119,38 @@ export function AddAccountModal({
     try {
       setLoading(true);
       setError(null);
-      await onImportFile(fileSource, name.trim());
+      await onImportFile(fileSource, name.trim(), false);
+      handleClose();
+    } catch (err) {
+      const replacementAccountName = getReplacementAccountName(err);
+      if (replacementAccountName) {
+        setReplaceConfirmation({ mode: "import", accountName: replacementAccountName });
+        setError(null);
+        setLoading(false);
+        return;
+      }
+
+      setError(err instanceof Error ? err.message : String(err));
+      setLoading(false);
+    }
+  };
+
+  const handleConfirmReplacement = async () => {
+    if (!replaceConfirmation) return;
+
+    try {
+      setLoading(true);
+      setError(null);
+
+      if (replaceConfirmation.mode === "oauth") {
+        await onCompleteOAuth(true);
+      } else {
+        if (!fileSource) {
+          throw new Error("Please select an auth.json file");
+        }
+        await onImportFile(fileSource, name.trim(), true);
+      }
+
       handleClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -120,6 +179,7 @@ export function AddAccountModal({
           {(["oauth", "import"] as Tab[]).map((tab) => (
             <button
               key={tab}
+              disabled={replaceConfirmation !== null}
               onClick={() => {
                 if (tab === "import" && oauthPending) {
                   void onCancelOAuth().catch((err) => {
@@ -131,7 +191,7 @@ export function AddAccountModal({
                 setActiveTab(tab);
                 setError(null);
               }}
-              className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${activeTab === tab
+              className={`flex-1 px-4 py-3 text-sm font-medium transition-colors disabled:opacity-50 ${activeTab === tab
                   ? "text-gray-900 dark:text-gray-100 border-b-2 border-gray-900 dark:border-gray-100 -mb-px"
                   : "text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300"
                 }`}
@@ -241,6 +301,17 @@ export function AddAccountModal({
             </div>
           )}
 
+          {replaceConfirmation && (
+            <div className="p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg text-amber-800 dark:text-amber-200 text-sm">
+              <div className="font-medium mb-1">Replace existing account?</div>
+              <div>
+                <span className="font-medium">{replaceConfirmation.accountName}</span> already
+                exists and its saved session still appears usable. Replace it with the newly
+                authenticated account anyway?
+              </div>
+            </div>
+          )}
+
           {/* Error */}
           {error && (
             <div className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-lg text-red-600 dark:text-red-300 text-sm">
@@ -251,23 +322,46 @@ export function AddAccountModal({
 
         {/* Footer */}
         <div className="flex gap-3 p-5 border-t border-gray-100 dark:border-gray-800">
-          <button
-            onClick={handleClose}
-            className="flex-1 px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={activeTab === "oauth" ? handleOAuthLogin : handleImportFile}
-            disabled={isPrimaryDisabled}
-            className="flex-1 px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors disabled:opacity-50"
-          >
-            {loading
-              ? "Adding..."
-              : activeTab === "oauth"
-                ? "Generate Login Link"
-                : "Import"}
-          </button>
+          {replaceConfirmation ? (
+            <>
+              <button
+                onClick={handleClose}
+                disabled={loading}
+                className="flex-1 px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-50"
+              >
+                Keep existing
+              </button>
+              <button
+                onClick={() => {
+                  void handleConfirmReplacement();
+                }}
+                disabled={loading}
+                className="flex-1 px-4 py-2.5 text-sm font-medium rounded-lg bg-amber-600 hover:bg-amber-700 text-white transition-colors disabled:opacity-50"
+              >
+                {loading ? "Replacing..." : "Replace anyway"}
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                onClick={handleClose}
+                className="flex-1 px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={activeTab === "oauth" ? handleOAuthLogin : handleImportFile}
+                disabled={isPrimaryDisabled}
+                className="flex-1 px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors disabled:opacity-50"
+              >
+                {loading
+                  ? "Adding..."
+                  : activeTab === "oauth"
+                    ? "Generate Login Link"
+                    : "Import"}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>
