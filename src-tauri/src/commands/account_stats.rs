@@ -13,7 +13,10 @@ use crate::types::{AuthData, AuthMode, StoredAccount};
 const CHATGPT_PROFILE_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/profiles/me";
 const CHATGPT_RESET_CREDITS_URL: &str =
     "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
-const CODEX_USER_AGENT: &str = "codex-cli/1.0.0";
+const CHATGPT_ORIGIN: &str = "https://chatgpt.com";
+const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
+     AppleWebKit/537.36 (KHTML, like Gecko) \
+     Chrome/136.0.0.0 Safari/537.36";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AccountUsageStats {
@@ -404,12 +407,27 @@ fn build_chatgpt_headers(
     access_token: &str,
     chatgpt_account_id: Option<&str>,
 ) -> anyhow::Result<HeaderMap> {
+    use reqwest::header::{ACCEPT_LANGUAGE, ORIGIN, REFERER};
+
     let mut headers = HeaderMap::new();
-    headers.insert(USER_AGENT, HeaderValue::from_static(CODEX_USER_AGENT));
+    headers.insert(USER_AGENT, HeaderValue::from_static(BROWSER_USER_AGENT));
     headers.insert(
         AUTHORIZATION,
         HeaderValue::from_str(&format!("Bearer {access_token}"))?,
     );
+    headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
+    headers.insert(ORIGIN, HeaderValue::from_static(CHATGPT_ORIGIN));
+    headers.insert(REFERER, HeaderValue::from_static(CHATGPT_ORIGIN));
+
+    if let Ok(name) = HeaderName::from_bytes(b"sec-fetch-dest") {
+        headers.insert(name, HeaderValue::from_static("empty"));
+    }
+    if let Ok(name) = HeaderName::from_bytes(b"sec-fetch-mode") {
+        headers.insert(name, HeaderValue::from_static("cors"));
+    }
+    if let Ok(name) = HeaderName::from_bytes(b"sec-fetch-site") {
+        headers.insert(name, HeaderValue::from_static("same-origin"));
+    }
 
     if let Some(account_id) = chatgpt_account_id {
         headers.insert(
