@@ -143,16 +143,22 @@ pub async fn start_oauth_login(
     println!("[OAuth] Starting login for account: {account_name}");
     println!("[OAuth] PKCE challenge: {}", &pkce.code_challenge[..20]);
 
+    let bind_host = std::env::var("CODEX_SWITCHER_OAUTH_HOST")
+        .ok()
+        .map(|val| val.trim().to_string())
+        .filter(|val| !val.is_empty())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+
     // Try official default port first; fall back to a random free port if it is busy.
-    let server = match Server::http(format!("127.0.0.1:{DEFAULT_PORT}")) {
+    let server = match Server::http(format!("{bind_host}:{DEFAULT_PORT}")) {
         Ok(server) => server,
         Err(default_err) => {
             println!(
-                "[OAuth] Default callback port {DEFAULT_PORT} unavailable ({default_err}), using a random local port"
+                "[OAuth] Default callback port {DEFAULT_PORT} on {bind_host} unavailable ({default_err}), using a random local port"
             );
-            Server::http("127.0.0.1:0").map_err(|fallback_err| {
+            Server::http(format!("{bind_host}:0")).map_err(|fallback_err| {
                 anyhow::anyhow!(
-                    "Failed to start OAuth server: default port {DEFAULT_PORT} error: {default_err}; fallback error: {fallback_err}"
+                    "Failed to start OAuth server: default port {DEFAULT_PORT} on {bind_host} error: {default_err}; fallback error: {fallback_err}"
                 )
             })?
         }
