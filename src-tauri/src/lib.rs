@@ -18,6 +18,8 @@ use commands::{
     import_accounts_full_encrypted_file, import_accounts_slim_text, kill_codex_processes,
     list_accounts, open_main_window, quit_app, refresh_account_metadata,
     refresh_all_accounts_usage, rename_account, report_usage, set_dock_display_mode,
+    prepare_codex_session_recovery, cancel_codex_session_recovery,
+    resume_codex_session_recovery,
     set_masked_account_ids, start_login, switch_account, warmup_account, warmup_all_accounts,
 };
 use tauri::Emitter;
@@ -93,6 +95,9 @@ pub fn run() {
             // Process detection
             check_codex_processes,
             kill_codex_processes,
+            prepare_codex_session_recovery,
+            cancel_codex_session_recovery,
+            resume_codex_session_recovery,
             // Tray window
             hide_tray_window,
             open_main_window,

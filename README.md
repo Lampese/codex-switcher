@@ -27,6 +27,7 @@
 - **macOS Dock Control** – Keep Codex Switcher in the Dock or run it as a menu bar only app, with a first-close prompt and a tray fallback
 - **Rate-Limit Monitoring** – View real-time 5-hour session and weekly usage, reset timing, credits, and subscription expiry
 - **Blocked Switch Recovery** – Detect running Codex sessions and offer a force-close flow before retrying the account switch
+- **Usage-Limit Recovery** – Optionally queue Codex conversations stopped by usage limits to continue after switching accounts
 - **Dual Login Mode** – Authenticate with ChatGPT OAuth or import existing `auth.json` files
 
 ## Installation
@@ -141,6 +142,15 @@ close the running app before switching accounts.
 If an older Codex Switcher version already saved an invalid refresh token, sign
 in to that account again or remove and re-add it once. An invalidated token
 cannot be recovered locally.
+
+When a switch needs to close Codex, enable **Auto-resume conversations stopped
+by usage limits** in Settings. Recovery scans local session logs modified in
+the last 24 hours and queues `Continue the previous task.` for up to 32
+conversations whose latest failure has the `usage_limit_exceeded` error code
+or a message beginning with “You've hit your usage limit.” It skips conversations
+already continued, completed, or cancelled, and ignores error text quoted in
+chat messages or tool output. It is off by default and requires a Codex CLI
+supporting `codex queue`; a queued message does not confirm execution.
 
 ## macOS Dock and Menu Bar Mode
 

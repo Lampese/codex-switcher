@@ -42,6 +42,7 @@ import {
   type AutoWarmupWindowKind,
 } from "./lib/autoWarmupPolicy";
 import { getTauriWindow } from "./lib/tauriWindow";
+import { readAutoResumeSessions, writeAutoResumeSessions } from "./lib/sessionRecovery";
 import "./App.css";
 
 const AUTO_WARMUP_CHECK_INTERVAL_MS = 30 * 1000;
@@ -247,6 +248,7 @@ function App() {
   const [isActionsMenuOpen, setIsActionsMenuOpen] = useState(false);
   const [isNavMenuOpen, setIsNavMenuOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [autoResumeSessions, setAutoResumeSessions] = useState(() => readAutoResumeSessions());
   const [isCompletingForceClose, setIsCompletingForceClose] = useState(false);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const forceCloseInFlightRef = useRef(false);
@@ -768,8 +770,12 @@ function App() {
     forceCloseInFlightRef.current = true;
     const accountId = pendingSwitchAccountId;
     const shouldReopen = desktopReopen.available && desktopReopen.reopen;
+    let preparedRecoveryCount = 0;
     setIsCompletingForceClose(true);
     try {
+      if (accountId && autoResumeSessions) {
+        preparedRecoveryCount = await invokeBackend<number>("prepare_codex_session_recovery");
+      }
       try {
         desktopReopen.rememberSelection();
       } catch (err) {
@@ -781,7 +787,12 @@ function App() {
         showWarmupToast(`Could not save close preference: ${formatWarmupError(err)}`, true);
       }
       const result = await closeCodexProcesses(shouldReopen, codexClose.forceClose);
-      if (!result?.processInfo?.can_switch) return;
+      if (!result?.processInfo?.can_switch) {
+        if (preparedRecoveryCount > 0) {
+          await invokeBackend("cancel_codex_session_recovery").catch(() => undefined);
+        }
+        return;
+      }
 
       await finishForceClose(
         { canSwitch: true, reopenToken: result.reopenToken },
@@ -799,10 +810,28 @@ function App() {
           }
         },
       );
+      if (preparedRecoveryCount > 0) {
+        try {
+          const recovery = await invokeBackend<{ queued: string[]; failed: string[] }>(
+            "resume_codex_session_recovery",
+          );
+          showWarmupToast(
+            `Account switched. Queued continuation for ${recovery.queued.length} conversation${recovery.queued.length === 1 ? "" : "s"}${
+              recovery.failed.length ? `; ${recovery.failed.length} failed` : ""
+            }.`,
+            recovery.failed.length > 0,
+          );
+        } catch (err) {
+          showWarmupToast(`Account switched, but auto-resume failed: ${formatWarmupError(err)}`, true);
+        }
+      }
       if (shouldReopen && !result.reopenToken) {
         showWarmupToast("No closed desktop app could be identified for reopening. Open Codex manually.", true);
       }
     } catch (err) {
+      if (preparedRecoveryCount > 0) {
+        await invokeBackend("cancel_codex_session_recovery").catch(() => undefined);
+      }
       console.error("Failed to switch account after closing Codex:", err);
       showWarmupToast(`Switch failed after closing Codex: ${formatWarmupError(err)}`, true);
     } finally {
@@ -1993,6 +2022,15 @@ function App() {
           onReopenPreferenceChange={saveDesktopReopenPreference}
           closePreference={codexClose.preference}
           onClosePreferenceChange={saveCodexClosePreference}
+          autoResumeSessions={autoResumeSessions}
+          onAutoResumeSessionsChange={(enabled) => {
+            try {
+              writeAutoResumeSessions(enabled);
+              setAutoResumeSessions(enabled);
+            } catch (err) {
+              showWarmupToast(`Could not save auto-resume preference: ${formatWarmupError(err)}`, true);
+            }
+          }}
           onClose={() => setIsSettingsOpen(false)}
         />
       )}

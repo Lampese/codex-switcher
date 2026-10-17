@@ -15,6 +15,8 @@ interface SettingsModalProps {
   onReopenPreferenceChange: (value: DesktopReopenPreference) => void;
   closePreference: CodexClosePreference;
   onClosePreferenceChange: (value: CodexClosePreference) => void;
+  autoResumeSessions: boolean;
+  onAutoResumeSessionsChange: (value: boolean) => void;
   onClose: () => void;
 }
 
@@ -23,6 +25,8 @@ export function SettingsModal({
   onReopenPreferenceChange,
   closePreference,
   onClosePreferenceChange,
+  autoResumeSessions,
+  onAutoResumeSessionsChange,
   onClose,
 }: SettingsModalProps) {
   const [displaySettings, setDisplaySettings] = useState<DisplaySettings | null>(null);
@@ -149,6 +153,18 @@ export function SettingsModal({
           </select>
           <p className="text-sm text-gray-500 dark:text-gray-400">
             Applies to detected Codex desktop apps on macOS and Windows. When switching accounts, the app reopens after the switch succeeds.
+          </p>
+          <label className="flex items-center gap-2 text-sm font-medium text-gray-900 dark:text-gray-100">
+            <input
+              type="checkbox"
+              checked={autoResumeSessions}
+              onChange={(event) => onAutoResumeSessionsChange(event.target.checked)}
+              className="h-4 w-4 accent-orange-600"
+            />
+            Auto-resume conversations stopped by usage limits
+          </label>
+          <p className="text-sm text-gray-500 dark:text-gray-400">
+            After closing Codex and switching accounts, queue “Continue the previous task” for recent conversations stopped by a usage-limit error. Conversations already continued or completed are skipped.
           </p>
         </div>
         <div className="flex justify-end p-5 border-t border-gray-100 dark:border-gray-800">
