@@ -1,4 +1,4 @@
-//! Snapshot and continue Codex sessions interrupted by account switching.
+//! Snapshot and continue Codex sessions stopped by a usage limit.
 
 use serde::Serialize;
 use serde_json::Value;
@@ -22,7 +22,7 @@ pub struct SessionRecoveryReport {
 
 #[tauri::command]
 pub fn prepare_codex_session_recovery() -> Result<usize, String> {
-    let sessions = find_incomplete_sessions();
+    let sessions = find_quota_stopped_sessions();
     let count = sessions.len();
     *PENDING_SESSIONS.lock().map_err(|error| error.to_string())? = sessions;
     Ok(count)
@@ -51,6 +51,7 @@ pub async fn resume_codex_session_recovery() -> Result<SessionRecoveryReport, St
         let result = tokio::time::timeout(
             tokio::time::Duration::from_secs(10),
             tokio::process::Command::new(&binary)
+                .kill_on_drop(true)
                 .args([
                     "queue",
                     "--thread",
@@ -81,10 +82,11 @@ pub async fn resume_codex_session_recovery() -> Result<SessionRecoveryReport, St
     Ok(report)
 }
 
-fn find_incomplete_sessions() -> Vec<String> {
-    let Some(root) = dirs::home_dir().map(|home| home.join(".codex").join("sessions")) else {
+fn find_quota_stopped_sessions() -> Vec<String> {
+    let Ok(home) = crate::auth::get_codex_home() else {
         return Vec::new();
     };
+    let root = home.join("sessions");
     let now = SystemTime::now();
     let mut sessions = Vec::new();
     collect_jsonl(&root, &now, &mut sessions);
@@ -106,7 +108,7 @@ fn collect_jsonl(root: &Path, now: &SystemTime, sessions: &mut Vec<(SystemTime, 
             collect_jsonl(&path, now, sessions);
         } else if path.extension().and_then(|value| value.to_str()) == Some("jsonl")
             && is_recent(&path, now)
-            && has_unfinished_turn(&path)
+            && has_usage_limit_failure(&path)
         {
             if let (Some(modified), Some(id)) = (
                 fs::metadata(&path)
@@ -138,50 +140,164 @@ fn session_id(path: &Path) -> Option<String> {
     value.get("payload")?.get("id")?.as_str().map(str::to_owned)
 }
 
-fn has_unfinished_turn(path: &Path) -> bool {
+fn has_usage_limit_failure(path: &Path) -> bool {
     let Ok(file) = fs::File::open(path) else {
         return false;
     };
-    has_unfinished_turn_lines(BufReader::new(file).lines().filter_map(Result::ok))
+    let mut read_failed = false;
+    let blocked =
+        has_usage_limit_failure_lines(BufReader::new(file).lines().map_while(|line| match line {
+            Ok(line) => Some(line),
+            Err(_) => {
+                read_failed = true;
+                None
+            }
+        }));
+    blocked && !read_failed
 }
 
-fn has_unfinished_turn_lines<I>(lines: I) -> bool
+fn has_usage_limit_failure_lines<I>(lines: I) -> bool
 where
     I: IntoIterator<Item = String>,
 {
-    let mut last_started = None;
-    let mut last_terminal = None;
-    for (index, line) in lines.into_iter().enumerate() {
+    let mut quota_stopped = false;
+    for line in lines {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            // A partial record may contain a later resume or completion.
+            quota_stopped = false;
             continue;
         };
-        let event_type = value
-            .get("payload")
-            .and_then(|payload| payload.get("type"))
-            .and_then(Value::as_str);
-        match event_type {
-            Some("task_started") => last_started = Some(index),
-            Some("task_complete") | Some("turn_aborted") | Some("turn_failed") => {
-                last_terminal = Some(index)
+        let payload = &value["payload"];
+        if value["type"] == "response_item"
+            && payload["type"] == "message"
+            && payload["role"] == "user"
+        {
+            quota_stopped = false;
+        }
+        // Never match error text quoted in messages, tool results, or metadata.
+        if value.get("type").and_then(Value::as_str) != Some("event_msg") {
+            continue;
+        }
+        match payload["type"].as_str() {
+            Some("task_started" | "turn_started" | "user_message" | "turn_aborted") => {
+                quota_stopped = false;
+            }
+            Some("task_complete" | "turn_failed") => {
+                quota_stopped = is_usage_limit_error(&payload["error"]);
+            }
+            Some("error") => {
+                quota_stopped = is_usage_limit_error(payload);
             }
             _ => {}
         }
     }
-    last_started.is_some() && last_started > last_terminal
+    quota_stopped
+}
+
+fn is_usage_limit_error(error: &Value) -> bool {
+    // Prefer the structured code: the displayed message varies by plan/workspace.
+    matches!(
+        error.get("codex_error_info").and_then(Value::as_str),
+        Some("usage_limit_exceeded")
+    ) || error
+        .get("message")
+        .and_then(Value::as_str)
+        .is_some_and(|message| {
+            message.trim().starts_with("You've hit your usage limit.")
+                || message.trim().starts_with("You’ve hit your usage limit.")
+        })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::has_unfinished_turn_lines;
+    use super::has_usage_limit_failure_lines;
+    use serde_json::{json, Value};
+
+    fn event(payload: Value) -> String {
+        json!({"type": "event_msg", "payload": payload}).to_string()
+    }
+
+    fn quota_failure() -> String {
+        event(json!({"type": "task_complete", "error": {
+            "message": "You've hit your usage limit. Review your workspace's usage settings to continue.",
+            "codex_error_info": "usage_limit_exceeded"
+        }}))
+    }
 
     #[test]
-    fn detects_only_unfinished_turns() {
-        let started = r#"{"type":"event_msg","payload":{"type":"task_started"}}"#;
-        let completed = r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#;
-        assert!(has_unfinished_turn_lines([started.to_string()]));
-        assert!(!has_unfinished_turn_lines([
-            started.to_string(),
-            completed.to_string()
+    fn detects_quota_failure_even_when_recorded_as_task_complete() {
+        assert!(has_usage_limit_failure_lines([
+            event(json!({"type": "task_started"})),
+            quota_failure(),
+            event(json!({"type": "token_count"}))
+        ]));
+    }
+
+    #[test]
+    fn recognizes_structured_code_and_message_fallback() {
+        for error in [
+            json!({"codex_error_info": "usage_limit_exceeded", "message": "Localized message"}),
+            json!({"message": "You've hit your usage limit. Review your workspace's usage settings to continue."}),
+            json!({"message": "You’ve hit your usage limit. Try again later."}),
+        ] {
+            for kind in ["task_complete", "turn_failed"] {
+                assert!(has_usage_limit_failure_lines([event(
+                    json!({"type": kind, "error": error})
+                )]));
+            }
+            let mut payload = error;
+            payload["type"] = json!("error");
+            assert!(has_usage_limit_failure_lines([event(payload)]));
+        }
+    }
+
+    #[test]
+    fn skips_active_completed_cancelled_and_unrelated_failures() {
+        for payload in [
+            json!({"type": "task_started"}),
+            json!({"type": "turn_started"}),
+            json!({"type": "user_message", "message": "Continue"}),
+            json!({"type": "task_complete", "error": null}),
+            json!({"type": "turn_aborted"}),
+            json!({"type": "turn_failed", "error": {"message": "Network error"}}),
+            json!({"type": "error", "message": "Rate limit exceeded"}),
+        ] {
+            assert!(!has_usage_limit_failure_lines([event(payload.clone())]));
+            assert!(!has_usage_limit_failure_lines([
+                quota_failure(),
+                event(payload)
+            ]));
+        }
+    }
+
+    #[test]
+    fn ignores_quoted_error_text_and_tool_output() {
+        let message =
+            "You've hit your usage limit. Review your workspace's usage settings to continue.";
+        for record in [
+            json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": message}}),
+            json!({"type": "event_msg", "payload": {"type": "agent_message", "message": message}}),
+            json!({"type": "event_msg", "payload": {"type": "item_completed", "item": {"aggregated_output": message}}}),
+            json!({"type": "response_item", "payload": {"type": "error", "message": message}}),
+        ] {
+            assert!(!has_usage_limit_failure_lines([record.to_string()]));
+        }
+    }
+
+    #[test]
+    fn latest_failure_wins_and_partial_record_fails_closed() {
+        assert!(has_usage_limit_failure_lines([
+            quota_failure(),
+            event(json!({"type": "task_started"})),
+            quota_failure()
+        ]));
+        assert!(!has_usage_limit_failure_lines([
+            quota_failure(),
+            "{partial".into()
+        ]));
+        assert!(!has_usage_limit_failure_lines([
+            quota_failure(),
+            json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": "Continue"}}).to_string()
         ]));
     }
 }

@@ -816,7 +816,7 @@ function App() {
             "resume_codex_session_recovery",
           );
           showWarmupToast(
-            `Account switched. Resumed ${recovery.queued.length} conversation${recovery.queued.length === 1 ? "" : "s"}${
+            `Account switched. Queued continuation for ${recovery.queued.length} conversation${recovery.queued.length === 1 ? "" : "s"}${
               recovery.failed.length ? `; ${recovery.failed.length} failed` : ""
             }.`,
             recovery.failed.length > 0,
