@@ -15,6 +15,8 @@ interface SettingsModalProps {
   onReopenPreferenceChange: (value: DesktopReopenPreference) => void;
   closePreference: CodexClosePreference;
   onClosePreferenceChange: (value: CodexClosePreference) => void;
+  autoSwitchEnabled: boolean;
+  onAutoSwitchEnabledChange: (value: boolean) => void;
   onClose: () => void;
 }
 
@@ -23,6 +25,8 @@ export function SettingsModal({
   onReopenPreferenceChange,
   closePreference,
   onClosePreferenceChange,
+  autoSwitchEnabled,
+  onAutoSwitchEnabledChange,
   onClose,
 }: SettingsModalProps) {
   const [displaySettings, setDisplaySettings] = useState<DisplaySettings | null>(null);
@@ -149,6 +153,13 @@ export function SettingsModal({
           </select>
           <p className="text-sm text-gray-500 dark:text-gray-400">
             Applies to detected Codex desktop apps on macOS and Windows. When switching accounts, the app reopens after the switch succeeds.
+          </p>
+          <label className="flex items-start gap-2 text-sm font-medium text-gray-900 dark:text-gray-100">
+            <input type="checkbox" checked={autoSwitchEnabled} onChange={(event) => onAutoSwitchEnabledChange(event.target.checked)} disabled={!desktop} className="mt-0.5 h-4 w-4 shrink-0 accent-orange-600" />
+            Auto-switch when the active account runs out of quota
+          </label>
+          <p className="text-sm text-gray-500 dark:text-gray-400">
+            While Switcher is running, check once a minute and use the next saved ChatGPT account with confirmed quota. Automatically close and reopen Codex, even if manual reopening is off. Use graceful closing unless force close is selected above; unsaved work may be lost. Pause five minutes after a switch or error.
           </p>
         </div>
         <div className="flex justify-end p-5 border-t border-gray-100 dark:border-gray-800">
