@@ -57,6 +57,8 @@ struct MaskedIdsArgs {
 struct CloseCodexArgs {
     reopen_desktop: Option<bool>,
     force_close: Option<bool>,
+    #[serde(default, alias = "require_all_desktops")]
+    require_all_desktops: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -205,7 +207,14 @@ async fn invoke_web_command(command: &str, payload: Value) -> Result<Value, Stri
         "check_codex_processes" => to_json(check_codex_processes().await?),
         "kill_codex_processes" => {
             let args: CloseCodexArgs = parse_args(payload)?;
-            to_json(kill_codex_processes(args.reopen_desktop, args.force_close).await?)
+            to_json(
+                kill_codex_processes(
+                    args.reopen_desktop,
+                    args.force_close,
+                    args.require_all_desktops,
+                )
+                .await?,
+            )
         }
         _ => Err(format!("Unsupported web command: {command}")),
     }

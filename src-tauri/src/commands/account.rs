@@ -169,9 +169,28 @@ fn live_auth_matches_account(account: &StoredAccount, live: &AuthDotJson) -> boo
     }
 }
 
+#[tauri::command]
+pub async fn switch_account_if_current(
+    account_id: String,
+    expected_active_id: String,
+) -> Result<(), String> {
+    switch_account_checked(&account_id, Some(&expected_active_id)).await
+}
+
 pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
+    switch_account_checked(account_id, None).await
+}
+
+async fn switch_account_checked(
+    account_id: &str,
+    expected_active_id: Option<&str>,
+) -> Result<(), String> {
     let _auth_guard = AUTH_OPERATION_LOCK.lock().await;
     let mut store = load_accounts().map_err(|e| e.to_string())?;
+    // Check under the same auth lock used by native tray switches.
+    if expected_active_id.is_some() && store.active_account_id.as_deref() != expected_active_id {
+        return Err("The active account changed; automatic switch cancelled".into());
+    }
 
     let target_index = store
         .accounts
@@ -802,7 +821,10 @@ pub async fn set_masked_account_ids(ids: Vec<String>) -> Result<(), String> {
 
 #[cfg(test)]
 mod active_account_repair_tests {
-    use super::{live_auth_matches_account, switch_account_by_id};
+    use super::{
+        live_auth_matches_account, switch_account_by_id, switch_account_if_current,
+        AUTH_OPERATION_LOCK,
+    };
     use crate::auth::{get_codex_auth_file, load_accounts, read_current_auth, save_accounts};
     use crate::types::{AccountsStore, StoredAccount};
 
@@ -954,5 +976,35 @@ mod active_account_repair_tests {
 
         let live = read_current_auth().unwrap().unwrap();
         assert_eq!(live.openai_api_key.as_deref(), Some("sk-current"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn automatic_switch_rechecks_source_after_waiting_for_auth_lock() {
+        let _home = crate::auth::test_support::TestHome::new();
+        let mut store = AccountsStore {
+            active_account_id: Some("source".into()),
+            ..Default::default()
+        };
+        save_accounts(&store).unwrap();
+        let guard = AUTH_OPERATION_LOCK.lock().await;
+        let mut pending =
+            std::pin::pin!(switch_account_if_current("target".into(), "source".into()));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut pending)
+                .await
+                .is_err()
+        );
+        store.active_account_id = Some("manual-choice".into());
+        save_accounts(&store).unwrap();
+        drop(guard);
+        assert!(pending
+            .await
+            .unwrap_err()
+            .contains("active account changed"));
+        assert_eq!(
+            load_accounts().unwrap().active_account_id.as_deref(),
+            Some("manual-choice")
+        );
+        assert!(read_current_auth().unwrap().is_none());
     }
 }
