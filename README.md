@@ -150,7 +150,14 @@ conversations whose latest failure has the `usage_limit_exceeded` error code
 or a message beginning with “You've hit your usage limit.” It skips conversations
 already continued, completed, or cancelled, and ignores error text quoted in
 chat messages or tool output. It is off by default and requires a Codex CLI
-supporting `codex queue`; a queued message does not confirm execution.
+supporting `codex queue` and a desktop app registered for `codex://` links.
+Enable desktop reopening as well. After a successful reopen, Switcher opens each
+queued conversation and waits up to 60 seconds for a new turn in its session log;
+queue acceptance alone is not reported as success. A failed or timed-out delivery
+is shown in the result. Unconfirmed deliveries are remembered across Switcher
+restarts, so retrying opens the pending chat without adding another continuation.
+This flow applies to switches through the main window that close and reopen Codex;
+tray-only switches and switches made while Codex is already closed do not run it.
 
 ## macOS Dock and Menu Bar Mode
 

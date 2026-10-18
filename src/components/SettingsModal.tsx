@@ -164,7 +164,7 @@ export function SettingsModal({
             Auto-resume conversations stopped by usage limits
           </label>
           <p className="text-sm text-gray-500 dark:text-gray-400">
-            After closing Codex and switching accounts, queue “Continue the previous task” for recent conversations stopped by a usage-limit error. Conversations already continued or completed are skipped.
+            With desktop reopening enabled, open recent conversations stopped by a usage-limit error and send “Continue the previous task” after switching accounts. Switcher checks that each new turn starts. Conversations already continued or completed are skipped.
           </p>
         </div>
         <div className="flex justify-end p-5 border-t border-gray-100 dark:border-gray-800">

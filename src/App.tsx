@@ -771,9 +771,10 @@ function App() {
     const accountId = pendingSwitchAccountId;
     const shouldReopen = desktopReopen.available && desktopReopen.reopen;
     let preparedRecoveryCount = 0;
+    let reopened = false;
     setIsCompletingForceClose(true);
     try {
-      if (accountId && autoResumeSessions) {
+      if (accountId && autoResumeSessions && shouldReopen) {
         preparedRecoveryCount = await invokeBackend<number>("prepare_codex_session_recovery");
       }
       try {
@@ -804,26 +805,32 @@ function App() {
         async (token) => {
           try {
             await invokeBackend("reopen_closed_codex_desktop", { token });
+            reopened = true;
             showWarmupToast(accountId ? "Account switched. Codex desktop reopened." : "Codex desktop reopened.");
           } catch (err) {
             showWarmupToast(`Codex closed${accountId ? " and account switched" : ""}, but reopening failed: ${formatWarmupError(err)}`, true);
           }
         },
       );
-      if (preparedRecoveryCount > 0) {
+      if (preparedRecoveryCount > 0 && reopened) {
+        showWarmupToast(`Resuming ${preparedRecoveryCount} conversation${preparedRecoveryCount === 1 ? "" : "s"} in Codex…`);
         try {
-          const recovery = await invokeBackend<{ queued: string[]; failed: string[] }>(
+          const recovery = await invokeBackend<{ resumed: string[]; skipped: string[]; failed: string[] }>(
             "resume_codex_session_recovery",
           );
           showWarmupToast(
-            `Account switched. Queued continuation for ${recovery.queued.length} conversation${recovery.queued.length === 1 ? "" : "s"}${
-              recovery.failed.length ? `; ${recovery.failed.length} failed` : ""
-            }.`,
+            `Started continuation for ${recovery.resumed.length} conversation${recovery.resumed.length === 1 ? "" : "s"}.${
+              recovery.skipped.length ? ` ${recovery.skipped.length} already continued or completed.` : ""
+            }${recovery.failed.length ? ` ${recovery.failed.length} failed. ${recovery.failed[0]}` : ""}`,
             recovery.failed.length > 0,
           );
         } catch (err) {
           showWarmupToast(`Account switched, but auto-resume failed: ${formatWarmupError(err)}`, true);
         }
+      } else if (preparedRecoveryCount > 0) {
+        await invokeBackend("cancel_codex_session_recovery").catch(() => undefined);
+      } else if (accountId && autoResumeSessions && reopened) {
+        showWarmupToast("Account switched. No recent conversations stopped by a usage limit were found.");
       }
       if (shouldReopen && !result.reopenToken) {
         showWarmupToast("No closed desktop app could be identified for reopening. Open Codex manually.", true);

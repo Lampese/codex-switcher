@@ -3,8 +3,8 @@
 use serde::Serialize;
 use serde_json::Value;
 use std::fs;
-use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
@@ -12,11 +12,19 @@ const ACTIVE_WINDOW_SECS: u64 = 24 * 60 * 60;
 const MAX_SESSIONS: usize = 32;
 const CONTINUE_PROMPT: &str = "Continue the previous task.";
 
-static PENDING_SESSIONS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+#[derive(Debug, Clone)]
+struct StoppedSession {
+    id: String,
+    path: PathBuf,
+}
+
+static PENDING_SESSIONS: Mutex<Vec<StoppedSession>> = Mutex::new(Vec::new());
+static RECOVERY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionRecoveryReport {
-    pub queued: Vec<String>,
+    pub resumed: Vec<String>,
+    pub skipped: Vec<String>,
     pub failed: Vec<String>,
 }
 
@@ -39,50 +47,190 @@ pub fn cancel_codex_session_recovery() -> Result<(), String> {
 
 #[tauri::command]
 pub async fn resume_codex_session_recovery() -> Result<SessionRecoveryReport, String> {
+    let _guard = RECOVERY_LOCK.lock().await;
     let sessions =
         std::mem::take(&mut *PENDING_SESSIONS.lock().map_err(|error| error.to_string())?);
     let mut report = SessionRecoveryReport {
-        queued: Vec::new(),
+        resumed: Vec::new(),
+        skipped: Vec::new(),
         failed: Vec::new(),
     };
-    let binary = std::env::var_os("CODEX_BIN").unwrap_or_else(|| "codex".into());
+    let home = crate::auth::get_codex_home().map_err(|error| error.to_string())?;
+    let binary = codex_binary();
+    for session in sessions {
+        // The user or another client may have continued it during the switch.
+        if !has_usage_limit_failure(&session.path) {
+            report.skipped.push(session.id);
+            continue;
+        }
+        match resume_session(&session, &home, &binary, open_desktop_thread, 60).await {
+            Ok(()) => report.resumed.push(session.id),
+            Err(error) => report.failed.push(format!("{}: {error}", session.id)),
+        }
+    }
+    Ok(report)
+}
 
-    for session_id in sessions {
+fn codex_binary() -> PathBuf {
+    if let Some(binary) = std::env::var_os("CODEX_BIN") {
+        return binary.into();
+    }
+    // Finder-launched apps do not inherit the interactive shell's PATH.
+    #[cfg(target_os = "macos")]
+    for bundle in ["/Applications/ChatGPT.app", "/Applications/Codex.app"] {
+        for relative in [
+            "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+            "Contents/Resources/codex",
+        ] {
+            let binary = Path::new(bundle).join(relative);
+            if binary.is_file() {
+                return binary;
+            }
+        }
+    }
+    "codex".into()
+}
+
+async fn open_desktop_thread(id: String) -> Result<(), String> {
+    let url = format!("codex://threads/{id}");
+    #[cfg(target_os = "macos")]
+    let mut command = tokio::process::Command::new("open");
+    #[cfg(windows)]
+    let mut command = tokio::process::Command::new("explorer.exe");
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let mut command = tokio::process::Command::new("xdg-open");
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        command.arg(url).kill_on_drop(true).output(),
+    )
+    .await
+    .map_err(|_| "Opening the conversation timed out".to_string())?
+    .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err("Could not open the conversation in Codex desktop".into());
+    }
+    Ok(())
+}
+
+async fn resume_session<F, Fut>(
+    session: &StoppedSession,
+    home: &Path,
+    binary: &Path,
+    open_thread: F,
+    wait_seconds: u64,
+) -> Result<(), String>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    // A timed-out delivery may still be queued. Keep a receipt across Switcher
+    // restarts so retrying opens that chat instead of submitting a duplicate.
+    let receipts = home.join("switcher-recovery");
+    fs::create_dir_all(&receipts).map_err(|error| error.to_string())?;
+    let receipt = receipts.join(format!("{}.offset", session.id));
+    let previous = match fs::read_to_string(&receipt) {
+        Ok(value) => Some(
+            value
+                .parse::<u64>()
+                .map_err(|_| "Invalid recovery receipt")?,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    let length = fs::metadata(&session.path)
+        .map_err(|error| error.to_string())?
+        .len();
+    let pending_offset = previous.filter(|offset| {
+        *offset <= length
+            && read_resume_result(&session.path, *offset)
+                .ok()
+                .flatten()
+                .is_none()
+    });
+    let offset = pending_offset.unwrap_or(length);
+    if pending_offset.is_none() {
+        fs::write(&receipt, offset.to_string()).map_err(|error| error.to_string())?;
         let result = tokio::time::timeout(
-            tokio::time::Duration::from_secs(10),
-            tokio::process::Command::new(&binary)
+            std::time::Duration::from_secs(10),
+            tokio::process::Command::new(binary)
+                .env("CODEX_HOME", home)
                 .kill_on_drop(true)
                 .args([
                     "queue",
                     "--thread",
-                    session_id.as_str(),
+                    &session.id,
                     "--message",
                     CONTINUE_PROMPT,
                 ])
                 .output(),
         )
         .await;
-
         match result {
-            Ok(Ok(output)) if output.status.success() => report.queued.push(session_id),
-            Ok(Ok(output)) => {
-                let detail = String::from_utf8_lossy(&output.stderr)
-                    .lines()
-                    .next()
-                    .unwrap_or("codex queue failed")
-                    .to_string();
-                report.failed.push(format!("{session_id}: {detail}"));
+            Ok(Ok(output)) if output.status.success() => {}
+            Ok(Ok(_)) => {
+                let _ = fs::remove_file(&receipt);
+                return Err("codex queue failed; check that your Codex CLI supports queue".into());
             }
-            Ok(Err(error)) => report.failed.push(format!("{session_id}: {error}")),
-            Err(_) => report
-                .failed
-                .push(format!("{session_id}: codex queue timed out")),
+            Ok(Err(error)) => {
+                let _ = fs::remove_file(&receipt);
+                return Err(format!("Could not run Codex CLI: {error}"));
+            }
+            Err(_) => {
+                return Err(
+                    "Queue delivery timed out; retrying will not queue another message".into(),
+                )
+            }
         }
     }
-    Ok(report)
+
+    // Queue only persists a message. Loading the desktop chat starts its queue.
+    open_thread(session.id.clone()).await?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait_seconds);
+    loop {
+        if let Some(result) = read_resume_result(&session.path, offset)? {
+            let _ = fs::remove_file(&receipt);
+            return result;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("Continuation is queued, but no new turn started within 60 seconds. Open this chat in Codex; retrying will not queue another message".into());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
 }
 
-fn find_quota_stopped_sessions() -> Vec<String> {
+fn read_resume_result(path: &Path, offset: u64) -> Result<Option<Result<(), String>>, String> {
+    let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|error| error.to_string())?;
+    let mut started = false;
+    for line in BufReader::new(file).lines() {
+        let line = line.map_err(|error| error.to_string())?;
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if value["type"] != "event_msg" {
+            continue;
+        }
+        let payload = &value["payload"];
+        match payload["type"].as_str() {
+            Some("task_started" | "turn_started") => started = true,
+            Some("task_complete" | "turn_failed") if started && !payload["error"].is_null() => {
+                return Ok(Some(Err(
+                    "The new turn started but failed again; check the conversation in Codex".into(),
+                )));
+            }
+            Some("error") if started => {
+                return Ok(Some(Err(
+                    "The new turn reported an error; check the conversation in Codex".into(),
+                )))
+            }
+            _ => {}
+        }
+    }
+    Ok(started.then_some(Ok(())))
+}
+
+fn find_quota_stopped_sessions() -> Vec<StoppedSession> {
     let Ok(home) = crate::auth::get_codex_home() else {
         return Vec::new();
     };
@@ -98,7 +246,7 @@ fn find_quota_stopped_sessions() -> Vec<String> {
         .collect()
 }
 
-fn collect_jsonl(root: &Path, now: &SystemTime, sessions: &mut Vec<(SystemTime, String)>) {
+fn collect_jsonl(root: &Path, now: &SystemTime, sessions: &mut Vec<(SystemTime, StoppedSession)>) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
     };
@@ -116,7 +264,7 @@ fn collect_jsonl(root: &Path, now: &SystemTime, sessions: &mut Vec<(SystemTime, 
                     .and_then(|metadata| metadata.modified().ok()),
                 session_id(&path),
             ) {
-                sessions.push((modified, id));
+                sessions.push((modified, StoppedSession { id, path }));
             }
         }
     }
@@ -137,7 +285,9 @@ fn session_id(path: &Path) -> Option<String> {
     if value.get("type")?.as_str()? != "session_meta" {
         return None;
     }
-    value.get("payload")?.get("id")?.as_str().map(str::to_owned)
+    let id = value.get("payload")?.get("id")?.as_str()?;
+    uuid::Uuid::parse_str(id).ok()?;
+    Some(id.to_owned())
 }
 
 fn has_usage_limit_failure(path: &Path) -> bool {
@@ -299,5 +449,174 @@ mod tests {
             quota_failure(),
             json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": "Continue"}}).to_string()
         ]));
+    }
+
+    #[cfg(unix)]
+    fn delivery_fixture() -> (
+        crate::auth::test_support::TestHome,
+        super::StoppedSession,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = crate::auth::test_support::TestHome::new();
+        let home = crate::auth::get_codex_home().unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let path = home.join("rollout.jsonl");
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                json!({"type":"session_meta","payload":{"id":id}}),
+                quota_failure()
+            ),
+        )
+        .unwrap();
+        let binary = home.join("fake-codex");
+        std::fs::write(&binary, "#!/bin/sh\n[ \"$1\" = queue ] || exit 1\nprintf 'queued\\n' >> \"$CODEX_HOME/queue-calls\"\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        (fixture, super::StoppedSession { id, path }, home, binary)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn queue_acceptance_is_not_success_and_retry_does_not_duplicate() {
+        let (_fixture, session, home, binary) = delivery_fixture();
+        let result = super::resume_session(&session, &home, &binary, |_| async { Ok(()) }, 0).await;
+        assert!(result.unwrap_err().contains("no new turn"));
+        let path = session.path.clone();
+        super::resume_session(
+            &session,
+            &home,
+            &binary,
+            move |_| async move {
+                use std::io::Write;
+                writeln!(
+                    std::fs::OpenOptions::new().append(true).open(path).unwrap(),
+                    "{}",
+                    event(json!({"type":"task_started"}))
+                )
+                .unwrap();
+                Ok(())
+            },
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(home.join("queue-calls")).unwrap(),
+            "queued\n"
+        );
+        assert!(!home
+            .join("switcher-recovery")
+            .join(format!("{}.offset", session.id))
+            .exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn waits_for_desktop_start_and_surfaces_immediate_failure() {
+        let (_fixture, session, home, binary) = delivery_fixture();
+        let path = session.path.clone();
+        let result = super::resume_session(
+            &session,
+            &home,
+            &binary,
+            move |_| async move {
+                tokio::spawn(async move {
+                    use std::io::Write;
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+                    writeln!(
+                        file,
+                        "{}\n{}",
+                        event(json!({"type":"task_started"})),
+                        quota_failure()
+                    )
+                    .unwrap();
+                });
+                Ok(())
+            },
+            2,
+        )
+        .await;
+        assert!(result.unwrap_err().contains("failed again"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_opener_retains_receipt_and_old_started_event_is_ignored() {
+        let (_fixture, session, home, binary) = delivery_fixture();
+        std::fs::write(
+            &session.path,
+            format!(
+                "{}\n{}\n",
+                event(json!({"type":"task_started"})),
+                quota_failure()
+            ),
+        )
+        .unwrap();
+        let result = super::resume_session(
+            &session,
+            &home,
+            &binary,
+            |_| async { Err("No URL handler".into()) },
+            0,
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), "No URL handler");
+        let result = super::resume_session(&session, &home, &binary, |_| async { Ok(()) }, 0).await;
+        assert!(result.unwrap_err().contains("no new turn"));
+        assert_eq!(
+            std::fs::read_to_string(home.join("queue-calls")).unwrap(),
+            "queued\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_failure_does_not_open_chat_or_leave_receipt() {
+        let (_fixture, session, home, binary) = delivery_fixture();
+        std::fs::write(&binary, "#!/bin/sh\nexit 1\n").unwrap();
+        let result = super::resume_session(
+            &session,
+            &home,
+            &binary,
+            |_| async { panic!("must not open") },
+            0,
+        )
+        .await;
+        assert!(result.unwrap_err().contains("codex queue failed"));
+        assert!(!home
+            .join("switcher-recovery")
+            .join(format!("{}.offset", session.id))
+            .exists());
+    }
+
+    // Explicit opt-in: sends one continuation to the named local test session
+    // using the real CLI and OS URL handler. Never run against an arbitrary chat.
+    #[tokio::test]
+    #[ignore = "requires a running Codex desktop and an explicitly selected test session"]
+    async fn live_desktop_recovery() {
+        let path = std::path::PathBuf::from(
+            std::env::var("CODEX_RECOVERY_E2E_ROLLOUT").expect("test rollout path"),
+        );
+        let home =
+            std::path::PathBuf::from(std::env::var("CODEX_RECOVERY_E2E_HOME").expect("Codex home"));
+        let id = super::session_id(&path).expect("valid session UUID");
+        assert!(
+            super::has_usage_limit_failure(&path),
+            "test session must be quota stopped"
+        );
+        super::resume_session(
+            &super::StoppedSession { id, path },
+            &home,
+            &super::codex_binary(),
+            super::open_desktop_thread,
+            60,
+        )
+        .await
+        .unwrap();
     }
 }
