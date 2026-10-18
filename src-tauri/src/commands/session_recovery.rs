@@ -10,6 +10,7 @@ use std::time::SystemTime;
 
 const ACTIVE_WINDOW_SECS: u64 = 24 * 60 * 60;
 const MAX_SESSIONS: usize = 32;
+const RECOVERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
 const CONTINUE_PROMPT: &str = "Continue the previous task.";
 
 #[derive(Debug, Clone)]
@@ -32,7 +33,21 @@ static RECOVERY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(())
 pub struct SessionRecoveryReport {
     pub resumed: Vec<String>,
     pub skipped: Vec<String>,
-    pub failed: Vec<String>,
+    pub failed: Vec<RecoveryFailure>,
+    pub timed_out: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RecoveryFailure {
+    pub session_id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RecoveryProgress {
+    pub completed: usize,
+    pub total: usize,
+    pub current_session_id: Option<String>,
 }
 
 #[tauri::command]
@@ -53,29 +68,111 @@ pub fn cancel_codex_session_recovery() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn resume_codex_session_recovery() -> Result<SessionRecoveryReport, String> {
+pub async fn resume_codex_session_recovery(
+    on_progress: tauri::ipc::Channel<RecoveryProgress>,
+) -> Result<SessionRecoveryReport, String> {
+    resume_pending_sessions(|progress| {
+        let _ = on_progress.send(progress);
+    })
+    .await
+}
+
+async fn resume_pending_sessions(
+    on_progress: impl Fn(RecoveryProgress),
+) -> Result<SessionRecoveryReport, String> {
     let _guard = RECOVERY_LOCK.lock().await;
     let sessions =
         std::mem::take(&mut *PENDING_SESSIONS.lock().map_err(|error| error.to_string())?);
+    let home = crate::auth::get_codex_home().map_err(|error| error.to_string())?;
+    Ok(recover_sessions(
+        sessions,
+        &home,
+        &codex_binary(),
+        open_desktop_thread,
+        on_progress,
+        RECOVERY_BUDGET,
+    )
+    .await)
+}
+
+async fn recover_sessions<F, Fut>(
+    sessions: Vec<StoppedSession>,
+    home: &Path,
+    binary: &Path,
+    open_thread: F,
+    on_progress: impl Fn(RecoveryProgress),
+    budget: std::time::Duration,
+) -> SessionRecoveryReport
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
     let mut report = SessionRecoveryReport {
         resumed: Vec::new(),
         skipped: Vec::new(),
         failed: Vec::new(),
+        timed_out: false,
     };
-    let home = crate::auth::get_codex_home().map_err(|error| error.to_string())?;
-    let binary = codex_binary();
-    for session in sessions {
+    let deadline = tokio::time::Instant::now() + budget;
+    let total = sessions.len();
+    for (index, session) in sessions.into_iter().enumerate() {
+        if tokio::time::Instant::now() >= deadline {
+            report.timed_out = true;
+            report.failed.push(RecoveryFailure {
+                session_id: session.id,
+                reason: "Not attempted: the recovery time limit was reached. Open this conversation to inspect its state and any pending queue.".into(),
+            });
+            continue;
+        }
+        on_progress(RecoveryProgress {
+            completed: index,
+            total,
+            current_session_id: Some(session.id.clone()),
+        });
         // The user or another client may have continued it during the switch.
         if !has_usage_limit_failure(&session.path) {
             report.skipped.push(session.id);
-            continue;
+        } else {
+            // Dropping an overdue attempt keeps its receipt and kills any CLI child.
+            let result = tokio::time::timeout_at(
+                deadline,
+                resume_session(&session, home, binary, &open_thread, 60),
+            )
+            .await;
+            match result {
+                Ok(Ok(())) => report.resumed.push(session.id),
+                Ok(Err(reason)) => report.failed.push(RecoveryFailure {
+                    session_id: session.id,
+                    reason,
+                }),
+                Err(_) => {
+                    report.timed_out = true;
+                    report.failed.push(RecoveryFailure {
+                        session_id: session.id,
+                        reason: "The recovery time limit was reached before this turn was confirmed. A continuation may still be queued; open the conversation to inspect it. Its receipt is kept to prevent duplicate messages.".into(),
+                    });
+                }
+            }
         }
-        match resume_session(&session, &home, &binary, open_desktop_thread, 60).await {
-            Ok(()) => report.resumed.push(session.id),
-            Err(error) => report.failed.push(format!("{}: {error}", session.id)),
-        }
+        on_progress(RecoveryProgress {
+            completed: index + 1,
+            total,
+            current_session_id: None,
+        });
     }
-    Ok(report)
+    on_progress(RecoveryProgress {
+        completed: total,
+        total,
+        current_session_id: None,
+    });
+    report
+}
+
+#[tauri::command]
+pub async fn open_codex_recovery_conversation(session_id: String) -> Result<(), String> {
+    let id =
+        uuid::Uuid::parse_str(&session_id).map_err(|_| "Invalid conversation ID".to_string())?;
+    open_desktop_thread(id.to_string()).await
 }
 
 fn codex_binary() -> PathBuf {
@@ -791,7 +888,7 @@ mod tests {
         assert_eq!(found[31].path.file_name().unwrap(), "rollout-31.jsonl");
         assert_eq!(super::prepare_codex_session_recovery().unwrap(), 32);
         super::cancel_codex_session_recovery().unwrap();
-        let report = super::resume_codex_session_recovery().await.unwrap();
+        let report = super::resume_pending_sessions(|_| {}).await.unwrap();
         assert!(report.resumed.is_empty() && report.failed.is_empty() && report.skipped.is_empty());
         assert_eq!(super::prepare_codex_session_recovery().unwrap(), 32);
         for session in found {
@@ -805,14 +902,119 @@ mod tests {
             )
             .unwrap();
         }
-        let report = super::resume_codex_session_recovery().await.unwrap();
+        let report = super::resume_pending_sessions(|_| {}).await.unwrap();
         assert_eq!(report.skipped.len(), 32);
         assert!(report.resumed.is_empty() && report.failed.is_empty());
-        assert!(super::resume_codex_session_recovery()
+        assert!(super::resume_pending_sessions(|_| {})
             .await
             .unwrap()
             .skipped
             .is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn batch_deadline_reports_every_session_and_retains_pending_receipt() {
+        use std::cell::RefCell;
+        use std::io::Write;
+        let (_fixture, first, home, binary) = delivery_fixture();
+        let second = super::StoppedSession {
+            id: uuid::Uuid::new_v4().to_string(),
+            path: home.join("second.jsonl"),
+        };
+        let third = super::StoppedSession {
+            id: uuid::Uuid::new_v4().to_string(),
+            path: home.join("third.jsonl"),
+        };
+        std::fs::copy(&first.path, &second.path).unwrap();
+        std::fs::copy(&first.path, &third.path).unwrap();
+        let progress = RefCell::new(Vec::new());
+        let report = super::recover_sessions(
+            vec![first.clone(), second.clone(), third.clone()],
+            &home,
+            &binary,
+            |id| {
+                if id == first.id {
+                    let prompt = std::fs::read_to_string(home.join("queued-prompt")).unwrap();
+                    let mut file = std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&first.path)
+                        .unwrap();
+                    writeln!(
+                        file,
+                        "{}\n{}",
+                        event(json!({"type":"task_started"})),
+                        event(json!({"type":"user_message","message":prompt}))
+                    )
+                    .unwrap();
+                }
+                async { Ok(()) }
+            },
+            |update| progress.borrow_mut().push(update),
+            std::time::Duration::from_secs(3),
+        )
+        .await;
+        assert!(report.timed_out);
+        assert_eq!(report.resumed, vec![first.id]);
+        assert_eq!(report.failed.len(), 2);
+        assert_eq!(report.failed[0].session_id, second.id);
+        assert!(report.failed[0].reason.contains("may still be queued"));
+        assert_eq!(report.failed[1].session_id, third.id);
+        assert!(report.failed[1].reason.starts_with("Not attempted"));
+        assert_eq!(progress.borrow().last().unwrap().completed, 3);
+        assert!(progress.borrow().iter().any(|p| p.completed == 1
+            && p.total == 3
+            && p.current_session_id == Some(second.id.clone())));
+        assert!(home
+            .join("switcher-recovery")
+            .join(format!("{}.offset", second.id))
+            .exists());
+        assert!(!home
+            .join("switcher-recovery")
+            .join(format!("{}.offset", third.id))
+            .exists());
+        assert_eq!(
+            std::fs::read_to_string(home.join("queue-calls")).unwrap(),
+            "queued\nqueued\n"
+        );
+        // The interrupted attempt can finish on retry without queueing again.
+        super::resume_session(
+            &second,
+            &home,
+            &binary,
+            |_| async {
+                let prompt = std::fs::read_to_string(home.join("queued-prompt")).unwrap();
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&second.path)
+                    .unwrap();
+                writeln!(
+                    file,
+                    "{}\n{}",
+                    event(json!({"type":"task_started"})),
+                    event(json!({"type":"user_message","message":prompt}))
+                )
+                .unwrap();
+                Ok(())
+            },
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(home.join("queue-calls")).unwrap(),
+            "queued\nqueued\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_conversation_rejects_invalid_ids() {
+        assert_eq!(
+            super::open_codex_recovery_conversation("../not-a-chat?command=run".into())
+                .await
+                .unwrap_err(),
+            "Invalid conversation ID"
+        );
     }
 
     // Explicit opt-in: sends one continuation to the named local test session

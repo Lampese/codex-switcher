@@ -144,7 +144,7 @@ in to that account again or remove and re-add it once. An invalidated token
 cannot be recovered locally.
 
 When a switch needs to close Codex, enable **Auto-resume conversations stopped
-by usage limits** in Settings. Recovery scans local session logs modified in
+by usage limits** in Settings or the close-and-switch confirmation dialog. Recovery scans local session logs modified in
 the last 24 hours and queues `Continue the previous task.` for up to 32
 conversations whose latest failure has the `usage_limit_exceeded` error code
 or a message beginning with “You've hit your usage limit.” It skips conversations
@@ -153,7 +153,11 @@ chat messages or tool output. It is off by default and requires a Codex CLI
 supporting `codex queue` and a desktop app registered for `codex://` links.
 Enable desktop reopening as well. After a successful reopen, Switcher opens each
 queued conversation and waits up to 60 seconds for its recovery message in a new turn;
-queue acceptance alone is not reported as success. A failed or timed-out delivery
+queue acceptance alone is not reported as success. The entire recovery run is capped
+at two minutes, with live progress in the main window. Results stay visible until
+dismissed, listing every conversation that needs attention with an **Open conversation**
+button. Conversations not attempted before the limit are listed too; pending messages
+and their receipts are kept to prevent duplicate continuations. A failed or timed-out delivery
 is shown in the result. Each continuation includes a unique recovery marker, so
 unrelated turns cannot confirm it. If the CLI fails or times out before confirming
 queue acceptance, delivery is reported as unknown and requires queue inspection

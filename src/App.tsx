@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useAccounts } from "./hooks/useAccounts";
 import { useDesktopReopen } from "./hooks/useDesktopReopen";
 import { useCodexClosePreference } from "./hooks/useCodexClosePreference";
+import { SessionRecoveryPanel } from "./components/SessionRecoveryPanel";
 import { SettingsModal } from "./components/SettingsModal";
 import { finishForceClose, type DesktopReopenPreference } from "./lib/desktopReopen";
 import type { CodexClosePreference } from "./lib/codexClosePreference";
@@ -42,7 +43,7 @@ import {
   type AutoWarmupWindowKind,
 } from "./lib/autoWarmupPolicy";
 import { getTauriWindow } from "./lib/tauriWindow";
-import { readAutoResumeSessions, writeAutoResumeSessions } from "./lib/sessionRecovery";
+import { readAutoResumeSessions, writeAutoResumeSessions, type RecoveryState, type RecoveryProgress, type RecoveryReport } from "./lib/sessionRecovery";
 import "./App.css";
 
 const AUTO_WARMUP_CHECK_INTERVAL_MS = 30 * 1000;
@@ -249,6 +250,7 @@ function App() {
   const [isNavMenuOpen, setIsNavMenuOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [autoResumeSessions, setAutoResumeSessions] = useState(() => readAutoResumeSessions());
+  const [recoveryState, setRecoveryState] = useState<RecoveryState | null>(null);
   const [isCompletingForceClose, setIsCompletingForceClose] = useState(false);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const forceCloseInFlightRef = useRef(false);
@@ -822,24 +824,24 @@ function App() {
         },
       );
       if (preparedRecoveryCount > 0 && reopened) {
-        showWarmupToast(`Resuming ${preparedRecoveryCount} conversation${preparedRecoveryCount === 1 ? "" : "s"} in Codex…`);
+        setRecoveryState({ status: "running", progress: { completed: 0, total: preparedRecoveryCount, current_session_id: null } });
+        let acceptingProgress = true;
         try {
-          const recovery = await invokeBackend<{ resumed: string[]; skipped: string[]; failed: string[] }>(
-            "resume_codex_session_recovery",
-          );
-          showWarmupToast(
-            `Started continuation for ${recovery.resumed.length} conversation${recovery.resumed.length === 1 ? "" : "s"}.${
-              recovery.skipped.length ? ` ${recovery.skipped.length} already continued or completed.` : ""
-            }${recovery.failed.length ? ` ${recovery.failed.length} failed. ${recovery.failed[0]}` : ""}`,
-            recovery.failed.length > 0,
-          );
+          const { Channel } = await import("@tauri-apps/api/core");
+          const onProgress = new Channel<RecoveryProgress>((progress) => {
+            if (acceptingProgress) setRecoveryState({ status: "running", progress });
+          });
+          const report = await invokeBackend<RecoveryReport>("resume_codex_session_recovery", { onProgress });
+          acceptingProgress = false;
+          setRecoveryState({ status: "complete", report });
         } catch (err) {
-          showWarmupToast(`Account switched, but auto-resume failed: ${formatWarmupError(err)}`, true);
+          acceptingProgress = false;
+          setRecoveryState({ status: "error", message: `Account switched, but auto-resume failed: ${formatWarmupError(err)}` });
         }
       } else if (preparedRecoveryCount > 0) {
         await invokeBackend("cancel_codex_session_recovery").catch(() => undefined);
       } else if (accountId && autoResumeSessions && reopened) {
-        showWarmupToast("Account switched. No recent conversations stopped by a usage limit were found.");
+        setRecoveryState({ status: "complete", report: { resumed: [], skipped: [], failed: [], timed_out: false } });
       }
       if (shouldReopen && !result.reopenToken) {
         showWarmupToast("No closed desktop app could be identified for reopening. Open Codex manually.", true);
@@ -1774,6 +1776,9 @@ function App() {
 
       {/* Main Content */}
       <main className="max-w-5xl mx-auto px-6 pt-4 pb-8">
+        {recoveryState && (
+          <SessionRecoveryPanel state={recoveryState} onDismiss={() => setRecoveryState(null)} />
+        )}
         {loading && accounts.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20">
             <div className="animate-spin h-10 w-10 border-2 border-gray-900 dark:border-gray-100 border-t-transparent rounded-full mb-4"></div>
