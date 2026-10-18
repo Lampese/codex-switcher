@@ -765,6 +765,15 @@ function App() {
     [closeBehaviorDontAskAgain, formatWarmupError, showWarmupToast]
   );
 
+  const saveAutoResumeSessions = (enabled: boolean) => {
+    try {
+      writeAutoResumeSessions(enabled);
+      setAutoResumeSessions(enabled);
+    } catch (err) {
+      showWarmupToast(`Could not save auto-resume preference: ${formatWarmupError(err)}`, true);
+    }
+  };
+
   const handleForceCloseConfirm = async () => {
     if (forceCloseInFlightRef.current || desktopReopen.checking) return;
     forceCloseInFlightRef.current = true;
@@ -2030,27 +2039,20 @@ function App() {
           closePreference={codexClose.preference}
           onClosePreferenceChange={saveCodexClosePreference}
           autoResumeSessions={autoResumeSessions}
-          onAutoResumeSessionsChange={(enabled) => {
-            try {
-              writeAutoResumeSessions(enabled);
-              setAutoResumeSessions(enabled);
-            } catch (err) {
-              showWarmupToast(`Could not save auto-resume preference: ${formatWarmupError(err)}`, true);
-            }
-          }}
+          onAutoResumeSessionsChange={saveAutoResumeSessions}
           onClose={() => setIsSettingsOpen(false)}
         />
       )}
 
       {forceCloseConfirmOpen && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-          <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-md mx-4 shadow-xl">
+          <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-md max-h-[calc(100dvh-2rem)] flex flex-col mx-4 shadow-xl">
             <div className="p-5 border-b border-gray-100 dark:border-gray-800">
               <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
                 Close running Codex processes?
               </h2>
             </div>
-            <div className="p-5 space-y-3">
+            <div className="p-5 space-y-3 overflow-y-auto">
               <p className="text-sm text-gray-600 dark:text-gray-300">
                 This will {codexClose.forceClose ? "force close" : "gracefully close"} {processInfo?.count ?? 0} Codex process
                 {(processInfo?.count ?? 0) === 1 ? "" : "es"} that currently{" "}
@@ -2114,11 +2116,34 @@ function App() {
                   <p className="text-sm text-gray-500 dark:text-gray-400">No supported desktop app could be identified for reopening. Codex will only be closed.</p>
                 )}
               </div>
+              {pendingSwitchAccount && (
+                <div className="space-y-2 rounded-lg bg-gray-50 dark:bg-gray-800 p-3">
+                  <label className="flex items-start gap-2 text-sm font-medium text-gray-900 dark:text-gray-100">
+                    <input
+                      type="checkbox"
+                      checked={autoResumeSessions}
+                      onChange={(event) => saveAutoResumeSessions(event.target.checked)}
+                      disabled={isCompletingForceClose || desktopReopen.checking || !desktopReopen.available || !desktopReopen.reopen}
+                      className="mt-0.5 h-4 w-4 shrink-0 accent-orange-600 disabled:opacity-50"
+                    />
+                    Auto-resume conversations stopped by usage limits
+                  </label>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    {desktopReopen.checking
+                      ? "Checking whether Codex desktop can reopen…"
+                      : !desktopReopen.available
+                        ? "Requires a supported Codex desktop app to reopen."
+                        : !desktopReopen.reopen
+                          ? "Enable desktop reopening to auto-resume conversations. You can change this in Settings."
+                          : "Continue recent conversations stopped by a usage limit after switching. This preference is saved in Settings."}
+                  </p>
+                </div>
+              )}
               {codexClose.forceClose && (
                 <p className="text-sm text-red-600 dark:text-red-300">Unsaved Codex work may be lost.</p>
               )}
             </div>
-            <div className="flex justify-end gap-3 p-5 border-t border-gray-100 dark:border-gray-800">
+            <div className="flex shrink-0 justify-end gap-3 p-5 border-t border-gray-100 dark:border-gray-800">
               <button
                 onClick={() => {
                   setPendingSwitchAccountId(null);
