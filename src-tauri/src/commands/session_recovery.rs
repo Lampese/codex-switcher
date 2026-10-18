@@ -1,6 +1,6 @@
 //! Snapshot and continue Codex sessions stopped by a usage limit.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -16,6 +16,13 @@ const CONTINUE_PROMPT: &str = "Continue the previous task.";
 struct StoppedSession {
     id: String,
     path: PathBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RecoveryReceipt {
+    offset: u64,
+    prompt: String,
+    queued: bool,
 }
 
 static PENDING_SESSIONS: Mutex<Vec<StoppedSession>> = Mutex::new(Vec::new());
@@ -129,27 +136,40 @@ where
     fs::create_dir_all(&receipts).map_err(|error| error.to_string())?;
     let receipt = receipts.join(format!("{}.offset", session.id));
     let previous = match fs::read_to_string(&receipt) {
-        Ok(value) => Some(
-            value
-                .parse::<u64>()
-                .map_err(|_| "Invalid recovery receipt")?,
-        ),
+        Ok(value) => Some(serde_json::from_str::<RecoveryReceipt>(&value)
+            .map_err(|_| format!("Unreadable recovery receipt at {}. Inspect the chat's queue before removing this receipt to retry", receipt.display()))?),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.to_string()),
     };
     let length = fs::metadata(&session.path)
         .map_err(|error| error.to_string())?
         .len();
-    let pending_offset = previous.filter(|offset| {
-        *offset <= length
-            && read_resume_result(&session.path, *offset)
-                .ok()
-                .flatten()
-                .is_none()
+    let pending = match previous {
+        Some(previous) => {
+            if previous.offset > length {
+                return Err(
+                    "Session log changed; inspect the conversation before retrying recovery".into(),
+                );
+            }
+            if read_resume_result(&session.path, &previous)?.is_none() {
+                Some(previous)
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
+    let needs_queue = pending.is_none();
+    let mut delivery = pending.unwrap_or_else(|| RecoveryReceipt {
+        offset: length,
+        prompt: format!(
+            "{CONTINUE_PROMPT}\n\n[Codex Switcher recovery: {}]",
+            uuid::Uuid::new_v4()
+        ),
+        queued: false,
     });
-    let offset = pending_offset.unwrap_or(length);
-    if pending_offset.is_none() {
-        fs::write(&receipt, offset.to_string()).map_err(|error| error.to_string())?;
+    if needs_queue {
+        save_receipt(&receipt, &delivery)?;
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             tokio::process::Command::new(binary)
@@ -160,26 +180,23 @@ where
                     "--thread",
                     &session.id,
                     "--message",
-                    CONTINUE_PROMPT,
+                    &delivery.prompt,
                 ])
                 .output(),
         )
         .await;
         match result {
-            Ok(Ok(output)) if output.status.success() => {}
-            Ok(Ok(_)) => {
-                let _ = fs::remove_file(&receipt);
-                return Err("codex queue failed; check that your Codex CLI supports queue".into());
+            Ok(Ok(output)) if output.status.success() => {
+                delivery.queued = true;
+                save_receipt(&receipt, &delivery)?;
             }
             Ok(Err(error)) => {
                 let _ = fs::remove_file(&receipt);
                 return Err(format!("Could not run Codex CLI: {error}"));
             }
-            Err(_) => {
-                return Err(
-                    "Queue delivery timed out; retrying will not queue another message".into(),
-                )
-            }
+            // The CLI may have persisted the message before failing or timing out.
+            // Keep the receipt and try opening the chat without submitting again.
+            _ => {}
         }
     }
 
@@ -187,47 +204,91 @@ where
     open_thread(session.id.clone()).await?;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait_seconds);
     loop {
-        if let Some(result) = read_resume_result(&session.path, offset)? {
+        if let Some(result) = read_resume_result(&session.path, &delivery)? {
             let _ = fs::remove_file(&receipt);
             return result;
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err("Continuation is queued, but no new turn started within 60 seconds. Open this chat in Codex; retrying will not queue another message".into());
+            return Err(if delivery.queued {
+                "Continuation is queued, but its turn was not confirmed. Open this chat in Codex to inspect its queue; retrying will not submit another message".into()
+            } else {
+                format!("Queue delivery is unknown because the CLI failed or timed out. Open this chat and inspect its queue. If the recovery message is absent, remove {} before retrying; automatic resubmission is suppressed to avoid duplicates", receipt.display())
+            });
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
 }
 
-fn read_resume_result(path: &Path, offset: u64) -> Result<Option<Result<(), String>>, String> {
+fn save_receipt(path: &Path, receipt: &RecoveryReceipt) -> Result<(), String> {
+    fs::write(
+        path,
+        serde_json::to_vec(receipt).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn read_resume_result(
+    path: &Path,
+    receipt: &RecoveryReceipt,
+) -> Result<Option<Result<(), String>>, String> {
     let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
-    file.seek(SeekFrom::Start(offset))
+    file.seek(SeekFrom::Start(receipt.offset))
         .map_err(|error| error.to_string())?;
     let mut started = false;
+    let mut matched = false;
+    let mut turn_id: Option<String> = None;
     for line in BufReader::new(file).lines() {
         let line = line.map_err(|error| error.to_string())?;
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        let payload = &value["payload"];
+        if started && value["type"] == "response_item" && payload["role"] == "user" {
+            let message_turn =
+                payload["internal_chat_message_metadata_passthrough"]["turn_id"].as_str();
+            if message_turn.is_none() || message_turn == turn_id.as_deref() {
+                matched |= payload["content"].as_array().is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| item["text"].as_str() == Some(&receipt.prompt))
+                });
+            }
+        }
         if value["type"] != "event_msg" {
             continue;
         }
-        let payload = &value["payload"];
         match payload["type"].as_str() {
-            Some("task_started" | "turn_started") => started = true,
-            Some("task_complete" | "turn_failed") if started && !payload["error"].is_null() => {
-                return Ok(Some(Err(
-                    "The new turn started but failed again; check the conversation in Codex".into(),
-                )));
+            Some("task_started" | "turn_started") => {
+                if matched {
+                    return Ok(Some(Ok(())));
+                }
+                started = true;
+                turn_id = payload["turn_id"].as_str().map(str::to_owned);
             }
-            Some("error") if started => {
+            Some("user_message") if started => {
+                matched |= payload["message"].as_str() == Some(&receipt.prompt)
+            }
+            Some("task_complete" | "turn_failed" | "turn_aborted") => {
+                if matched {
+                    return Ok(Some(
+                        if payload["error"].is_null() && payload["type"] == "task_complete" {
+                            Ok(())
+                        } else {
+                            Err("The recovery turn started but failed or was stopped; check the conversation in Codex".into())
+                        },
+                    ));
+                }
+                started = false;
+            }
+            Some("error") if matched => {
                 return Ok(Some(Err(
-                    "The new turn reported an error; check the conversation in Codex".into(),
+                    "The recovery turn reported an error; check the conversation in Codex".into(),
                 )))
             }
             _ => {}
         }
     }
-    Ok(started.then_some(Ok(())))
+    Ok(matched.then_some(Ok(())))
 }
 
 fn find_quota_stopped_sessions() -> Vec<StoppedSession> {
@@ -474,7 +535,7 @@ mod tests {
         )
         .unwrap();
         let binary = home.join("fake-codex");
-        std::fs::write(&binary, "#!/bin/sh\n[ \"$1\" = queue ] || exit 1\nprintf 'queued\\n' >> \"$CODEX_HOME/queue-calls\"\n").unwrap();
+        std::fs::write(&binary, "#!/bin/sh\n[ \"$1\" = queue ] || exit 1\nprintf 'queued\\n' >> \"$CODEX_HOME/queue-calls\"\nprintf '%s' \"$5\" > \"$CODEX_HOME/queued-prompt\"\n").unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
         (fixture, super::StoppedSession { id, path }, home, binary)
     }
@@ -484,8 +545,9 @@ mod tests {
     async fn queue_acceptance_is_not_success_and_retry_does_not_duplicate() {
         let (_fixture, session, home, binary) = delivery_fixture();
         let result = super::resume_session(&session, &home, &binary, |_| async { Ok(()) }, 0).await;
-        assert!(result.unwrap_err().contains("no new turn"));
+        assert!(result.unwrap_err().contains("turn was not confirmed"));
         let path = session.path.clone();
+        let prompt_path = home.join("queued-prompt");
         super::resume_session(
             &session,
             &home,
@@ -494,8 +556,9 @@ mod tests {
                 use std::io::Write;
                 writeln!(
                     std::fs::OpenOptions::new().append(true).open(path).unwrap(),
-                    "{}",
-                    event(json!({"type":"task_started"}))
+                    "{}\n{}",
+                    event(json!({"type":"task_started"})),
+                    event(json!({"type":"user_message", "message":std::fs::read_to_string(prompt_path).unwrap()}))
                 )
                 .unwrap();
                 Ok(())
@@ -519,6 +582,7 @@ mod tests {
     async fn waits_for_desktop_start_and_surfaces_immediate_failure() {
         let (_fixture, session, home, binary) = delivery_fixture();
         let path = session.path.clone();
+        let prompt_path = home.join("queued-prompt");
         let result = super::resume_session(
             &session,
             &home,
@@ -530,8 +594,9 @@ mod tests {
                     let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
                     writeln!(
                         file,
-                        "{}\n{}",
+                        "{}\n{}\n{}",
                         event(json!({"type":"task_started"})),
+                        event(json!({"type":"user_message", "message":std::fs::read_to_string(prompt_path).unwrap()})),
                         quota_failure()
                     )
                     .unwrap();
@@ -541,7 +606,7 @@ mod tests {
             2,
         )
         .await;
-        assert!(result.unwrap_err().contains("failed again"));
+        assert!(result.unwrap_err().contains("failed or was stopped"));
     }
 
     #[cfg(unix)]
@@ -567,7 +632,7 @@ mod tests {
         .await;
         assert_eq!(result.unwrap_err(), "No URL handler");
         let result = super::resume_session(&session, &home, &binary, |_| async { Ok(()) }, 0).await;
-        assert!(result.unwrap_err().contains("no new turn"));
+        assert!(result.unwrap_err().contains("turn was not confirmed"));
         assert_eq!(
             std::fs::read_to_string(home.join("queue-calls")).unwrap(),
             "queued\n"
@@ -578,7 +643,7 @@ mod tests {
     #[tokio::test]
     async fn cli_failure_does_not_open_chat_or_leave_receipt() {
         let (_fixture, session, home, binary) = delivery_fixture();
-        std::fs::write(&binary, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::remove_file(&binary).unwrap();
         let result = super::resume_session(
             &session,
             &home,
@@ -587,11 +652,167 @@ mod tests {
             0,
         )
         .await;
-        assert!(result.unwrap_err().contains("codex queue failed"));
+        assert!(result.unwrap_err().contains("Could not run Codex CLI"));
         assert!(!home
             .join("switcher-recovery")
             .join(format!("{}.offset", session.id))
             .exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unrelated_turns_and_quoted_markers_do_not_confirm_recovery() {
+        let (_fixture, session, _home, _binary) = delivery_fixture();
+        let receipt = super::RecoveryReceipt {
+            offset: 0,
+            prompt: "unique recovery message".into(),
+            queued: true,
+        };
+        for records in [
+            vec![event(json!({"type":"task_started","turn_id":"other"})), event(json!({"type":"user_message","message":"Please list the workspace files instead."}))],
+            vec![event(json!({"type":"task_started","turn_id":"other"})), json!({"type":"response_item","payload":{"role":"assistant","content":[{"text":receipt.prompt}]}}).to_string()],
+            vec![event(json!({"type":"task_started","turn_id":"other"})), json!({"type":"response_item","payload":{"role":"user","content":[{"text":receipt.prompt}],"internal_chat_message_metadata_passthrough":{"turn_id":"old"}}}).to_string()],
+        ] {
+            std::fs::write(&session.path, records.join("\n")).unwrap();
+            assert!(super::read_resume_result(&session.path, &receipt).unwrap().is_none());
+        }
+        std::fs::write(&session.path, format!("{}\n{}", event(json!({"type":"task_started","turn_id":"ours"})), json!({"type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":receipt.prompt}],"internal_chat_message_metadata_passthrough":{"turn_id":"ours"}}}))).unwrap();
+        assert!(super::read_resume_result(&session.path, &receipt)
+            .unwrap()
+            .unwrap()
+            .is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_before_insertion_is_unknown_and_retry_does_not_duplicate() {
+        let (_fixture, session, home, binary) = delivery_fixture();
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\nprintf 'attempt\\n' >> \"$CODEX_HOME/attempts\"\nexec sleep 30\n",
+        )
+        .unwrap();
+        let error = super::resume_session(&session, &home, &binary, |_| async { Ok(()) }, 0)
+            .await
+            .unwrap_err();
+        assert!(error.contains("delivery is unknown"));
+        assert!(!error.contains("is queued"));
+        assert!(error.contains("inspect its queue"));
+        let error = super::resume_session(&session, &home, &binary, |_| async { Ok(()) }, 0)
+            .await
+            .unwrap_err();
+        assert!(error.contains("delivery is unknown"));
+        assert_eq!(
+            std::fs::read_to_string(home.join("attempts")).unwrap(),
+            "attempt\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nonzero_exit_can_still_have_queued_and_consumed_the_message() {
+        let (_fixture, session, home, binary) = delivery_fixture();
+        let script = std::fs::read_to_string(&binary).unwrap();
+        std::fs::write(&binary, format!("{script}exit 1\n")).unwrap();
+        let path = session.path.clone();
+        let prompt_path = home.join("queued-prompt");
+        super::resume_session(&session, &home, &binary, move |_| async move {
+            use std::io::Write;
+            let mut file=std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            writeln!(file, "{}\n{}", event(json!({"type":"task_started"})), event(json!({"type":"user_message","message":std::fs::read_to_string(prompt_path).unwrap()}))).unwrap();
+            Ok(())
+        }, 0).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn snapshot_filters_old_invalid_and_completed_logs_and_cancel_is_one_shot() {
+        use std::io::Write;
+        let _fixture = crate::auth::test_support::TestHome::new();
+        let root = crate::auth::get_codex_home()
+            .unwrap()
+            .join("sessions/2026/10/18");
+        std::fs::create_dir_all(&root).unwrap();
+        let now = std::time::SystemTime::now();
+        for n in 0..35 {
+            let path = root.join(format!("rollout-{n}.jsonl"));
+            let id = uuid::Uuid::new_v4().to_string();
+            std::fs::write(
+                &path,
+                format!(
+                    "{}\n{}\n",
+                    json!({"type":"session_meta","payload":{"id":id}}),
+                    quota_failure()
+                ),
+            )
+            .unwrap();
+            std::fs::File::open(path)
+                .unwrap()
+                .set_times(
+                    std::fs::FileTimes::new().set_modified(now - std::time::Duration::from_secs(n)),
+                )
+                .unwrap();
+        }
+        for (name, id, tail, age) in [
+            (
+                "old",
+                uuid::Uuid::new_v4().to_string(),
+                quota_failure(),
+                25 * 3600,
+            ),
+            ("invalid", "../not-a-session".into(), quota_failure(), 0),
+            (
+                "completed",
+                uuid::Uuid::new_v4().to_string(),
+                event(json!({"type":"task_complete"})),
+                0,
+            ),
+        ] {
+            let path = root.join(format!("{name}.jsonl"));
+            std::fs::write(
+                &path,
+                format!(
+                    "{}\n{}\n",
+                    json!({"type":"session_meta","payload":{"id":id}}),
+                    tail
+                ),
+            )
+            .unwrap();
+            std::fs::File::open(path)
+                .unwrap()
+                .set_times(
+                    std::fs::FileTimes::new()
+                        .set_modified(now - std::time::Duration::from_secs(age)),
+                )
+                .unwrap();
+        }
+        let found = super::find_quota_stopped_sessions();
+        assert_eq!(found.len(), 32);
+        assert_eq!(found[0].path.file_name().unwrap(), "rollout-0.jsonl");
+        assert_eq!(found[31].path.file_name().unwrap(), "rollout-31.jsonl");
+        assert_eq!(super::prepare_codex_session_recovery().unwrap(), 32);
+        super::cancel_codex_session_recovery().unwrap();
+        let report = super::resume_codex_session_recovery().await.unwrap();
+        assert!(report.resumed.is_empty() && report.failed.is_empty() && report.skipped.is_empty());
+        assert_eq!(super::prepare_codex_session_recovery().unwrap(), 32);
+        for session in found {
+            writeln!(
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(session.path)
+                    .unwrap(),
+                "{}",
+                event(json!({"type":"task_started"}))
+            )
+            .unwrap();
+        }
+        let report = super::resume_codex_session_recovery().await.unwrap();
+        assert_eq!(report.skipped.len(), 32);
+        assert!(report.resumed.is_empty() && report.failed.is_empty());
+        assert!(super::resume_codex_session_recovery()
+            .await
+            .unwrap()
+            .skipped
+            .is_empty());
     }
 
     // Explicit opt-in: sends one continuation to the named local test session

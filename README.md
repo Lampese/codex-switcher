@@ -152,9 +152,12 @@ already continued, completed, or cancelled, and ignores error text quoted in
 chat messages or tool output. It is off by default and requires a Codex CLI
 supporting `codex queue` and a desktop app registered for `codex://` links.
 Enable desktop reopening as well. After a successful reopen, Switcher opens each
-queued conversation and waits up to 60 seconds for a new turn in its session log;
+queued conversation and waits up to 60 seconds for its recovery message in a new turn;
 queue acceptance alone is not reported as success. A failed or timed-out delivery
-is shown in the result. Unconfirmed deliveries are remembered across Switcher
+is shown in the result. Each continuation includes a unique recovery marker, so
+unrelated turns cannot confirm it. If the CLI fails or times out before confirming
+queue acceptance, delivery is reported as unknown and requires queue inspection
+before resubmitting. Unconfirmed deliveries are remembered across Switcher
 restarts, so retrying opens the pending chat without adding another continuation.
 This flow applies to switches through the main window that close and reopen Codex;
 tray-only switches and switches made while Codex is already closed do not run it.
