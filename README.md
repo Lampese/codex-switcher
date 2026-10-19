@@ -144,9 +144,15 @@ cannot finish late and overwrite the account you just selected. Codex Switcher
 also avoids refreshing the active account while Codex or ChatGPT is running;
 close the running app before switching accounts.
 
-If an older Codex Switcher version already saved an invalid refresh token, sign
-in to that account again or remove and re-add it once. An invalidated token
-cannot be recovered locally.
+If an older Codex Switcher version already saved an invalid refresh token, use
+**Re-login** on that card to renew it in place, or remove and re-add it once. An
+invalidated token cannot be recovered locally.
+
+### Re-login after an authentication error
+
+ChatGPT account cards show **Re-login** for terminal refresh-token failures (`invalid_grant`, `refresh_token_reused`, `refresh_token_expired`, or a missing refresh token); transient 401 and network errors ask you to retry first. Open **Re-login**, select **Start re-login**, and open the login link in your browser. Sign in with the original account and choose the same workspace. Switcher updates that saved account and refreshes usage while keeping its name, ID, and preferences. A different account or workspace is rejected.
+
+For the active account, close Codex or switch to another account first. Switcher checks this again before saving so a running Codex process cannot overwrite the renewed credentials. Inactive accounts can be renewed while Codex stays open. Cancel leaves the saved credentials unchanged. API-key accounts do not use this OAuth flow.
 
 When a switch needs to close Codex, enable **Auto-resume interrupted conversations after switching** in Settings or the close-and-switch confirmation dialog. Recovery scans local session logs modified in
 the last 24 hours, excludes internal subagent sessions, and queues `Continue the previous task.` for up to 32
