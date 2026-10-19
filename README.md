@@ -145,7 +145,7 @@ cannot be recovered locally.
 
 When a switch needs to close Codex, enable **Auto-resume conversations stopped
 by usage limits** in Settings or the close-and-switch confirmation dialog. Recovery scans local session logs modified in
-the last 24 hours and queues `Continue the previous task.` for up to 32
+the last 24 hours, excludes internal subagent sessions, and queues `Continue the previous task.` for up to 32
 conversations whose latest failure has the `usage_limit_exceeded` error code
 or a message beginning with “You've hit your usage limit.” It skips conversations
 already continued, completed, or cancelled, and ignores error text quoted in
@@ -163,6 +163,7 @@ unrelated turns cannot confirm it. If the CLI fails or times out before confirmi
 queue acceptance, delivery is reported as unknown and requires queue inspection
 before resubmitting. Unconfirmed deliveries are remembered across Switcher
 restarts, so retrying opens the pending chat without adding another continuation.
+Recovery receipts retain safe CLI exit-status or 10-second timeout details across retries. CLI output is not stored. Older receipts remain readable but may lack those details. User-created forks remain eligible for recovery.
 This flow applies to switches through the main window that close and reopen Codex;
 tray-only switches and switches made while Codex is already closed do not run it.
 

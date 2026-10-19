@@ -24,6 +24,8 @@ struct RecoveryReceipt {
     offset: u64,
     prompt: String,
     queued: bool,
+    #[serde(default)]
+    queue_error: Option<String>,
 }
 
 static PENDING_SESSIONS: Mutex<Vec<StoppedSession>> = Mutex::new(Vec::new());
@@ -264,6 +266,7 @@ where
             uuid::Uuid::new_v4()
         ),
         queued: false,
+        queue_error: None,
     });
     if needs_queue {
         save_receipt(&receipt, &delivery)?;
@@ -291,9 +294,15 @@ where
                 let _ = fs::remove_file(&receipt);
                 return Err(format!("Could not run Codex CLI: {error}"));
             }
-            // The CLI may have persisted the message before failing or timing out.
-            // Keep the receipt and try opening the chat without submitting again.
-            _ => {}
+            // Keep only safe process diagnostics, not potentially sensitive CLI output.
+            Ok(Ok(output)) => {
+                delivery.queue_error = Some(format!("Codex CLI exited with {}", output.status));
+                save_receipt(&receipt, &delivery)?;
+            }
+            Err(_) => {
+                delivery.queue_error = Some("Codex CLI timed out after 10 seconds".into());
+                save_receipt(&receipt, &delivery)?;
+            }
         }
     }
 
@@ -309,7 +318,7 @@ where
             return Err(if delivery.queued {
                 "Continuation is queued, but its turn was not confirmed. Open this chat in Codex to inspect its queue; retrying will not submit another message".into()
             } else {
-                format!("Queue delivery is unknown because the CLI failed or timed out. Open this chat and inspect its queue. If the recovery message is absent, remove {} before retrying; automatic resubmission is suppressed to avoid duplicates", receipt.display())
+                format!("Queue delivery is unknown. {}. Open this chat and inspect its queue. If the recovery message is absent, remove {} before retrying; automatic resubmission is suppressed to avoid duplicates", delivery.queue_error.as_deref().unwrap_or("The previous attempt did not retain its CLI failure details"), receipt.display())
             });
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -443,7 +452,18 @@ fn session_id(path: &Path) -> Option<String> {
     if value.get("type")?.as_str()? != "session_meta" {
         return None;
     }
-    let id = value.get("payload")?.get("id")?.as_str()?;
+    let payload = value.get("payload")?;
+    // Internal agents have their own rollouts but are controlled by their parent chat.
+    if payload.get("source").is_some_and(|source| {
+        source.get("subagent").is_some() || source.as_str() == Some("subagent")
+    }) || payload
+        .get("agent_path")
+        .and_then(Value::as_str)
+        .is_some_and(|path| path != "/root" && !path.is_empty())
+    {
+        return None;
+    }
+    let id = payload.get("id")?.as_str()?;
     uuid::Uuid::parse_str(id).ok()?;
     Some(id.to_owned())
 }
@@ -530,6 +550,67 @@ mod tests {
             "message": "You've hit your usage limit. Review your workspace's usage settings to continue.",
             "codex_error_info": "usage_limit_exceeded"
         }}))
+    }
+
+    #[test]
+    fn recovery_excludes_internal_agents_but_keeps_user_forks() {
+        let _home = crate::auth::test_support::TestHome::new();
+        let root = crate::auth::get_codex_home().unwrap().join("sessions");
+        std::fs::create_dir_all(&root).unwrap();
+        for (n, extra, expected) in [
+            (
+                0,
+                json!({"source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent"}}}}),
+                false,
+            ),
+            (1, json!({"source":"subagent"}), false),
+            (
+                2,
+                json!({"source":"cli", "agent_path":"/root/verify_auto_switch"}),
+                false,
+            ),
+            (3, json!({"source":"cli", "agent_path":"/root"}), true),
+            (
+                4,
+                json!({"source":"cli", "forked_from_id":"parent", "parent_thread_id":"parent"}),
+                true,
+            ),
+            (5, json!({}), true),
+        ] {
+            let id = uuid::Uuid::new_v4().to_string();
+            let mut payload = extra;
+            payload["id"] = json!(id);
+            let path = root.join(format!("{n}.jsonl"));
+            std::fs::write(
+                &path,
+                format!(
+                    "{}\n{}\n",
+                    json!({"type":"session_meta","payload":payload}),
+                    quota_failure()
+                ),
+            )
+            .unwrap();
+            assert_eq!(super::session_id(&path).is_some(), expected);
+        }
+        assert_eq!(super::find_quota_stopped_sessions().len(), 3);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_queue_preserves_exit_status_without_cli_output_on_retry() {
+        let (_fixture, session, home, binary) = delivery_fixture();
+        std::fs::write(&binary, "#!/bin/sh\necho private-token >&2\nexit 7\n").unwrap();
+        for _ in 0..2 {
+            let error = super::resume_session(&session, &home, &binary, |_| async { Ok(()) }, 0)
+                .await
+                .unwrap_err();
+            assert!(error.contains("exit status: 7"));
+            assert!(!error.contains("private-token"));
+        }
+        let legacy: super::RecoveryReceipt =
+            serde_json::from_value(json!({"offset":0,"prompt":"Continue", "queued":false}))
+                .unwrap();
+        assert!(legacy.queue_error.is_none());
     }
 
     #[test]
@@ -764,6 +845,7 @@ mod tests {
             offset: 0,
             prompt: "unique recovery message".into(),
             queued: true,
+            queue_error: None,
         };
         for records in [
             vec![event(json!({"type":"task_started","turn_id":"other"})), event(json!({"type":"user_message","message":"Please list the workspace files instead."}))],
@@ -795,10 +877,12 @@ mod tests {
         assert!(error.contains("delivery is unknown"));
         assert!(!error.contains("is queued"));
         assert!(error.contains("inspect its queue"));
+        assert!(error.contains("timed out after 10 seconds"));
         let error = super::resume_session(&session, &home, &binary, |_| async { Ok(()) }, 0)
             .await
             .unwrap_err();
         assert!(error.contains("delivery is unknown"));
+        assert!(error.contains("timed out after 10 seconds"));
         assert_eq!(
             std::fs::read_to_string(home.join("attempts")).unwrap(),
             "attempt\n"
