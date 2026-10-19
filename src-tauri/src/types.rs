@@ -268,6 +268,7 @@ pub enum AuthData {
 
 #[derive(Debug, Clone, Default)]
 pub struct ChatGptIdTokenClaims {
+    pub subject: Option<String>,
     pub email: Option<String>,
     pub plan_type: Option<String>,
     pub account_id: Option<String>,
@@ -293,6 +294,7 @@ pub fn parse_chatgpt_id_token_claims(id_token: &str) -> ChatGptIdTokenClaims {
     let auth_claims = json.get("https://api.openai.com/auth");
 
     ChatGptIdTokenClaims {
+        subject: json.get("sub").and_then(|v| v.as_str()).map(String::from),
         email: json.get("email").and_then(|v| v.as_str()).map(String::from),
         plan_type: auth_claims
             .and_then(|auth| auth.get("chatgpt_plan_type"))
