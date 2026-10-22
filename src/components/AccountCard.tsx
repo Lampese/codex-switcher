@@ -261,7 +261,8 @@ export function AccountCard({
 
   return (
     <div
-      className={`relative rounded-xl border p-5 transition-all duration-200 ${
+      data-active={account.is_active}
+      className={`account-card relative rounded-xl border p-5 transition-all duration-200 ${
         account.is_active
           ? "bg-white dark:bg-gray-900 border-emerald-400 shadow-sm"
           : "bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600"
