@@ -319,9 +319,12 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, store: &AccountsStore) -> tauri::R
 
     if store.accounts.is_empty() {
         menu.append(
-            &MenuItemBuilder::with_id("empty", "No accounts configured")
-                .enabled(false)
-                .build(app)?,
+            &MenuItemBuilder::with_id(
+                "empty",
+                crate::commands::language::text("No accounts configured", "Eklenmiş hesap yok"),
+            )
+            .enabled(false)
+            .build(app)?,
         )?;
     } else {
         for account in &store.accounts {
@@ -339,8 +342,20 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, store: &AccountsStore) -> tauri::R
     append_dock_settings_menu(app, &menu)?;
     #[cfg(target_os = "macos")]
     menu.append(&PredefinedMenuItem::separator(app)?)?;
-    menu.append(&MenuItemBuilder::with_id(OPEN_ITEM_ID, "Open Codex Switcher").build(app)?)?;
-    menu.append(&MenuItemBuilder::with_id(QUIT_ITEM_ID, "Quit").build(app)?)?;
+    menu.append(
+        &MenuItemBuilder::with_id(
+            OPEN_ITEM_ID,
+            crate::commands::language::text("Open Codex Switcher", "Codex Switcher’ı aç"),
+        )
+        .build(app)?,
+    )?;
+    menu.append(
+        &MenuItemBuilder::with_id(
+            QUIT_ITEM_ID,
+            crate::commands::language::text("Quit", "Çıkış"),
+        )
+        .build(app)?,
+    )?;
     Ok(menu)
 }
 
@@ -349,17 +364,21 @@ fn append_dock_settings_menu<R: Runtime>(app: &AppHandle<R>, menu: &Menu<R>) -> 
     let settings = load_app_settings().unwrap_or_default();
     let dock_settings = Submenu::with_items(
         app,
-        "Dock Icon",
+        crate::commands::language::text("Dock Icon", "Dock simgesi"),
         true,
         &[
-            &CheckMenuItemBuilder::with_id(crate::app_menu::DOCK_SHOW_IN_DOCK_ID, "Show in Dock")
-                .checked(settings.dock_display_mode == crate::app_menu::DockDisplayMode::ShowInDock)
-                .build(app)?,
-            &CheckMenuItemBuilder::with_id(crate::app_menu::DOCK_MENU_BAR_ONLY_ID, "Menu Bar Only")
-                .checked(
-                    settings.dock_display_mode == crate::app_menu::DockDisplayMode::MenuBarOnly,
-                )
-                .build(app)?,
+            &CheckMenuItemBuilder::with_id(
+                crate::app_menu::DOCK_SHOW_IN_DOCK_ID,
+                crate::commands::language::text("Show in Dock", "Dock’ta göster"),
+            )
+            .checked(settings.dock_display_mode == crate::app_menu::DockDisplayMode::ShowInDock)
+            .build(app)?,
+            &CheckMenuItemBuilder::with_id(
+                crate::app_menu::DOCK_MENU_BAR_ONLY_ID,
+                crate::commands::language::text("Menu Bar Only", "Yalnız menü çubuğu"),
+            )
+            .checked(settings.dock_display_mode == crate::app_menu::DockDisplayMode::MenuBarOnly)
+            .build(app)?,
         ],
     )?;
     menu.append(&dock_settings)?;

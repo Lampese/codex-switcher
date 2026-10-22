@@ -221,13 +221,13 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
 
     let tray_settings = Submenu::with_items(
         app,
-        "Tray",
+        crate::commands::language::text("Tray", "Menü çubuğu"),
         true,
         &[
             &CheckMenuItem::with_id(
                 app,
                 TRAY_ICON_AND_SESSION_ID,
-                "Icon + Session",
+                crate::commands::language::text("Icon + Session", "Simge + oturum"),
                 true,
                 settings.tray_display_mode == TrayDisplayMode::IconAndSession,
                 None::<&str>,
@@ -235,7 +235,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
             &CheckMenuItem::with_id(
                 app,
                 TRAY_ACTIVE_USAGE_TEXT_ID,
-                "Hourly + Weekly",
+                crate::commands::language::text("Hourly + Weekly", "Saatlik + haftalık"),
                 true,
                 settings.tray_display_mode == TrayDisplayMode::ActiveUsageText,
                 None::<&str>,
@@ -243,7 +243,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
             &CheckMenuItem::with_id(
                 app,
                 TRAY_HIDDEN_ID,
-                "Hidden",
+                crate::commands::language::text("Hidden", "Gizli"),
                 true,
                 settings.tray_display_mode == TrayDisplayMode::Hidden,
                 None::<&str>,
@@ -254,13 +254,13 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
     #[cfg(target_os = "macos")]
     let dock_settings = Submenu::with_items(
         app,
-        "Dock Icon",
+        crate::commands::language::text("Dock Icon", "Dock simgesi"),
         true,
         &[
             &CheckMenuItem::with_id(
                 app,
                 DOCK_SHOW_IN_DOCK_ID,
-                "Show in Dock",
+                crate::commands::language::text("Show in Dock", "Dock’ta göster"),
                 true,
                 settings.dock_display_mode == DockDisplayMode::ShowInDock,
                 None::<&str>,
@@ -268,7 +268,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
             &CheckMenuItem::with_id(
                 app,
                 DOCK_MENU_BAR_ONLY_ID,
-                "Menu Bar Only",
+                crate::commands::language::text("Menu Bar Only", "Yalnız menü çubuğu"),
                 true,
                 settings.dock_display_mode == DockDisplayMode::MenuBarOnly,
                 None::<&str>,
@@ -279,7 +279,10 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
     let desktop_reopen_settings = MenuItem::with_id(
         app,
         DESKTOP_REOPEN_SETTINGS_ID,
-        "Reopen Codex after force close...",
+        crate::commands::language::text(
+            "Reopen Codex after force close...",
+            "Zorla kapattıktan sonra Codex’i yeniden aç...",
+        ),
         cfg!(any(target_os = "macos", windows)),
         None::<&str>,
     )?;
@@ -287,7 +290,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
     #[cfg(target_os = "macos")]
     let settings_menu = Submenu::with_items(
         app,
-        "Settings",
+        crate::commands::language::text("Settings", "Ayarlar"),
         true,
         &[&tray_settings, &dock_settings, &desktop_reopen_settings],
     )?;
@@ -295,25 +298,49 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
     #[cfg(not(target_os = "macos"))]
     let settings_menu = Submenu::with_items(
         app,
-        "Settings",
+        crate::commands::language::text("Settings", "Ayarlar"),
         true,
         &[&tray_settings, &desktop_reopen_settings],
     )?;
 
     let window_menu = Submenu::with_items(
         app,
-        "Window",
+        crate::commands::language::text("Window", "Pencere"),
         true,
         &[
-            &PredefinedMenuItem::minimize(app, None)?,
-            &PredefinedMenuItem::maximize(app, None)?,
+            &PredefinedMenuItem::minimize(
+                app,
+                Some(crate::commands::language::text(
+                    "Minimize",
+                    "Simge durumuna küçült",
+                )),
+            )?,
+            &PredefinedMenuItem::maximize(
+                app,
+                Some(if cfg!(target_os = "macos") {
+                    crate::commands::language::text("Zoom", "Yakınlaştır")
+                } else {
+                    crate::commands::language::text("Maximize", "Ekranı kapla")
+                }),
+            )?,
             #[cfg(target_os = "macos")]
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::close_window(app, None)?,
+            &PredefinedMenuItem::close_window(
+                app,
+                Some(crate::commands::language::text(
+                    "Close Window",
+                    "Pencereyi kapat",
+                )),
+            )?,
         ],
     )?;
 
-    let help_menu = Submenu::with_items(app, "Help", true, &[])?;
+    let help_menu = Submenu::with_items(
+        app,
+        crate::commands::language::text("Help", "Yardım"),
+        true,
+        &[],
+    )?;
 
     Menu::with_items(
         app,
@@ -324,16 +351,41 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
                 pkg_info.name.clone(),
                 true,
                 &[
-                    &PredefinedMenuItem::about(app, None, Some(about_metadata))?,
+                    &PredefinedMenuItem::about(
+                        app,
+                        Some(crate::commands::language::text(
+                            "About Codex Switcher",
+                            "Codex Switcher hakkında",
+                        )),
+                        Some(about_metadata),
+                    )?,
                     &PredefinedMenuItem::separator(app)?,
                     &settings_menu,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::services(app, None)?,
+                    &PredefinedMenuItem::services(
+                        app,
+                        Some(crate::commands::language::text("Services", "Servisler")),
+                    )?,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::hide(app, None)?,
-                    &PredefinedMenuItem::hide_others(app, None)?,
+                    &PredefinedMenuItem::hide(
+                        app,
+                        Some(crate::commands::language::text(
+                            "Hide Codex Switcher",
+                            "Codex Switcher’ı gizle",
+                        )),
+                    )?,
+                    &PredefinedMenuItem::hide_others(
+                        app,
+                        Some(crate::commands::language::text(
+                            "Hide Others",
+                            "Diğerlerini gizle",
+                        )),
+                    )?,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::quit(app, None)?,
+                    &PredefinedMenuItem::quit(
+                        app,
+                        Some(crate::commands::language::text("Quit", "Çıkış")),
+                    )?,
                 ],
             )?,
             #[cfg(not(any(
@@ -345,34 +397,67 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, settings: &AppSettings) -> tauri::
             )))]
             &Submenu::with_items(
                 app,
-                "File",
+                crate::commands::language::text("File", "Dosya"),
                 true,
                 &[
-                    &PredefinedMenuItem::close_window(app, None)?,
+                    &PredefinedMenuItem::close_window(
+                        app,
+                        Some(crate::commands::language::text(
+                            "Close Window",
+                            "Pencereyi kapat",
+                        )),
+                    )?,
                     #[cfg(not(target_os = "macos"))]
-                    &PredefinedMenuItem::quit(app, None)?,
+                    &PredefinedMenuItem::quit(
+                        app,
+                        Some(crate::commands::language::text("Quit", "Çıkış")),
+                    )?,
                 ],
             )?,
             &Submenu::with_items(
                 app,
-                "Edit",
+                crate::commands::language::text("Edit", "Düzen"),
                 true,
                 &[
-                    &PredefinedMenuItem::undo(app, None)?,
-                    &PredefinedMenuItem::redo(app, None)?,
+                    &PredefinedMenuItem::undo(
+                        app,
+                        Some(crate::commands::language::text("Undo", "Geri al")),
+                    )?,
+                    &PredefinedMenuItem::redo(
+                        app,
+                        Some(crate::commands::language::text("Redo", "Yinele")),
+                    )?,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::cut(app, None)?,
-                    &PredefinedMenuItem::copy(app, None)?,
-                    &PredefinedMenuItem::paste(app, None)?,
-                    &PredefinedMenuItem::select_all(app, None)?,
+                    &PredefinedMenuItem::cut(
+                        app,
+                        Some(crate::commands::language::text("Cut", "Kes")),
+                    )?,
+                    &PredefinedMenuItem::copy(
+                        app,
+                        Some(crate::commands::language::text("Copy", "Kopyala")),
+                    )?,
+                    &PredefinedMenuItem::paste(
+                        app,
+                        Some(crate::commands::language::text("Paste", "Yapıştır")),
+                    )?,
+                    &PredefinedMenuItem::select_all(
+                        app,
+                        Some(crate::commands::language::text("Select All", "Tümünü seç")),
+                    )?,
                 ],
             )?,
             #[cfg(target_os = "macos")]
             &Submenu::with_items(
                 app,
-                "View",
+                crate::commands::language::text("View", "Görünüm"),
                 true,
-                &[&PredefinedMenuItem::fullscreen(app, None)?],
+                &[&PredefinedMenuItem::fullscreen(
+                    app,
+                    Some(crate::commands::language::text(
+                        "Enter Full Screen",
+                        "Tam ekrana geç",
+                    )),
+                )?],
             )?,
             #[cfg(not(target_os = "macos"))]
             &settings_menu,
