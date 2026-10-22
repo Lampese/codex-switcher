@@ -1348,10 +1348,10 @@ function App() {
     visibleOtherAccounts.length === 0;
 
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
+    <div className="app-shell min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
       <WindowResizeBorders isMaximized={isWindowMaximized} />
-      <header className="sticky top-0 z-40 border-b border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-900">
-        <div className="flex h-9 items-center bg-white px-3 dark:bg-gray-900">
+      <header className="app-header sticky top-0 z-40 border-b border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-900">
+        <div className="window-titlebar flex h-9 items-center bg-white px-3 dark:bg-gray-900">
           <div
             onMouseDown={handleTitlebarDrag}
             onDoubleClick={handleTitlebarDoubleClick}
@@ -1403,7 +1403,7 @@ function App() {
           )}
         </div>
 
-        <div className="max-w-5xl mx-auto px-6 py-4">
+        <div className="app-toolbar max-w-5xl mx-auto px-6 py-4">
           <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_max-content] md:items-center md:gap-4">
             <div className="flex items-center gap-3 min-w-0 flex-1">
               <div className="min-w-0">
@@ -1592,13 +1592,13 @@ function App() {
                     <button
                       onClick={() => {
                         setIsNavMenuOpen(false);
-                        setThemeMode((prev) => (prev === "dark" ? "light" : "dark"));
+                        setIsSettingsOpen(true);
                       }}
                       className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 dark:text-white dark:hover:bg-neutral-900"
                     >
                       <span>Appearance</span>
                       <span className="text-[11px] text-gray-400 dark:text-gray-500">
-                        {themeMode === "dark" ? "☾ Dark" : "☀ Light"}
+                        Themes
                       </span>
                     </button>
                   </div>
@@ -1989,6 +1989,8 @@ function App() {
 
       {isSettingsOpen && (
         <SettingsModal
+          themeMode={themeMode}
+          onThemeChange={setThemeMode}
           reopenPreference={desktopReopen.preference}
           onReopenPreferenceChange={saveDesktopReopenPreference}
           closePreference={codexClose.preference}

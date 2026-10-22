@@ -299,9 +299,7 @@ function TrayMenu() {
       });
       unlistenChanged = await listen(ACCOUNTS_CHANGED_EVENT, () => void load());
       unlistenTheme = await listen<ThemeMode>(THEME_CHANGED_EVENT, ({ payload }) => {
-        if (payload === "light" || payload === "dark") {
-          applyTheme(payload);
-        }
+        if (typeof payload === "string") applyTheme(payload);
       });
       unlistenAutoWarmup = await listen<boolean>(
         AUTO_WARMUP_ALL_CHANGED_EVENT,

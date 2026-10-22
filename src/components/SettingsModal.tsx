@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { DesktopReopenPreference } from "../lib/desktopReopen";
 import type { CodexClosePreference } from "../lib/codexClosePreference";
 import { invokeBackend, isTauriRuntime } from "../lib/platform";
+import { THEMES, getThemeAppearance, normalizeTheme, type ThemeMode } from "../lib/theme";
 import type { DockDisplayMode } from "../types";
 
 type TrayDisplayMode = "icon_and_session" | "active_usage_text" | "hidden";
@@ -11,6 +12,8 @@ interface DisplaySettings {
 }
 
 interface SettingsModalProps {
+  themeMode: ThemeMode;
+  onThemeChange: (value: ThemeMode) => void;
   reopenPreference: DesktopReopenPreference;
   onReopenPreferenceChange: (value: DesktopReopenPreference) => void;
   closePreference: CodexClosePreference;
@@ -19,6 +22,8 @@ interface SettingsModalProps {
 }
 
 export function SettingsModal({
+  themeMode,
+  onThemeChange,
   reopenPreference,
   onReopenPreferenceChange,
   closePreference,
@@ -30,6 +35,7 @@ export function SettingsModal({
   const [error, setError] = useState<string | null>(null);
   const requestId = useRef(0);
   const desktop = isTauriRuntime();
+  const appearance = getThemeAppearance(themeMode);
   const loadDisplaySettings = useCallback(async () => {
     const currentRequest = ++requestId.current;
     try {
@@ -85,11 +91,34 @@ export function SettingsModal({
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-      <div role="dialog" aria-modal="true" aria-labelledby="settings-title" className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-md mx-4 shadow-xl">
+      <div role="dialog" aria-modal="true" aria-labelledby="settings-title" className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-lg mx-4 shadow-xl">
         <div className="p-5 border-b border-gray-100 dark:border-gray-800">
           <h2 id="settings-title" className="text-lg font-semibold text-gray-900 dark:text-gray-100">Settings</h2>
         </div>
-        <div className="p-5 space-y-3 max-h-[65vh] overflow-y-auto">
+        <div className="p-5 space-y-3 max-h-[70vh] overflow-y-auto">
+          <fieldset className="theme-picker">
+            <legend className="text-sm font-medium text-gray-900 dark:text-gray-100">Theme</legend>
+            <div className="theme-options">
+              {THEMES.map((theme) => (
+                <label key={theme.id} className="theme-option" data-selected={normalizeTheme(themeMode) === theme.id}>
+                  <input type="radio" name="interface-theme" value={theme.id} checked={normalizeTheme(themeMode) === theme.id} onChange={() => onThemeChange(`${theme.id}:${appearance}`)} />
+                  <span className="theme-preview" data-preview={theme.id} data-appearance={appearance} aria-hidden="true"><span /><i /><i /></span>
+                  <span className="theme-option-copy"><strong>{theme.name}</strong><span>{theme.description}</span></span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+          <fieldset className="appearance-picker">
+            <legend className="text-sm font-medium text-gray-900 dark:text-gray-100">Color mode</legend>
+            <div className="appearance-options">
+              {(["light", "dark"] as const).map((mode) => (
+                <label key={mode} className="appearance-option" data-selected={appearance === mode}>
+                  <input type="radio" name="interface-appearance" value={mode} checked={appearance === mode} onChange={() => onThemeChange(`${normalizeTheme(themeMode)}:${mode}`)} />
+                  <span>{mode === "light" ? "Light" : "Dark"}</span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
           {desktop && (
             <>
               {displaySettings ? (
