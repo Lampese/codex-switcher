@@ -42,6 +42,7 @@ import {
   type AutoWarmupWindowKind,
 } from "./lib/autoWarmupPolicy";
 import { getTauriWindow } from "./lib/tauriWindow";
+import { localizeMessage, useI18n } from "./lib/i18n";
 import "./App.css";
 
 const AUTO_WARMUP_CHECK_INTERVAL_MS = 30 * 1000;
@@ -165,6 +166,7 @@ function matchesAccountSearch(
 }
 
 function App() {
+  const { language, t } = useI18n();
   const {
     accounts,
     loading,
@@ -557,7 +559,7 @@ function App() {
       setSwitchingId(accountId);
       const latestProcessInfo = await checkProcesses();
       if (!latestProcessInfo) {
-        showWarmupToast("Could not check running Codex processes. Try again.", true);
+        showWarmupToast(t("Could not check running Codex processes. Try again."), true);
         return;
       }
       if (!latestProcessInfo.can_switch) {
@@ -574,7 +576,7 @@ function App() {
         setPendingSwitchAccountId(accountId);
         setForceCloseConfirmOpen(true);
       } else {
-        showWarmupToast(`Switch failed: ${formatWarmupError(err)}`, true);
+        showWarmupToast(t("Switch failed: {error}", { error: formatWarmupError(err) }), true);
       }
     } finally {
       setSwitchingId(null);
@@ -615,15 +617,15 @@ function App() {
   }, []);
 
   const formatWarmupError = useCallback((err: unknown) => {
-    if (!err) return "Unknown error";
-    if (err instanceof Error && err.message) return err.message;
-    if (typeof err === "string") return err;
+    if (!err) return t("Unknown error");
+    if (err instanceof Error && err.message) return localizeMessage(err.message);
+    if (typeof err === "string") return localizeMessage(err);
     try {
       return JSON.stringify(err);
     } catch {
-      return "Unknown error";
+      return t("Unknown error");
     }
-  }, []);
+  }, [t]);
 
   const markSuccessfulWarmup = useCallback(
     (accountId: string, timestamp = Date.now(), window?: AutoWarmupWindow) => {
@@ -662,14 +664,14 @@ function App() {
     try {
       desktopReopen.savePreference(value);
     } catch (err) {
-      showWarmupToast(`Could not save preference: ${formatWarmupError(err)}`, true);
+      showWarmupToast(t("Could not save preference: {error}", { error: formatWarmupError(err) }), true);
     }
   };
   const saveCodexClosePreference = (value: CodexClosePreference) => {
     try {
       codexClose.savePreference(value);
     } catch (err) {
-      showWarmupToast(`Could not save close preference: ${formatWarmupError(err)}`, true);
+      showWarmupToast(t("Could not save close preference: {error}", { error: formatWarmupError(err) }), true);
     }
   };
 
@@ -700,10 +702,10 @@ function App() {
               setSwitchingId(accountId);
               await switchAccount(accountId);
               setPendingSwitchAccountId(null);
-              showWarmupToast("Switched account from tray.");
+              showWarmupToast(t("Switched account from tray."));
             } catch (err) {
               console.error("Failed to retry tray account switch:", err);
-              showWarmupToast(`Switch failed: ${formatWarmupError(err)}`, true);
+              showWarmupToast(t("Switch failed: {error}", { error: formatWarmupError(err) }), true);
             } finally {
               setSwitchingId(null);
             }
@@ -711,7 +713,7 @@ function App() {
           }
 
           showWarmupToast(
-            event.payload?.error || "Account switch was blocked.",
+            event.payload?.error ? localizeMessage(event.payload.error) : t("Account switch was blocked."),
             true
           );
         }
@@ -755,7 +757,7 @@ function App() {
         setCloseBehaviorPromptOpen(false);
       } catch (err) {
         console.error("Failed to complete close behavior:", err);
-        showWarmupToast(`Close failed: ${formatWarmupError(err)}`, true);
+        showWarmupToast(t("Close failed: {error}", { error: formatWarmupError(err) }), true);
       } finally {
         setIsCompletingCloseBehavior(false);
       }
@@ -773,12 +775,12 @@ function App() {
       try {
         desktopReopen.rememberSelection();
       } catch (err) {
-        showWarmupToast(`Could not save preference: ${formatWarmupError(err)}`, true);
+        showWarmupToast(t("Could not save preference: {error}", { error: formatWarmupError(err) }), true);
       }
       try {
         codexClose.rememberSelection();
       } catch (err) {
-        showWarmupToast(`Could not save close preference: ${formatWarmupError(err)}`, true);
+        showWarmupToast(t("Could not save close preference: {error}", { error: formatWarmupError(err) }), true);
       }
       const result = await closeCodexProcesses(shouldReopen, codexClose.forceClose);
       if (!result?.processInfo?.can_switch) return;
@@ -788,23 +790,23 @@ function App() {
         accountId ? async () => {
           setSwitchingId(accountId);
           await switchAccount(accountId);
-          showWarmupToast(`Switched account after ${codexClose.forceClose ? "force closing" : "closing"} Codex.`);
+          showWarmupToast(codexClose.forceClose ? t("Switched account after force closing Codex.") : t("Switched account after closing Codex."));
         } : null,
         async (token) => {
           try {
             await invokeBackend("reopen_closed_codex_desktop", { token });
-            showWarmupToast(accountId ? "Account switched. Codex desktop reopened." : "Codex desktop reopened.");
+            showWarmupToast(accountId ? t("Account switched. Codex desktop reopened.") : t("Codex desktop reopened."));
           } catch (err) {
-            showWarmupToast(`Codex closed${accountId ? " and account switched" : ""}, but reopening failed: ${formatWarmupError(err)}`, true);
+            showWarmupToast(t(accountId ? "Codex closed and account switched, but reopening failed: {error}" : "Codex closed, but reopening failed: {error}", { error: formatWarmupError(err) }), true);
           }
         },
       );
       if (shouldReopen && !result.reopenToken) {
-        showWarmupToast("No closed desktop app could be identified for reopening. Open Codex manually.", true);
+        showWarmupToast(t("No closed desktop app could be identified for reopening. Open Codex manually."), true);
       }
     } catch (err) {
       console.error("Failed to switch account after closing Codex:", err);
-      showWarmupToast(`Switch failed after closing Codex: ${formatWarmupError(err)}`, true);
+      showWarmupToast(t("Switch failed after closing Codex: {error}", { error: formatWarmupError(err) }), true);
     } finally {
       setPendingSwitchAccountId(null);
       setSwitchingId(null);
@@ -819,11 +821,11 @@ function App() {
       setWarmingUpId(accountId);
       await warmupAccount(accountId);
       markSuccessfulWarmup(accountId);
-      showWarmupToast(`Warm-up sent for ${accountName}`);
+      showWarmupToast(t("Warm-up sent for {name}", { name: accountName }));
     } catch (err) {
       console.error("Failed to warm up account:", err);
       showWarmupToast(
-        `Warm-up failed for ${accountName}: ${formatWarmupError(err)}`,
+        t("Warm-up failed for {name}: {error}", { name: accountName, error: formatWarmupError(err) }),
         true
       );
     } finally {
@@ -836,7 +838,7 @@ function App() {
       setIsWarmingAll(true);
       const summary = await warmupAllAccounts();
       if (summary.total_accounts === 0) {
-        showWarmupToast("No accounts available for warm-up", true);
+        showWarmupToast(t("No accounts available for warm-up"), true);
         return;
       }
 
@@ -850,19 +852,19 @@ function App() {
 
       if (summary.failed_account_ids.length === 0) {
         showWarmupToast(
-          `Warm-up sent for all ${summary.warmed_accounts} account${
-            summary.warmed_accounts === 1 ? "" : "s"
-          }`
+          summary.warmed_accounts === 1
+            ? t("Warm-up sent for all 1 account")
+            : t("Warm-up sent for all {count} accounts", { count: summary.warmed_accounts })
         );
       } else {
         showWarmupToast(
-          `Warmed ${summary.warmed_accounts}/${summary.total_accounts}. Failed: ${summary.failed_account_ids.length}`,
+          t("Warmed {warmed}/{total}. Failed: {failed}", { warmed: summary.warmed_accounts, total: summary.total_accounts, failed: summary.failed_account_ids.length }),
           true
         );
       }
     } catch (err) {
       console.error("Failed to warm up all accounts:", err);
-      showWarmupToast(`Warm-up all failed: ${formatWarmupError(err)}`, true);
+      showWarmupToast(t("Warm-up all failed: {error}", { error: formatWarmupError(err) }), true);
     } finally {
       setIsWarmingAll(false);
     }
@@ -890,9 +892,9 @@ function App() {
   const formatWindowDuration = (minutes: number | null | undefined): string => {
     if (!minutes || minutes <= 0) return "";
     if (minutes < 24 * 60) {
-      return `${Math.ceil(minutes / 60)}h`;
+      return t("{count}h", { count: Math.ceil(minutes / 60) });
     }
-    return `${Math.ceil(minutes / (24 * 60))}d`;
+    return t("{count}d", { count: Math.ceil(minutes / (24 * 60)) });
   };
 
   const getAutoWarmupLabel = useCallback(
@@ -901,33 +903,35 @@ function App() {
       isEnabled: boolean,
       isRunning: boolean
     ) => {
-      if (isRunning) return "Warming...";
-      if (!isEnabled) return "off";
-      if (!usage || usage.error) return "on";
+      if (isRunning) return t("Warming...");
+      if (!isEnabled) return t("off");
+      if (!usage || usage.error) return t("on");
 
       const windowKind = getAutoWarmupWindowKind(usage);
       if (windowKind === "session" && isLimitFull(usage.secondary_used_percent)) {
         const weeklyDuration = formatWindowDuration(usage.secondary_window_minutes);
-        return weeklyDuration ? `Waiting ${weeklyDuration}` : "Waiting reset";
+        return weeklyDuration ? t("Waiting {duration}", { duration: weeklyDuration }) : t("Waiting reset");
       }
       if (windowKind === "session") {
-        return formatWindowDuration(usage.primary_window_minutes) || "5h";
+        return formatWindowDuration(usage.primary_window_minutes) || t("{count}h", { count: 5 });
       }
       if (windowKind === "weekly") {
-        return formatWindowDuration(usage.secondary_window_minutes) || "7d";
+        return formatWindowDuration(usage.secondary_window_minutes) || t("{count}d", { count: 7 });
       }
 
-      return "on";
+      return t("on");
     },
-    []
+    // formatWindowDuration is recreated each render but only depends on t.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [t]
   );
 
   const headerAutoWarmupLabel = useMemo(() => {
-    if (autoWarmupRunningIds.size > 0) return "Auto warming...";
+    if (autoWarmupRunningIds.size > 0) return t("Auto warming...");
     return autoWarmupAllEnabled || autoWarmupAccountIds.size > 0
-      ? "Auto: on"
-      : "Auto: off";
-  }, [autoWarmupAccountIds.size, autoWarmupAllEnabled, autoWarmupRunningIds]);
+      ? t("Auto: on")
+      : t("Auto: off");
+  }, [autoWarmupAccountIds.size, autoWarmupAllEnabled, autoWarmupRunningIds, language, t]);
 
   const timedWarmupTargetsReady = useMemo(
     () =>
@@ -965,13 +969,12 @@ function App() {
 
         await warmupAccount(accountId);
         markSuccessfulWarmup(accountId, Date.now(), window);
-        const modeLabel = window.kind === "session" ? "5h" : "weekly";
-        showWarmupToast(`Auto ${modeLabel} warm-up sent for ${accountName}`);
+        showWarmupToast(window.kind === "session" ? t("Auto 5h warm-up sent for {name}", { name: accountName }) : t("Auto weekly warm-up sent for {name}", { name: accountName }));
       } catch (err) {
         console.error("Auto warm-up failed:", err);
         backOffAutoWarmupRetry(accountId);
         showWarmupToast(
-          `Auto warm-up failed for ${accountName}: ${formatWarmupError(err)}`,
+          t("Auto warm-up failed for {name}: {error}", { name: accountName, error: formatWarmupError(err) }),
           true
         );
       } finally {
@@ -1047,10 +1050,10 @@ function App() {
 
       if (failed === 0) {
         showWarmupToast(
-          `Timed warm-up sent for ${warmed} account${warmed === 1 ? "" : "s"}`
+          warmed === 1 ? t("Timed warm-up sent for 1 account") : t("Timed warm-up sent for {count} accounts", { count: warmed })
         );
       } else {
-        showWarmupToast(`Timed warm-up: ${warmed} ok, ${failed} failed`, true);
+        showWarmupToast(t("Timed warm-up: {warmed} ok, {failed} failed", { warmed, failed }), true);
       }
     } finally {
       setTimedWarmupRunning(false);
@@ -1117,8 +1120,8 @@ function App() {
   }, []);
 
   const timedWarmupLabel = useMemo(() => {
-    if (timedWarmupRunning) return "Timed warming...";
-    if (!timedWarmupEnabled || timedWarmupTimes.length === 0) return "Timed: off";
+    if (timedWarmupRunning) return t("Timed warming...");
+    if (!timedWarmupEnabled || timedWarmupTimes.length === 0) return t("Timed: off");
 
     const now = new Date();
     const nowMinutes = now.getHours() * 60 + now.getMinutes();
@@ -1126,8 +1129,8 @@ function App() {
       const [hours, minutes] = time.split(":").map(Number);
       return hours * 60 + minutes > nowMinutes;
     });
-    return `Timed: ${upcoming ?? timedWarmupTimes[0]}`;
-  }, [timedWarmupEnabled, timedWarmupRunning, timedWarmupTimes]);
+    return t("Timed: {time}", { time: upcoming ?? timedWarmupTimes[0] });
+  }, [timedWarmupEnabled, timedWarmupRunning, timedWarmupTimes, language, t]);
 
   const handleExportSlimText = async () => {
     setConfigModalMode("slim_export");
@@ -1140,12 +1143,12 @@ function App() {
       setIsExportingSlim(true);
       const payload = await exportAccountsSlimText();
       setConfigPayload(payload);
-      showWarmupToast(`Slim text exported (${accounts.length} accounts).`);
+      showWarmupToast(t("Slim text exported ({count} accounts).", { count: accounts.length }));
     } catch (err) {
       console.error("Failed to export slim text:", err);
       const message = err instanceof Error ? err.message : String(err);
       setConfigModalError(message);
-      showWarmupToast("Slim export failed", true);
+      showWarmupToast(t("Slim export failed"), true);
     } finally {
       setIsExportingSlim(false);
     }
@@ -1161,7 +1164,7 @@ function App() {
 
   const handleImportSlimText = async () => {
     if (!configPayload.trim()) {
-      setConfigModalError("Please paste the slim text string first.");
+      setConfigModalError(t("Please paste the slim text string first."));
       return;
     }
 
@@ -1172,13 +1175,13 @@ function App() {
       setMaskedAccounts(new Set());
       setIsConfigModalOpen(false);
       showWarmupToast(
-        `Imported ${summary.imported_count}, skipped ${summary.skipped_count} (total ${summary.total_in_payload})`
+        t("Imported {imported}, skipped {skipped} (total {total})", { imported: summary.imported_count, skipped: summary.skipped_count, total: summary.total_in_payload })
       );
     } catch (err) {
       console.error("Failed to import slim text:", err);
       const message = err instanceof Error ? err.message : String(err);
       setConfigModalError(message);
-      showWarmupToast("Slim import failed", true);
+      showWarmupToast(t("Slim import failed"), true);
     } finally {
       setIsImportingSlim(false);
     }
@@ -1189,10 +1192,10 @@ function App() {
       setIsExportingFull(true);
       const exported = await exportFullBackupFile();
       if (!exported) return;
-      showWarmupToast("Full encrypted file exported.");
+      showWarmupToast(t("Full encrypted file exported."));
     } catch (err) {
       console.error("Failed to export full encrypted file:", err);
-      showWarmupToast("Full export failed", true);
+      showWarmupToast(t("Full export failed"), true);
     } finally {
       setIsExportingFull(false);
     }
@@ -1208,11 +1211,11 @@ function App() {
       const maskedIds = await loadMaskedAccountIds();
       setMaskedAccounts(new Set(maskedIds));
       showWarmupToast(
-        `Imported ${summary.imported_count}, skipped ${summary.skipped_count} (total ${summary.total_in_payload})`
+        t("Imported {imported}, skipped {skipped} (total {total})", { imported: summary.imported_count, skipped: summary.skipped_count, total: summary.total_in_payload })
       );
     } catch (err) {
       console.error("Failed to import full encrypted file:", err);
-      showWarmupToast("Full import failed", true);
+      showWarmupToast(t("Full import failed"), true);
     } finally {
       setIsImportingFull(false);
     }
@@ -1222,13 +1225,13 @@ function App() {
     try {
       setIsOpeningCodex(true);
       await invokeBackend("open_codex_app");
-      showWarmupToast("Codex app opened.");
+      showWarmupToast(t("Codex app opened."));
       setTimeout(() => {
         void checkProcesses();
       }, 1500);
     } catch (err) {
       console.error("Failed to open Codex app:", err);
-      showWarmupToast(`Open Codex failed: ${formatWarmupError(err)}`, true);
+      showWarmupToast(t("Open Codex failed: {error}", { error: formatWarmupError(err) }), true);
     } finally {
       setIsOpeningCodex(false);
     }
@@ -1242,8 +1245,8 @@ function App() {
     [accounts, pendingSwitchAccountId]
   );
   const closeConfirmLabel = pendingSwitchAccount
-    ? "Close and switch account"
-    : "Close Codex";
+    ? t("Close and switch account")
+    : t("Close Codex");
 
   const sortedOtherAccounts = useMemo(() => {
     const getResetDeadline = (resetAt: number | null | undefined) =>
@@ -1364,7 +1367,7 @@ function App() {
                   void getTauriWindow()?.minimize();
                 }}
                 className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
-                title="Minimize"
+                title={t("Minimize")}
               >
                 <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
                   <path d="M5 12h14" strokeWidth="2" strokeLinecap="round" />
@@ -1375,7 +1378,7 @@ function App() {
                   void getTauriWindow()?.toggleMaximize();
                 }}
                 className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
-                title={isWindowMaximized ? "Restore" : "Maximize"}
+                title={isWindowMaximized ? t("Restore") : t("Maximize")}
               >
                 {isWindowMaximized ? (
                   <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
@@ -1393,7 +1396,7 @@ function App() {
                   void getTauriWindow()?.close();
                 }}
                 className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-red-500 hover:text-white dark:text-gray-400 dark:hover:bg-red-500 dark:hover:text-white"
-                title="Close"
+                title={t("Close")}
               >
                 <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
                   <path d="M6 6l12 12M18 6L6 18" strokeWidth="2" strokeLinecap="round" />
@@ -1424,9 +1427,7 @@ function App() {
                             }`}
                         ></span>
                         <span>
-                          {hasRunningProcesses
-                            ? `${processInfo.count} Codex running`
-                            : "0 Codex running"}
+                          {t("{count} Codex running", { count: hasRunningProcesses ? processInfo.count : 0 })}
                         </span>
                       </span>
                       {hasRunningProcesses && (
@@ -1437,9 +1438,9 @@ function App() {
                           }}
                           disabled={isForceClosingCodex}
                           className="inline-flex items-center rounded-md border border-red-200 bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700 transition-colors hover:bg-red-100 disabled:opacity-50 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300 dark:hover:bg-red-900/30"
-                          title="Close running Codex processes"
+                          title={t("Close running Codex processes")}
                         >
-                          Close
+                          {t("Close")}
                         </button>
                       )}
                     </div>
@@ -1449,9 +1450,9 @@ function App() {
                       onClick={handleOpenCodexApp}
                       disabled={isOpeningCodex || isCompletingForceClose || switchingId !== null}
                       className="inline-flex items-center rounded-md border border-green-200 bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700 transition-colors hover:bg-green-100 disabled:opacity-50 dark:border-green-800 dark:bg-green-900/20 dark:text-green-300 dark:hover:bg-green-900/30"
-                      title="Open Codex app"
+                      title={t("Open Codex app")}
                     >
-                      {isOpeningCodex ? "Opening..." : "Open Codex"}
+                      {isOpeningCodex ? t("Opening...") : t("Open Codex")}
                     </button>
                   )}
                 </div>
@@ -1462,7 +1463,7 @@ function App() {
               <button
                 onClick={toggleMaskAll}
                 className="flex h-10 w-10 items-center justify-center rounded-lg bg-gray-100 text-gray-700 transition-colors hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700 shrink-0"
-                title={allMasked ? "Show all account names and emails" : "Hide all account names and emails"}
+                title={allMasked ? t("Show all account names and emails") : t("Hide all account names and emails")}
               >
                 {allMasked ? (
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1484,7 +1485,7 @@ function App() {
                 onClick={handleRefresh}
                 disabled={isRefreshing}
                 className="flex h-10 w-10 items-center justify-center rounded-lg bg-gray-100 text-gray-700 transition-colors hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700 shrink-0"
-                title={isRefreshing ? "Refreshing all usage" : "Refresh all usage"}
+                title={isRefreshing ? t("Refreshing all usage") : t("Refresh all usage")}
               >
                 <span className={isRefreshing ? "animate-spin inline-block" : ""}>↻</span>
               </button>
@@ -1496,7 +1497,7 @@ function App() {
                     ? "bg-amber-100 text-amber-500 dark:bg-amber-900/30 dark:text-amber-300"
                     : "bg-amber-50 text-amber-700 hover:bg-amber-100 dark:bg-amber-900/20 dark:text-amber-300 dark:hover:bg-amber-900/40"
                 }`}
-                title={isWarmingAll ? "Warming up all accounts" : "Warm up all accounts"}
+                title={isWarmingAll ? t("Warming up all accounts") : t("Warm up all accounts")}
               >
                 <span className={isWarmingAll ? "animate-pulse" : ""}>⚡</span>
               </button>
@@ -1513,7 +1514,7 @@ function App() {
                       ? "bg-gray-900 text-white hover:bg-gray-800 dark:bg-black dark:text-white dark:hover:bg-neutral-900"
                       : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
                   }`}
-                  title={isAccountSearchOpen ? "Hide account search" : "Search accounts"}
+                  title={isAccountSearchOpen ? t("Hide account search") : t("Search accounts")}
                 >
                   <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <circle cx="11" cy="11" r="7" />
@@ -1533,7 +1534,7 @@ function App() {
                       ? "bg-gray-900 text-white hover:bg-gray-800 dark:bg-black dark:text-white dark:hover:bg-neutral-900"
                       : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
                   }`}
-                  title="Menu"
+                  title={t("Menu")}
                 >
                   <svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
                     <circle cx="12" cy="5" r="1.6" />
@@ -1550,7 +1551,7 @@ function App() {
                       }}
                       className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 dark:text-white dark:hover:bg-neutral-900"
                     >
-                      Settings
+                      {t("Settings")}
                     </button>
                     <button
                       onClick={() => {
@@ -1560,7 +1561,7 @@ function App() {
                       disabled={accounts.length === 0}
                       className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 disabled:opacity-50 dark:text-white dark:hover:bg-neutral-900"
                     >
-                      <span>Auto Warm Up</span>
+                      <span>{t("Auto Warm Up")}</span>
                       <span
                         className={`rounded-md px-1.5 py-0.5 text-[11px] font-medium ${
                           autoWarmupAllEnabled
@@ -1578,7 +1579,7 @@ function App() {
                       }}
                       className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 dark:text-white dark:hover:bg-neutral-900"
                     >
-                      <span>Timer</span>
+                      <span>{t("Timer")}</span>
                       <span
                         className={`rounded-md px-1.5 py-0.5 text-[11px] font-medium ${
                           timedWarmupEnabled
@@ -1596,9 +1597,9 @@ function App() {
                       }}
                       className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 dark:text-white dark:hover:bg-neutral-900"
                     >
-                      <span>Appearance</span>
+                      <span>{t("Appearance")}</span>
                       <span className="text-[11px] text-gray-400 dark:text-gray-500">
-                        {themeMode === "dark" ? "☾ Dark" : "☀ Light"}
+                        {themeMode === "dark" ? `☾ ${t("Dark")}` : `☀ ${t("Light")}`}
                       </span>
                     </button>
                   </div>
@@ -1606,7 +1607,7 @@ function App() {
                 {isTimedWarmupOpen && (
                   <div className="absolute right-0 z-20 mt-2 w-64 rounded-lg border border-gray-200 bg-white p-3 shadow-lg dark:border-gray-700 dark:bg-gray-900">
                     <label className="flex items-center justify-between text-sm font-medium text-gray-800 dark:text-gray-100">
-                      <span>Timed warm-up</span>
+                      <span>{t("Timed warm-up")}</span>
                       <input
                         type="checkbox"
                         checked={timedWarmupEnabled}
@@ -1617,7 +1618,7 @@ function App() {
                     <div className="mt-3 space-y-1">
                       {timedWarmupTimes.length === 0 ? (
                         <p className="text-xs italic text-gray-400 dark:text-gray-500">
-                          No times added yet.
+                          {t("No times added yet.")}
                         </p>
                       ) : (
                         timedWarmupTimes.map((time) => (
@@ -1631,7 +1632,7 @@ function App() {
                             <button
                               onClick={() => handleRemoveTimedWarmupTime(time)}
                               className="text-gray-400 transition-colors hover:text-red-500"
-                              title={`Remove ${time}`}
+                              title={t("Remove {time}", { time })}
                             >
                               ✕
                             </button>
@@ -1655,7 +1656,7 @@ function App() {
                         disabled={!timedWarmupDraft}
                         className="h-8 rounded-md bg-gray-900 px-3 text-xs font-semibold text-white transition-colors hover:bg-gray-800 disabled:opacity-50 dark:bg-black dark:hover:bg-neutral-900"
                       >
-                        Add
+                        {t("Add")}
                       </button>
                     </div>
                   </div>
@@ -1666,7 +1667,7 @@ function App() {
                   onClick={() => setIsActionsMenuOpen((prev) => !prev)}
                   className="h-10 px-4 py-2 text-sm font-medium rounded-lg bg-gray-900 text-white transition-colors hover:bg-gray-800 dark:bg-black dark:hover:bg-neutral-900 shrink-0 whitespace-nowrap"
                 >
-                  Account ▾
+                  {t("Account")} ▾
                 </button>
                 {isActionsMenuOpen && (
                   <div className="absolute right-0 z-50 mt-2 w-56 rounded-xl border border-gray-200 bg-white p-2 text-gray-700 shadow-xl dark:border-neutral-800 dark:bg-black dark:text-white">
@@ -1677,7 +1678,7 @@ function App() {
                       }}
                       className="w-full rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 dark:text-white dark:hover:bg-neutral-900"
                     >
-                      + Add Account
+                      + {t("Add Account")}
                     </button>
                     <button
                       onClick={() => {
@@ -1687,7 +1688,7 @@ function App() {
                       disabled={isExportingSlim}
                       className="w-full rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 disabled:opacity-50 dark:text-white dark:hover:bg-neutral-900"
                     >
-                      {isExportingSlim ? "Exporting..." : "Export Slim Text"}
+                      {isExportingSlim ? t("Exporting...") : t("Export Slim Text")}
                     </button>
                     <button
                       onClick={() => {
@@ -1697,7 +1698,7 @@ function App() {
                       disabled={isImportingSlim}
                       className="w-full rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 disabled:opacity-50 dark:text-white dark:hover:bg-neutral-900"
                     >
-                      {isImportingSlim ? "Importing..." : "Import Slim Text"}
+                      {isImportingSlim ? t("Importing...") : t("Import Slim Text")}
                     </button>
                     <button
                       onClick={() => {
@@ -1707,7 +1708,7 @@ function App() {
                       disabled={isExportingFull}
                       className="w-full rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 disabled:opacity-50 dark:text-white dark:hover:bg-neutral-900"
                     >
-                      {isExportingFull ? "Exporting..." : "Export Full Encrypted File"}
+                      {isExportingFull ? t("Exporting...") : t("Export Full Encrypted File")}
                     </button>
                     <button
                       onClick={() => {
@@ -1717,7 +1718,7 @@ function App() {
                       disabled={isImportingFull}
                       className="w-full rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 disabled:opacity-50 dark:text-white dark:hover:bg-neutral-900"
                     >
-                      {isImportingFull ? "Importing..." : "Import Full Encrypted File"}
+                      {isImportingFull ? t("Importing...") : t("Import Full Encrypted File")}
                     </button>
                   </div>
                 )}
@@ -1732,12 +1733,12 @@ function App() {
         {loading && accounts.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20">
             <div className="animate-spin h-10 w-10 border-2 border-gray-900 dark:border-gray-100 border-t-transparent rounded-full mb-4"></div>
-            <p className="text-gray-500 dark:text-gray-400">Loading accounts...</p>
+            <p className="text-gray-500 dark:text-gray-400">{t("Loading accounts...")}</p>
           </div>
         ) : error ? (
           <div className="text-center py-20">
-            <div className="text-red-600 dark:text-red-300 mb-2">Failed to load accounts</div>
-            <p className="text-sm text-gray-500 dark:text-gray-400">{error}</p>
+            <div className="text-red-600 dark:text-red-300 mb-2">{t("Failed to load accounts")}</div>
+            <p className="text-sm text-gray-500 dark:text-gray-400">{localizeMessage(error)}</p>
           </div>
         ) : accounts.length === 0 ? (
           <div className="text-center py-20">
@@ -1745,16 +1746,16 @@ function App() {
               <span className="text-3xl">👤</span>
             </div>
             <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100 mb-2">
-              No accounts yet
+              {t("No accounts yet")}
             </h2>
             <p className="text-gray-500 dark:text-gray-400 mb-6">
-              Add your first Codex account to get started
+              {t("Add your first Codex account to get started")}
             </p>
             <button
               onClick={() => setIsAddModalOpen(true)}
               className="px-6 py-3 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors"
             >
-              Add Account
+              {t("Add Account")}
             </button>
           </div>
         ) : (
@@ -1762,10 +1763,10 @@ function App() {
             {hasNoMatchingAccounts && (
               <div className="rounded-2xl border border-dashed border-gray-300 px-6 py-12 text-center dark:border-gray-700">
                 <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">
-                  No matching accounts
+                  {t("No matching accounts")}
                 </h2>
                 <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                  Try a different account name or email address.
+                  {t("Try a different account name or email address.")}
                 </p>
               </div>
             )}
@@ -1789,8 +1790,8 @@ function App() {
                   type="search"
                   value={accountSearchQuery}
                   onChange={(event) => setAccountSearchQuery(event.target.value)}
-                  placeholder="Search accounts by name or email"
-                  aria-label="Search accounts"
+                  placeholder={t("Search accounts by name or email")}
+                  aria-label={t("Search accounts")}
                   autoFocus
                   className="w-full rounded-xl border border-gray-300 bg-white py-2.5 pl-10 pr-10 text-sm text-gray-900 shadow-sm transition-colors placeholder:text-gray-400 focus:border-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-200 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100 dark:placeholder:text-gray-500 dark:focus:border-gray-600 dark:focus:ring-gray-800"
                 />
@@ -1798,7 +1799,7 @@ function App() {
                   <button
                     type="button"
                     onClick={() => setAccountSearchQuery("")}
-                    aria-label="Clear account search"
+                    aria-label={t("Clear account search")}
                     className="absolute inset-y-0 right-2 flex items-center px-2 text-gray-400 transition-colors hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-200"
                   >
                     <svg
@@ -1821,7 +1822,7 @@ function App() {
               matchesAccountSearch(activeAccount, normalizedAccountSearchQuery) && (
                 <section>
                   <h2 className="text-sm font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-4">
-                    Active Account
+                    {t("Active Account")}
                   </h2>
                   <AccountCard
                     account={activeAccount}
@@ -1863,15 +1864,15 @@ function App() {
               <section>
                 <div className="flex items-center justify-between gap-3 mb-4">
                   <h2 className="text-sm font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                    Other Accounts ({
-                      normalizedAccountSearchQuery
-                        ? `${visibleOtherAccounts.length} of ${otherAccounts.length}`
-                        : otherAccounts.length
-                    })
+                    {t("Other Accounts ({count})", {
+                      count: normalizedAccountSearchQuery
+                        ? t("{visible} of {total}", { visible: visibleOtherAccounts.length, total: otherAccounts.length })
+                        : otherAccounts.length,
+                    })}
                   </h2>
                   <div className="flex items-center gap-2">
                     <label htmlFor="other-accounts-sort" className="text-xs text-gray-500 dark:text-gray-400">
-                      Sort
+                      {t("Sort")}
                     </label>
                     <div className="relative">
                       <select
@@ -1890,19 +1891,19 @@ function App() {
                         }
                         className="appearance-none font-sans text-xs sm:text-sm font-medium pl-3 pr-9 py-2 rounded-xl border border-gray-300 dark:border-gray-700 bg-gradient-to-b from-white to-gray-50 dark:from-gray-900 dark:to-gray-800 text-gray-700 dark:text-gray-200 shadow-sm hover:border-gray-400 dark:hover:border-gray-600 hover:shadow focus:outline-none focus:ring-2 focus:ring-gray-300 dark:focus:ring-gray-600 focus:border-gray-400 dark:focus:border-gray-600 transition-all"
                       >
-                        <option value="deadline_asc">Reset: earliest to latest</option>
-                        <option value="deadline_desc">Reset: latest to earliest</option>
+                        <option value="deadline_asc">{t("Reset: earliest to latest")}</option>
+                        <option value="deadline_desc">{t("Reset: latest to earliest")}</option>
                         <option value="remaining_desc">
-                          % remaining: highest to lowest
+                          {t("% remaining: highest to lowest")}
                         </option>
                         <option value="remaining_asc">
-                          % remaining: lowest to highest
+                          {t("% remaining: lowest to highest")}
                         </option>
                         <option value="subscription_asc">
-                          Expiry: earliest to latest
+                          {t("Expiry: earliest to latest")}
                         </option>
                         <option value="subscription_desc">
-                          Expiry: latest to earliest
+                          {t("Expiry: latest to earliest")}
                         </option>
                       </select>
                       <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-gray-500 dark:text-gray-400">
@@ -1963,7 +1964,7 @@ function App() {
       {/* Refresh Success Toast */}
       {refreshSuccess && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-3 bg-green-600 text-white rounded-lg shadow-lg text-sm flex items-center gap-2">
-          <span>✓</span> Usage refreshed successfully
+          <span>✓</span> {t("Usage refreshed successfully")}
         </div>
       )}
 
@@ -1983,7 +1984,7 @@ function App() {
       {/* Delete Confirmation Toast */}
       {deleteConfirmId && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-3 bg-red-600 text-white rounded-lg shadow-lg text-sm">
-          Click delete again to confirm removal
+          {t("Click delete again to confirm removal")}
         </div>
       )}
 
@@ -2002,75 +2003,80 @@ function App() {
           <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-md mx-4 shadow-xl">
             <div className="p-5 border-b border-gray-100 dark:border-gray-800">
               <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-                Close running Codex processes?
+                {t("Close running Codex processes?")}
               </h2>
             </div>
             <div className="p-5 space-y-3">
               <p className="text-sm text-gray-600 dark:text-gray-300">
-                This will {codexClose.forceClose ? "force close" : "gracefully close"} {processInfo?.count ?? 0} Codex process
-                {(processInfo?.count ?? 0) === 1 ? "" : "es"} that currently{" "}
-                {(processInfo?.count ?? 0) === 1 ? "blocks" : "block"} account switching.
+                {(processInfo?.count ?? 0) === 1
+                  ? codexClose.forceClose
+                    ? t("This will force close 1 Codex process that currently blocks account switching.")
+                    : t("This will gracefully close 1 Codex process that currently blocks account switching.")
+                  : t(
+                      codexClose.forceClose
+                        ? "This will force close {count} Codex processes that currently block account switching."
+                        : "This will gracefully close {count} Codex processes that currently block account switching.",
+                      { count: processInfo?.count ?? 0 },
+                    )}
               </p>
               <div className="space-y-2 rounded-lg border border-gray-200 bg-gray-50 p-3 dark:border-gray-700 dark:bg-gray-800">
                 {codexClose.preference !== "ask" ? (
                   <p className="text-sm text-gray-500 dark:text-gray-400">
-                    Codex will {codexClose.forceClose ? "be force closed" : "close gracefully"}. You can change this in Settings.
+                    {codexClose.forceClose
+                      ? t("Codex will be force closed. You can change this in Settings.")
+                      : t("Codex will close gracefully. You can change this in Settings.")}
                   </p>
                 ) : (
                   <>
                     <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
                       <input type="checkbox" checked={codexClose.forceClose} onChange={(event) => codexClose.setForceClose(event.target.checked)} disabled={isForceClosingCodex} className="h-4 w-4 accent-red-600" />
-                      Force close Codex
+                      {t("Force close Codex")}
                     </label>
                     <label className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
                       <input type="checkbox" checked={codexClose.remember} onChange={(event) => codexClose.setRemember(event.target.checked)} disabled={isForceClosingCodex} className="h-4 w-4 accent-orange-600" />
-                      Remember this selection
+                      {t("Remember this selection")}
                     </label>
                     <p className="text-xs text-gray-500 dark:text-gray-400">
                       {codexClose.forceClose
-                        ? "Stops Codex immediately. Unsaved work may be lost."
-                        : "Asks Codex to quit normally so it can finish cleanup."}
+                        ? t("Stops Codex immediately. Unsaved work may be lost.")
+                        : t("Asks Codex to quit normally so it can finish cleanup.")}
                     </p>
                   </>
                 )}
               </div>
               {pendingSwitchAccount && (
                 <p className="text-sm text-gray-600 dark:text-gray-300">
-                  After closing Codex, Codex Switcher will switch to{" "}
-                  <span className="font-medium text-gray-900 dark:text-gray-100">
-                    {pendingSwitchAccount.name}
-                  </span>
-                  .
+                  {t("After closing Codex, Codex Switcher will switch to {name}.", { name: pendingSwitchAccount.name })}
                 </p>
               )}
               <div className="space-y-2 rounded-lg bg-gray-50 dark:bg-gray-800 p-3">
                 {desktopReopen.checking ? (
-                  <p className="text-sm text-gray-500 dark:text-gray-400">Checking for a desktop app to reopen...</p>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">{t("Checking for a desktop app to reopen...")}</p>
                 ) : desktopReopen.available && desktopReopen.preference !== "ask" ? (
                   <p className="text-sm text-gray-500 dark:text-gray-400">
                     {desktopReopen.preference === "always"
-                      ? "Codex desktop will reopen automatically."
-                      : "Codex desktop will stay closed."}{" "}
-                    You can change this in Settings.
+                      ? t("Codex desktop will reopen automatically.")
+                      : t("Codex desktop will stay closed.")}{" "}
+                    {t("You can change this in Settings.")}
                   </p>
                 ) : desktopReopen.available ? (
                   <>
                     <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
                       <input type="checkbox" checked={desktopReopen.reopen} onChange={(event) => desktopReopen.setReopen(event.target.checked)} disabled={isForceClosingCodex} className="h-4 w-4 accent-orange-600" />
-                      Reopen Codex desktop after close
+                      {t("Reopen Codex desktop after close")}
                     </label>
                     <label className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
                       <input type="checkbox" checked={desktopReopen.remember} onChange={(event) => desktopReopen.setRemember(event.target.checked)} disabled={isForceClosingCodex} className="h-4 w-4 accent-orange-600" />
-                      Remember this selection
+                      {t("Remember this selection")}
                     </label>
-                    <p className="text-xs text-gray-500 dark:text-gray-400">You can change this later in Settings. Terminal and IDE sessions will not reopen.</p>
+                    <p className="text-xs text-gray-500 dark:text-gray-400">{t("You can change this later in Settings. Terminal and IDE sessions will not reopen.")}</p>
                   </>
                 ) : (
-                  <p className="text-sm text-gray-500 dark:text-gray-400">No supported desktop app could be identified for reopening. Codex will only be closed.</p>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">{t("No supported desktop app could be identified for reopening. Codex will only be closed.")}</p>
                 )}
               </div>
               {codexClose.forceClose && (
-                <p className="text-sm text-red-600 dark:text-red-300">Unsaved Codex work may be lost.</p>
+                <p className="text-sm text-red-600 dark:text-red-300">{t("Unsaved Codex work may be lost.")}</p>
               )}
             </div>
             <div className="flex justify-end gap-3 p-5 border-t border-gray-100 dark:border-gray-800">
@@ -2082,7 +2088,7 @@ function App() {
                 disabled={isForceClosingCodex}
                 className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-50"
               >
-                Cancel
+                {t("Cancel")}
               </button>
               <button
                 onClick={() => {
@@ -2092,7 +2098,7 @@ function App() {
                 className={`px-4 py-2.5 text-sm font-medium rounded-lg text-white transition-colors disabled:opacity-50 ${codexClose.forceClose ? "bg-red-600 hover:bg-red-700" : "bg-orange-600 hover:bg-orange-700"}`}
               >
                 {isForceClosingCodex
-                  ? (codexClose.forceClose ? "Force closing..." : "Closing...")
+                  ? (codexClose.forceClose ? t("Force closing...") : t("Closing..."))
                   : closeConfirmLabel}
               </button>
             </div>
@@ -2105,15 +2111,15 @@ function App() {
           <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-md mx-4 shadow-xl">
             <div className="p-5 border-b border-gray-100 dark:border-gray-800">
               <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-                Keep Codex Switcher in the Dock?
+                {t("Keep Codex Switcher in the Dock?")}
               </h2>
             </div>
             <div className="p-5 space-y-4">
               <p className="text-sm text-gray-600 dark:text-gray-300">
-                When the window is closed, Codex Switcher can stay in the Dock or live only in the menu bar.
+                {t("When the window is closed, Codex Switcher can stay in the Dock or live only in the menu bar.")}
               </p>
               <p className="text-sm text-gray-600 dark:text-gray-300">
-                You can always change this later from the tray popup.
+                {t("You can always change this later from the tray popup.")}
               </p>
               <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
                 <input
@@ -2122,7 +2128,7 @@ function App() {
                   onChange={(event) => setCloseBehaviorDontAskAgain(event.target.checked)}
                   className="h-4 w-4 accent-gray-900 dark:accent-gray-100"
                 />
-                <span>Don't ask again</span>
+                <span>{t("Don't ask again")}</span>
               </label>
             </div>
             <div className="flex flex-col gap-2 p-5 border-t border-gray-100 dark:border-gray-800 sm:flex-row sm:justify-end">
@@ -2131,21 +2137,21 @@ function App() {
                 disabled={isCompletingCloseBehavior}
                 className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-50"
               >
-                Cancel
+                {t("Cancel")}
               </button>
               <button
                 onClick={() => void handleCloseBehaviorChoice("show_in_dock")}
                 disabled={isCompletingCloseBehavior}
                 className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors disabled:opacity-50"
               >
-                Keep in Dock
+                {t("Keep in Dock")}
               </button>
               <button
                 onClick={() => void handleCloseBehaviorChoice("menu_bar_only")}
                 disabled={isCompletingCloseBehavior}
                 className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors disabled:opacity-50"
               >
-                Menu Bar Only
+                {t("Menu Bar Only")}
               </button>
             </div>
           </div>
@@ -2168,7 +2174,7 @@ function App() {
           <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-2xl mx-4 shadow-xl">
             <div className="flex items-center justify-between p-5 border-b border-gray-100 dark:border-gray-800">
               <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-                {configModalMode === "slim_export" ? "Export Slim Text" : "Import Slim Text"}
+                {configModalMode === "slim_export" ? t("Export Slim Text") : t("Import Slim Text")}
               </h2>
               <button
                 onClick={() => setIsConfigModalOpen(false)}
@@ -2180,11 +2186,11 @@ function App() {
             <div className="p-5 space-y-4">
               {configModalMode === "slim_import" ? (
                 <p className="text-sm text-amber-700 dark:text-amber-200 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-700 rounded-lg px-3 py-2">
-                  Existing accounts are kept. Only missing accounts are imported.
+                  {t("Existing accounts are kept. Only missing accounts are imported.")}
                 </p>
               ) : (
                 <p className="text-sm text-gray-500 dark:text-gray-400">
-                  This slim string contains account secrets. Keep it private.
+                  {t("This slim string contains account secrets. Keep it private.")}
                 </p>
               )}
               <textarea
@@ -2194,15 +2200,15 @@ function App() {
                 placeholder={
                   configModalMode === "slim_export"
                     ? isExportingSlim
-                      ? "Generating..."
-                      : "Export string will appear here"
-                    : "Paste config string here"
+                      ? t("Generating...")
+                      : t("Export string will appear here")
+                    : t("Paste config string here")
                 }
                 className="w-full h-48 px-4 py-3 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-sm text-gray-800 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-gray-400 dark:focus:border-gray-500 focus:ring-1 focus:ring-gray-400 dark:focus:ring-gray-500 font-mono"
               />
               {configModalError && (
                 <div className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-lg text-red-600 dark:text-red-300 text-sm">
-                  {configModalError}
+                  {localizeMessage(configModalError)}
                 </div>
               )}
             </div>
@@ -2211,7 +2217,7 @@ function App() {
                 onClick={() => setIsConfigModalOpen(false)}
                 className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors"
               >
-                Close
+                {t("Close")}
               </button>
               {configModalMode === "slim_export" ? (
                 <button
@@ -2222,13 +2228,13 @@ function App() {
                       setConfigCopied(true);
                       setTimeout(() => setConfigCopied(false), 1500);
                     } catch {
-                      setConfigModalError("Clipboard unavailable. Please copy manually.");
+                      setConfigModalError(t("Clipboard unavailable. Please copy manually."));
                     }
                   }}
                   disabled={!configPayload || isExportingSlim}
                   className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors disabled:opacity-50"
                 >
-                  {configCopied ? "Copied" : "Copy String"}
+                  {configCopied ? t("Copied") : t("Copy String")}
                 </button>
               ) : (
                 <button
@@ -2236,7 +2242,7 @@ function App() {
                   disabled={isImportingSlim}
                   className="px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors disabled:opacity-50"
                 >
-                  {isImportingSlim ? "Importing..." : "Import Missing Accounts"}
+                  {isImportingSlim ? t("Importing...") : t("Import Missing Accounts")}
                 </button>
               )}
             </div>

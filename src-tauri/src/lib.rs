@@ -65,6 +65,8 @@ pub fn run() {
             commands::open_codex_app,
             commands::get_codex_reopen_info,
             commands::reopen_closed_codex_desktop,
+            commands::language::get_ui_language,
+            commands::language::set_ui_language,
             // Account management
             list_accounts,
             get_active_account_info,

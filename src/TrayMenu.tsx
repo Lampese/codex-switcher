@@ -12,6 +12,7 @@ import {
   readAutoWarmupAllEnabled,
   writeAutoWarmupAllEnabled,
 } from "./lib/autoWarmup";
+import { getLocale, localizeMessage, t, useI18n } from "./lib/i18n";
 
 const TRAY_REFRESH_EVENT = "tray-refresh";
 const ACCOUNTS_CHANGED_EVENT = "accounts-changed";
@@ -20,13 +21,13 @@ const SWITCH_ACCOUNT_BLOCKED_EVENT = "switch-account-blocked";
 const CODEX_RUNNING_PREFIX = "Cannot switch accounts while";
 
 function formatError(err: unknown): string {
-  if (!err) return "Unknown error";
+  if (!err) return t("Unknown error");
   if (err instanceof Error && err.message) return err.message;
   if (typeof err === "string") return err;
   try {
     return JSON.stringify(err);
   } catch {
-    return "Unknown error";
+    return t("Unknown error");
   }
 }
 
@@ -62,12 +63,12 @@ function formatResetAt(resetAt: number | null | undefined): string | null {
 
   const diff = resetAt - Math.floor(Date.now() / 1000);
   if (diff <= 0) return "now";
-  if (diff < 60) return `${diff}s`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+  if (diff < 60) return t("{count}s", { count: diff });
+  if (diff < 3600) return t("{count}m", { count: Math.floor(diff / 60) });
   if (diff < 86_400) {
-    return `${Math.floor(diff / 3600)}h ${Math.floor((diff % 3600) / 60)}m`;
+    return t("{hours}h {minutes}m", { hours: Math.floor(diff / 3600), minutes: Math.floor((diff % 3600) / 60) });
   }
-  return `${Math.floor(diff / 86_400)}d ${Math.floor((diff % 86_400) / 3600)}h`;
+  return t("{days}d {hours}h", { days: Math.floor(diff / 86_400), hours: Math.floor((diff % 86_400) / 3600) });
 }
 
 function formatExactResetTime(
@@ -80,14 +81,10 @@ function formatExactResetTime(
   const diff = resetAt - Math.floor(Date.now() / 1000);
 
   if (isWeekly && diff > 86_400) {
-    return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(date);
+    return new Intl.DateTimeFormat(getLocale(), { month: "short", day: "numeric" }).format(date);
   }
 
-  const minutes = String(date.getMinutes()).padStart(2, "0");
-  const period = date.getHours() >= 12 ? "PM" : "AM";
-  const hour12 = date.getHours() % 12 || 12;
-
-  return `${hour12}:${minutes} ${period}`;
+  return new Intl.DateTimeFormat(getLocale(), { hour: "numeric", minute: "2-digit" }).format(date);
 }
 
 function formatTokens(tokens: number | null | undefined): string {
@@ -125,6 +122,7 @@ function retainUsageForAccounts(
 }
 
 function TrayMenu() {
+  useI18n();
   const [accounts, setAccounts] = useState<AccountInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
@@ -365,8 +363,8 @@ function TrayMenu() {
           disabled={accounts.length === 0}
           title={
             autoWarmupAllEnabled
-              ? "Disable auto warm-up for all accounts"
-              : "Enable auto warm-up for all accounts"
+              ? t("Disable auto warm-up for all accounts")
+              : t("Enable auto warm-up for all accounts")
           }
           className={`ml-auto rounded-md px-2 py-1 text-[11px] font-semibold transition-colors disabled:opacity-50 ${
             autoWarmupAllEnabled
@@ -374,12 +372,12 @@ function TrayMenu() {
               : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
           }`}
         >
-          Auto: {autoWarmupAllEnabled ? "on" : "off"}
+          {autoWarmupAllEnabled ? t("Auto: on") : t("Auto: off")}
         </button>
         <button
           onClick={() => void handleRefresh()}
           disabled={refreshing}
-          title="Refresh usage"
+          title={t("Refresh usage")}
           className="flex h-6 w-6 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 disabled:opacity-50 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
         >
           <span className={`text-base leading-none ${refreshing ? "inline-block animate-spin" : ""}`}>
@@ -391,11 +389,11 @@ function TrayMenu() {
       <div className="flex-1 overflow-y-auto p-1.5">
         {loading ? (
           <div className="px-2 py-6 text-center text-xs text-gray-500 dark:text-gray-400">
-            Loading...
+            {t("Loading...")}
           </div>
         ) : accounts.length === 0 ? (
           <div className="px-2 py-6 text-center text-xs text-gray-500 dark:text-gray-400">
-            No accounts configured
+            {t("No accounts configured")}
           </div>
         ) : (
           accounts.map((account) => {
@@ -406,17 +404,20 @@ function TrayMenu() {
               usage && !usage.error
                 ? ([
                     {
-                      label: "Session",
+                      label: t("Session"),
+                      weekly: false,
                       used: usage.primary_used_percent,
                       resetAt: usage.primary_resets_at,
                     },
                     {
-                      label: "Weekly",
+                      label: t("Weekly"),
+                      weekly: true,
                       used: usage.secondary_used_percent,
                       resetAt: usage.secondary_resets_at,
                     },
                   ].filter((w) => w.used != null) as {
                     label: string;
+                    weekly: boolean;
                     used: number;
                     resetAt: number | null;
                   }[])
@@ -465,7 +466,7 @@ function TrayMenu() {
                         const remaining = Math.max(0, 100 - w.used);
                         const tone = remainingTone(remaining);
                         const reset = formatResetAt(w.resetAt);
-                        const exactReset = formatExactResetTime(w.resetAt, w.label === "Weekly");
+                        const exactReset = formatExactResetTime(w.resetAt, w.weekly);
                         return (
                           <span key={w.label} className="block">
                             <span className="flex items-center gap-1">
@@ -484,11 +485,11 @@ function TrayMenu() {
                             </span>
                             <span className="mt-0.5 flex justify-between text-[11px] text-gray-500 dark:text-gray-400">
                               <span className={tone.text}>
-                                {remaining.toFixed(0)}% left
+                                {t("{percent}% left", { percent: remaining.toFixed(0) })}
                               </span>
                               {reset && (
                                 <span className="shrink-0 whitespace-nowrap">
-                                  {reset === "now" ? "Resets now" : `Resets in ${reset}`}
+                                  {reset === "now" ? t("Resets now") : t("Resets in {duration}", { duration: reset })}
                                   {exactReset && ` • ${exactReset}`}
                                 </span>
                               )}
@@ -499,7 +500,7 @@ function TrayMenu() {
                     </span>
                   ) : usage?.error ? (
                     <span className="block truncate text-xs text-red-500 dark:text-red-400">
-                      Usage unavailable
+                      {t("Usage unavailable")}
                     </span>
                   ) : account.email ? (
                     <span className="block truncate text-xs text-gray-500 dark:text-gray-400">
@@ -512,13 +513,13 @@ function TrayMenu() {
                         <span className="block font-medium text-gray-900 dark:text-gray-100">
                           {formatTokens(sumDailyTokens(stats, 1))}
                         </span>
-                        <span>today</span>
+                        <span>{t("today")}</span>
                       </span>
                       <span className="rounded-md bg-white px-2 py-1 text-[11px] text-gray-600 shadow-sm dark:bg-gray-950 dark:text-gray-300">
                         <span className="block font-medium text-gray-900 dark:text-gray-100">
                           {formatTokens(sumDailyTokens(stats, 7))}
                         </span>
-                        <span>last 7 days</span>
+                        <span>{t("last 7 days")}</span>
                       </span>
                     </span>
                   )}
@@ -534,14 +535,14 @@ function TrayMenu() {
 
       {error && (
         <div className="border-t border-gray-100 px-3 py-2 text-xs text-red-600 dark:border-gray-800 dark:text-red-400">
-          {error}
+          {localizeMessage(error)}
         </div>
       )}
 
       {dockDisplayMode && (
         <div className="flex items-center gap-1 border-t border-gray-100 px-1.5 py-1.5 dark:border-gray-800">
           <span className="px-1.5 text-[11px] font-medium text-gray-500 dark:text-gray-400">
-            Dock
+            {t("Dock")}
           </span>
           <button
             onClick={() => void handleDockDisplayMode("show_in_dock")}
@@ -551,7 +552,7 @@ function TrayMenu() {
                 : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
             }`}
           >
-            Show
+            {t("Show")}
           </button>
           <button
             onClick={() => void handleDockDisplayMode("menu_bar_only")}
@@ -561,7 +562,7 @@ function TrayMenu() {
                 : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
             }`}
           >
-            Menu Bar
+            {t("Menu Bar")}
           </button>
         </div>
       )}
@@ -571,13 +572,13 @@ function TrayMenu() {
           onClick={() => void invokeBackend("open_main_window")}
           className="flex-1 rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-gray-100 dark:hover:bg-gray-800"
         >
-          Open Codex Switcher
+          {t("Open Codex Switcher")}
         </button>
         <button
           onClick={() => void invokeBackend("quit_app")}
           className="rounded-lg px-2 py-1.5 text-sm text-gray-500 transition-colors hover:bg-gray-100 hover:text-red-600 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-red-400"
         >
-          Quit
+          {t("Quit")}
         </button>
       </div>
     </div>

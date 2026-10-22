@@ -3,6 +3,7 @@ import type { DesktopReopenPreference } from "../lib/desktopReopen";
 import type { CodexClosePreference } from "../lib/codexClosePreference";
 import { invokeBackend, isTauriRuntime } from "../lib/platform";
 import type { DockDisplayMode } from "../types";
+import { localizeMessage, useI18n, type Language } from "../lib/i18n";
 
 type TrayDisplayMode = "icon_and_session" | "active_usage_text" | "hidden";
 interface DisplaySettings {
@@ -25,6 +26,7 @@ export function SettingsModal({
   onClosePreferenceChange,
   onClose,
 }: SettingsModalProps) {
+  const { language, setLanguage, t } = useI18n();
   const [displaySettings, setDisplaySettings] = useState<DisplaySettings | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -87,14 +89,20 @@ export function SettingsModal({
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
       <div role="dialog" aria-modal="true" aria-labelledby="settings-title" className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-md mx-4 shadow-xl">
         <div className="p-5 border-b border-gray-100 dark:border-gray-800">
-          <h2 id="settings-title" className="text-lg font-semibold text-gray-900 dark:text-gray-100">Settings</h2>
+          <h2 id="settings-title" className="text-lg font-semibold text-gray-900 dark:text-gray-100">{t("Settings")}</h2>
         </div>
         <div className="p-5 space-y-3 max-h-[65vh] overflow-y-auto">
+          <label htmlFor="interface-language" className="block text-sm font-medium text-gray-900 dark:text-gray-100">{t("Language")}</label>
+          <select id="interface-language" value={language} onChange={(event) => setLanguage(event.target.value as Language)} className={selectClassName}>
+            <option value="en">English</option>
+            <option value="tr">Türkçe</option>
+          </select>
+          <div className="border-t border-gray-100 dark:border-gray-800" />
           {desktop && (
             <>
               {displaySettings ? (
                 <>
-                  <label htmlFor="tray-display-mode" className="block text-sm font-medium text-gray-900 dark:text-gray-100">Tray</label>
+                  <label htmlFor="tray-display-mode" className="block text-sm font-medium text-gray-900 dark:text-gray-100">{t("Tray")}</label>
                   <select
                     id="tray-display-mode"
                     value={displaySettings.tray_display_mode}
@@ -102,13 +110,13 @@ export function SettingsModal({
                     onChange={(event) => void changeDisplaySetting("set_tray_display_mode", event.target.value)}
                     className={selectClassName}
                   >
-                    <option value="icon_and_session">Icon + Session</option>
-                    <option value="active_usage_text">Hourly + Weekly</option>
-                    <option value="hidden">Hidden</option>
+                    <option value="icon_and_session">{t("Icon + Session")}</option>
+                    <option value="active_usage_text">{t("Hourly + Weekly")}</option>
+                    <option value="hidden">{t("Hidden")}</option>
                   </select>
                   {displaySettings.dock_display_mode !== null && (
                     <>
-                      <label htmlFor="dock-display-mode" className="block text-sm font-medium text-gray-900 dark:text-gray-100">Dock Icon</label>
+                      <label htmlFor="dock-display-mode" className="block text-sm font-medium text-gray-900 dark:text-gray-100">{t("Dock Icon")}</label>
                       <select
                         id="dock-display-mode"
                         value={displaySettings.dock_display_mode}
@@ -116,43 +124,43 @@ export function SettingsModal({
                         onChange={(event) => void changeDisplaySetting("set_dock_display_mode", event.target.value)}
                         className={selectClassName}
                       >
-                        <option value="show_in_dock">Show in Dock</option>
-                        <option value="menu_bar_only">Menu Bar Only</option>
+                        <option value="show_in_dock">{t("Show in Dock")}</option>
+                        <option value="menu_bar_only">{t("Menu Bar Only")}</option>
                       </select>
-                      <p className="text-xs text-gray-500 dark:text-gray-400">At least one of the Dock or tray icons stays visible so you can reopen Codex Switcher.</p>
+                      <p className="text-xs text-gray-500 dark:text-gray-400">{t("At least one of the Dock or tray icons stays visible so you can reopen Codex Switcher.")}</p>
                     </>
                   )}
                 </>
-              ) : !error && <p className="text-sm text-gray-500 dark:text-gray-400">Loading display settings...</p>}
-              {error && <p role="alert" className="text-sm text-red-600 dark:text-red-300">Could not update display settings: {error}</p>}
+              ) : !error && <p className="text-sm text-gray-500 dark:text-gray-400">{t("Loading display settings...")}</p>}
+              {error && <p role="alert" className="text-sm text-red-600 dark:text-red-300">{t("Could not update display settings: {error}", { error: localizeMessage(error) })}</p>}
               <div className="border-t border-gray-100 dark:border-gray-800" />
             </>
           )}
           <label htmlFor="codex-close-preference" className="block text-sm font-medium text-gray-900 dark:text-gray-100">
-            Codex close method
+            {t("Codex close method")}
           </label>
           <select id="codex-close-preference" value={closePreference} onChange={(event) => onClosePreferenceChange(event.target.value as CodexClosePreference)} className={selectClassName}>
-            <option value="ask">Ask every time</option>
-            <option value="graceful">Gracefully close</option>
-            <option value="force">Force close</option>
+            <option value="ask">{t("Ask every time")}</option>
+            <option value="graceful">{t("Gracefully close")}</option>
+            <option value="force">{t("Force close")}</option>
           </select>
           <p className="text-sm text-gray-500 dark:text-gray-400">
-            Graceful close lets Codex finish cleanup. Force close stops it immediately and may lose unsaved work.
+            {t("Graceful close lets Codex finish cleanup. Force close stops it immediately and may lose unsaved work.")}
           </p>
           <label htmlFor="desktop-reopen-preference" className="block text-sm font-medium text-gray-900 dark:text-gray-100">
-            Reopen Codex after close
+            {t("Reopen Codex after close")}
           </label>
           <select id="desktop-reopen-preference" value={reopenPreference} onChange={(event) => onReopenPreferenceChange(event.target.value as DesktopReopenPreference)} className={selectClassName}>
-            <option value="ask">Ask every time</option>
-            <option value="always">Reopen desktop app</option>
-            <option value="never">Keep closed</option>
+            <option value="ask">{t("Ask every time")}</option>
+            <option value="always">{t("Reopen desktop app")}</option>
+            <option value="never">{t("Keep closed")}</option>
           </select>
           <p className="text-sm text-gray-500 dark:text-gray-400">
-            Applies to detected Codex desktop apps on macOS and Windows. When switching accounts, the app reopens after the switch succeeds.
+            {t("Applies to detected Codex desktop apps on macOS and Windows. When switching accounts, the app reopens after the switch succeeds.")}
           </p>
         </div>
         <div className="flex justify-end p-5 border-t border-gray-100 dark:border-gray-800">
-          <button onClick={onClose} disabled={saving} className="px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 disabled:opacity-50">Done</button>
+          <button onClick={onClose} disabled={saving} className="px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 disabled:opacity-50">{t("Done")}</button>
         </div>
       </div>
     </div>
