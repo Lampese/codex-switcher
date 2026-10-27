@@ -17,6 +17,7 @@ use crate::types::{parse_chatgpt_id_token_claims, OAuthLoginInfo, StoredAccount}
 const DEFAULT_ISSUER: &str = "https://auth.openai.com";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const DEFAULT_PORT: u16 = 1455; // Same as official Codex
+const FALLBACK_PORT: u16 = 1457; // Official Codex fallback port
 
 /// PKCE codes for OAuth
 #[derive(Debug, Clone)]
@@ -59,7 +60,7 @@ fn build_authorize_url(
         ("response_type", "code"),
         ("client_id", client_id),
         ("redirect_uri", redirect_uri),
-        ("scope", "openid profile email offline_access"),
+        ("scope", "openid profile email offline_access api.connectors.read api.connectors.invoke"),
         ("code_challenge", &pkce.code_challenge),
         ("code_challenge_method", "S256"),
         ("id_token_add_organizations", "true"),
@@ -150,7 +151,7 @@ pub async fn start_oauth_login(
             println!(
                 "[OAuth] Default callback port {DEFAULT_PORT} unavailable ({default_err}), using a random local port"
             );
-            Server::http("127.0.0.1:0").map_err(|fallback_err| {
+            Server::http(format!("127.0.0.1:{FALLBACK_PORT}")).map_err(|fallback_err| {
                 anyhow::anyhow!(
                     "Failed to start OAuth server: default port {DEFAULT_PORT} error: {default_err}; fallback error: {fallback_err}"
                 )
@@ -163,7 +164,7 @@ pub async fn start_oauth_login(
         None => anyhow::bail!("Failed to determine server port"),
     };
 
-    let redirect_uri = format!("http://localhost:{actual_port}/auth/callback");
+    let redirect_uri = format!("http://127.0.0.1:{actual_port}/auth/callback");
     let auth_url = build_authorize_url(DEFAULT_ISSUER, CLIENT_ID, &redirect_uri, &pkce, &state);
 
     println!("[OAuth] Server started on port {actual_port}");
