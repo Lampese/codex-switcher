@@ -178,18 +178,74 @@ pub fn add_account(account: StoredAccount) -> Result<StoredAccount> {
     Ok(stored)
 }
 
+/// A ChatGPT workspace is identified by its workspace ID, not its email,
+/// plan or user-editable display name. Prefer the current ID token claim.
+fn chatgpt_workspace_id(account: &StoredAccount) -> Option<String> {
+    let AuthData::ChatGPT {
+        id_token,
+        account_id,
+        ..
+    } = &account.auth_data
+    else {
+        return None;
+    };
+
+    parse_chatgpt_id_token_claims(id_token)
+        .account_id
+        .or_else(|| account_id.clone())
+        .filter(|id| !id.trim().is_empty())
+}
+
 fn add_account_to_store(
     store: &mut AccountsStore,
-    account: StoredAccount,
+    mut account: StoredAccount,
 ) -> Result<StoredAccount> {
-    // Check for duplicate names
-    if store.accounts.iter().any(|a| a.name == account.name) {
-        anyhow::bail!("An account with name '{}' already exists", account.name);
+    // Do not store the same known workspace twice, even if the user assigns a
+    // different name or its subscription plan changes.
+    let workspace_id = chatgpt_workspace_id(&account);
+    if let Some(ref workspace_id) = workspace_id {
+        if store
+            .accounts
+            .iter()
+            .any(|saved| chatgpt_workspace_id(saved).as_ref() == Some(workspace_id))
+        {
+            anyhow::bail!("This ChatGPT workspace is already saved");
+        }
     }
 
-    let account_clone = account.clone();
+    if store
+        .accounts
+        .iter()
+        .any(|saved| saved.name == account.name)
+    {
+        // Retain the existing duplicate-name behavior for API keys and for
+        // ChatGPT credentials with no trustworthy workspace ID.
+        if workspace_id.is_none() {
+            anyhow::bail!("An account with name '{}' already exists", account.name);
+        }
+
+        // Different workspaces can legitimately share an email (including
+        // two Business workspaces with the same subscription plan). Keep
+        // display names unique without conflating them with identity.
+        let base = account.name.clone();
+        let suffix = account
+            .plan_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|plan| !plan.is_empty())
+            .unwrap_or("workspace");
+        let mut candidate = format!("{base} ({suffix})");
+        let mut n = 2;
+        while store.accounts.iter().any(|saved| saved.name == candidate) {
+            candidate = format!("{base} ({suffix} {n})");
+            n += 1;
+        }
+        account.name = candidate;
+    }
+
+    let saved = account.clone();
     store.accounts.push(account);
-    Ok(account_clone)
+    Ok(saved)
 }
 
 /// Remove an account by ID
@@ -459,6 +515,109 @@ mod tests {
 
             assert_eq!(store.active_account_id, expected_active_id);
         }
+    }
+
+    #[test]
+    fn same_email_personal_and_business_workspaces_remain_separate() {
+        let mut store = AccountsStore::default();
+        let mut personal = account("person@example.com", "personal-ws", "p");
+        personal.email = Some("person@example.com".into());
+        personal.plan_type = Some("plus".into());
+        let mut business = account("person@example.com", "business-ws", "b");
+        business.email = personal.email.clone();
+        business.plan_type = Some("business".into());
+
+        let personal = add_account_to_store(&mut store, personal).unwrap();
+        let business = add_account_to_store(&mut store, business).unwrap();
+        assert_eq!(store.accounts.len(), 2);
+        assert_ne!(personal.id, business.id);
+        assert_eq!(business.name, "person@example.com (business)");
+        assert_eq!(refresh_token(&store.accounts[0]), "refresh-p");
+        assert_eq!(refresh_token(&store.accounts[1]), "refresh-b");
+    }
+
+    #[test]
+    fn multiple_business_workspaces_get_unique_names() {
+        let mut store = AccountsStore::default();
+        for n in 1..=3 {
+            let mut candidate = account(
+                "shared@example.com",
+                &format!("workspace-{n}"),
+                &n.to_string(),
+            );
+            candidate.plan_type = Some("business".into());
+            add_account_to_store(&mut store, candidate).unwrap();
+        }
+        assert_eq!(store.accounts[0].name, "shared@example.com");
+        assert_eq!(store.accounts[1].name, "shared@example.com (business)");
+        assert_eq!(store.accounts[2].name, "shared@example.com (business 2)");
+    }
+
+    #[test]
+    fn same_workspace_with_different_display_name_is_not_duplicated() {
+        let mut store = AccountsStore::default();
+        add_account_to_store(&mut store, account("Personal", "workspace-one", "old")).unwrap();
+        assert!(add_account_to_store(
+            &mut store,
+            account("Renamed account", "workspace-one", "new")
+        )
+        .is_err());
+        assert_eq!(store.accounts.len(), 1);
+        assert_eq!(refresh_token(&store.accounts[0]), "refresh-old");
+    }
+
+    #[test]
+    fn current_token_claim_takes_precedence_over_stale_cached_workspace_id() {
+        let mut store = AccountsStore::default();
+        let mut saved = account("A", "stale-cache", "old");
+        if let AuthData::ChatGPT { id_token, .. } = &mut saved.auth_data {
+            *id_token = id_token_with_account_id("actual-workspace", "sig");
+        }
+        add_account_to_store(&mut store, saved).unwrap();
+        assert!(add_account_to_store(&mut store, account("B", "actual-workspace", "new")).is_err());
+    }
+
+    #[test]
+    fn unknown_workspace_keeps_duplicate_name_protection() {
+        let mut store = AccountsStore::default();
+        let mut unknown = account("same@example.com", "unused", "a");
+        if let AuthData::ChatGPT {
+            id_token,
+            account_id,
+            ..
+        } = &mut unknown.auth_data
+        {
+            *id_token = "opaque".into();
+            *account_id = None;
+        }
+        add_account_to_store(&mut store, unknown).unwrap();
+        let mut other = account("same@example.com", "unused", "b");
+        if let AuthData::ChatGPT {
+            id_token,
+            account_id,
+            ..
+        } = &mut other.auth_data
+        {
+            *id_token = "opaque".into();
+            *account_id = None;
+        }
+        assert!(add_account_to_store(&mut store, other).is_err());
+        assert_eq!(store.accounts.len(), 1);
+    }
+
+    #[test]
+    fn api_key_duplicate_names_still_fail() {
+        let mut store = AccountsStore::default();
+        add_account_to_store(
+            &mut store,
+            StoredAccount::new_api_key("API".into(), "key-1".into()),
+        )
+        .unwrap();
+        assert!(add_account_to_store(
+            &mut store,
+            StoredAccount::new_api_key("API".into(), "key-2".into())
+        )
+        .is_err());
     }
 
     #[test]
