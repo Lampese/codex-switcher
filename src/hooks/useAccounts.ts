@@ -14,7 +14,8 @@ export function useAccounts() {
   const [error, setError] = useState<string | null>(null);
   const accountsRef = useRef<AccountWithUsage[]>([]);
   const metadataRefreshInFlightRef = useRef(new Set<string>());
-  const maxConcurrentUsageRequests = 10;
+  const maxConcurrentUsageRequests = 2;
+  const usageRequestDelayMs = 150;
 
   useEffect(() => {
     accountsRef.current = accounts;
@@ -48,7 +49,8 @@ export function useAccounts() {
     async <T,>(
       items: T[],
       worker: (item: T) => Promise<void>,
-      concurrency: number
+      concurrency: number,
+      delayMs = 0
     ) => {
       if (items.length === 0) return;
       const limit = Math.min(Math.max(concurrency, 1), items.length);
@@ -57,6 +59,9 @@ export function useAccounts() {
         while (true) {
           const current = index++;
           if (current >= items.length) return;
+          if (delayMs > 0 && current > 0) {
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+          }
           await worker(items[current]);
         }
       });
@@ -134,10 +139,11 @@ export function useAccounts() {
             metadataRefreshInFlightRef.current.delete(account.id);
           }
         },
-        maxConcurrentUsageRequests
+        1,
+        250
       );
     },
-    [maxConcurrentUsageRequests, runWithConcurrency]
+    [runWithConcurrency]
   );
 
   const refreshUsage = useCallback(
@@ -151,12 +157,7 @@ export function useAccounts() {
           return;
         }
 
-        // Explicit refreshes include metadata, but run it beside usage so a
-        // slow accounts endpoint never delays healthy rate-limit updates.
-        const metadataPromise = options?.refreshMetadata
-          ? refreshMetadata(list)
-          : Promise.resolve();
-
+        const shouldRefreshMetadata = Boolean(options?.refreshMetadata);
         const accountIds = list.map((account) => account.id);
         const accountIdSet = new Set(accountIds);
         const usageResults = new Map<string, UsageInfo>();
@@ -186,7 +187,8 @@ export function useAccounts() {
               );
             }
           },
-          maxConcurrentUsageRequests
+          maxConcurrentUsageRequests,
+          usageRequestDelayMs
         );
 
         setAccounts((prev) =>
@@ -202,7 +204,12 @@ export function useAccounts() {
         );
 
         reportUsageToTray(Array.from(usageResults.values()));
-        await metadataPromise;
+
+        // Run metadata refresh sequentially after usage updates,
+        // so we don't bombard Cloudflare with parallel requests across endpoints.
+        if (shouldRefreshMetadata) {
+          await refreshMetadata(list);
+        }
       } catch (err) {
         console.error("Failed to refresh usage:", err);
         throw err;
@@ -214,6 +221,7 @@ export function useAccounts() {
       refreshMetadata,
       reportUsageToTray,
       runWithConcurrency,
+      usageRequestDelayMs,
     ]
   );
 
@@ -437,10 +445,9 @@ export function useAccounts() {
   }, []);
 
   useEffect(() => {
-    loadAccounts().then((accountList) => {
-      void refreshUsage(accountList);
-      // Populate live expiry immediately. The native background process keeps
-      // its cache current while a desktop webview is hidden or suspended.
+    loadAccounts().then(async (accountList) => {
+      await refreshUsage(accountList);
+      // Populate live expiry sequentially after usage requests complete.
       void refreshMetadata(accountList);
     });
     
