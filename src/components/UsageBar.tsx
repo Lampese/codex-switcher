@@ -41,11 +41,13 @@ function RateLimitBar({
   usedPercent,
   windowMinutes,
   resetsAt,
+  showNameWithDuration = false,
 }: {
   label: string;
   usedPercent: number;
   windowMinutes?: number | null;
   resetsAt?: number | null;
+  showNameWithDuration?: boolean;
 }) {
   // Calculate remaining percentage
   const remainingPercent = Math.max(0, 100 - usedPercent);
@@ -65,7 +67,7 @@ function RateLimitBar({
   return (
     <div className="space-y-1">
       <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400">
-        <span>{windowLabel ? `${windowLabel} limit` : label}</span>
+        <span>{showNameWithDuration ? `${label}${windowLabel ? ` (${windowLabel})` : ""}` : windowLabel ? `${windowLabel} limit` : label}</span>
         <span>
           {remainingPercent.toFixed(0)}% left
           {resetLabel && ` • resets ${resetLabel}`}
@@ -114,8 +116,9 @@ export function UsageBar({ usage, loading }: UsageBarProps) {
 
   const hasPrimary = usage.primary_used_percent !== null && usage.primary_used_percent !== undefined;
   const hasSecondary = usage.secondary_used_percent !== null && usage.secondary_used_percent !== undefined;
+  const additionalLimits = usage.additional_rate_limits ?? [];
 
-  if (!hasPrimary && !hasSecondary) {
+  if (!hasPrimary && !hasSecondary && additionalLimits.length === 0) {
     return (
       <div className="text-xs text-gray-400 dark:text-gray-500 italic py-1">
         No rate limit data
@@ -141,6 +144,24 @@ export function UsageBar({ usage, loading }: UsageBarProps) {
           resetsAt={usage.secondary_resets_at}
         />
       )}
+      {additionalLimits.map((quota, index) => (
+        <div key={`${quota.limit_name}-${index}`} className="space-y-1">
+          <RateLimitBar
+            label={quota.limit_name}
+            usedPercent={quota.used_percent}
+            windowMinutes={quota.window_minutes}
+            resetsAt={quota.resets_at}
+            showNameWithDuration
+          />
+          {(quota.model_slug || quota.allowed === false || quota.limit_reached === true) && (
+            <div className="text-[11px] text-gray-500 dark:text-gray-400">
+              {quota.model_slug && <span>{quota.model_slug}</span>}
+              {quota.model_slug && (quota.allowed === false || quota.limit_reached === true) && " • "}
+              {(quota.allowed === false || quota.limit_reached === true) && "Unavailable or exhausted"}
+            </div>
+          )}
+        </div>
+      ))}
       {usage.credits_balance && (
         <div className="text-xs text-gray-500 dark:text-gray-400">
           Credits: {usage.credits_balance}
