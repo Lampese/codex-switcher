@@ -961,7 +961,9 @@ mod tests {
                 ),
             )
             .unwrap();
-            std::fs::File::open(path)
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
                 .unwrap()
                 .set_times(
                     std::fs::FileTimes::new().set_modified(now - std::time::Duration::from_secs(n)),
@@ -993,7 +995,9 @@ mod tests {
                 ),
             )
             .unwrap();
-            std::fs::File::open(path)
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
                 .unwrap()
                 .set_times(
                     std::fs::FileTimes::new()
