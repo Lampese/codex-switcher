@@ -27,6 +27,7 @@
 - **macOS Dock Control** – Keep Codex Switcher in the Dock or run it as a menu bar only app, with a first-close prompt and a tray fallback
 - **Rate-Limit Monitoring** – View real-time 5-hour session and weekly usage, reset timing, credits, and subscription expiry
 - **Blocked Switch Recovery** – Detect running Codex sessions and offer a force-close flow before retrying the account switch
+- **Conversation Recovery** – Optionally continue quota-stopped chats and running macOS chats interrupted by account switching
 - **Dual Login Mode** – Authenticate with ChatGPT OAuth or import existing `auth.json` files
 
 ## Installation
@@ -141,6 +142,33 @@ close the running app before switching accounts.
 If an older Codex Switcher version already saved an invalid refresh token, sign
 in to that account again or remove and re-add it once. An invalidated token
 cannot be recovered locally.
+
+When a switch needs to close Codex, enable **Auto-resume interrupted conversations after switching** in Settings or the close-and-switch confirmation dialog. Recovery scans local session logs modified in
+the last 24 hours, excludes internal subagent sessions, and queues `Continue the previous task.` for up to 32
+conversations whose latest failure has the `usage_limit_exceeded` error code
+or a message beginning with “You've hit your usage limit.” It skips conversations
+already continued, completed, or cancelled, and ignores error text quoted in
+chat messages or tool output. On macOS, it also captures unfinished chats whose logs
+are open in the Codex process tree before closing. Chats waiting for input or approval
+are excluded, and log changes are rechecked before delivery. Explicit aborts are
+never resumed, even if emitted during shutdown. Other platforms retain quota-error
+recovery. It is off by default and requires a Codex CLI
+supporting `codex queue` and a desktop app registered for `codex://` links.
+Enable desktop reopening as well. After a successful reopen, Switcher opens each
+queued conversation and waits up to 60 seconds for its recovery message in a new turn;
+queue acceptance alone is not reported as success. The entire recovery run is capped
+at two minutes, with live progress in the main window. Results stay visible until
+dismissed, listing every conversation that needs attention with an **Open conversation**
+button. Conversations not attempted before the limit are listed too; pending messages
+and their receipts are kept to prevent duplicate continuations. A failed or timed-out delivery
+is shown in the result. Each continuation includes a unique recovery marker, so
+unrelated turns cannot confirm it. If the CLI fails or times out before confirming
+queue acceptance, delivery is reported as unknown and requires queue inspection
+before resubmitting. Unconfirmed deliveries are remembered across Switcher
+restarts, so retrying opens the pending chat without adding another continuation.
+Recovery receipts retain safe CLI exit-status or 10-second timeout details across retries. CLI output is not stored. Older receipts remain readable but may lack those details. User-created forks remain eligible for recovery.
+This flow applies to switches through the main window that close and reopen Codex;
+tray-only switches and switches made while Codex is already closed do not run it.
 
 ## macOS Dock and Menu Bar Mode
 
