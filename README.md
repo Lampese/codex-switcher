@@ -216,3 +216,9 @@ pnpm release patch -- --push
 # For non-interactive use, pass the note explicitly.
 pnpm release patch -- --push --note "Fixed account switching issues"
 ```
+
+### Re-login after an authentication error
+
+ChatGPT account cards show **Re-login** for a 401 or an invalid, expired, or reused token error. Open it, select **Start re-login**, and open the login link in your browser. Sign in with the original account and choose the same workspace. Switcher updates that saved account and refreshes usage while keeping its name, ID, and preferences. A different account or workspace is rejected.
+
+For the active account, close Codex or switch to another account first. Switcher checks this again before saving so a running Codex process cannot overwrite the renewed credentials. Inactive accounts can be renewed while Codex stays open. Cancel leaves the saved credentials unchanged. API-key accounts do not use this OAuth flow.
