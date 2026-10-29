@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use base64::Engine;
 use chrono::Utc;
-use tokio::time::{sleep, Duration};
+use tokio::time::Duration;
 
 use super::{
     load_accounts, read_current_auth, save_accounts, switch_to_account, sync_active_account_tokens,
@@ -287,6 +287,22 @@ fn parse_jwt_exp(token: &str) -> Option<i64> {
 }
 
 async fn refresh_tokens_with_refresh_token(refresh_token: &str) -> Result<RefreshTokenResponse> {
+    refresh_tokens_with_refresh_token_at(
+        refresh_token,
+        &format!("{DEFAULT_ISSUER}/oauth/token"),
+        Duration::from_secs(10),
+    )
+    .await
+}
+
+/// A refresh token can be rotated on the server before the HTTP response
+/// reaches us. If a request times out or the connection drops, repeating the
+/// POST with the old single-use token risks invalidating the session.
+async fn refresh_tokens_with_refresh_token_at(
+    refresh_token: &str,
+    endpoint: &str,
+    timeout: Duration,
+) -> Result<RefreshTokenResponse> {
     let client = reqwest::Client::new();
     let body = format!(
         "grant_type=refresh_token&refresh_token={}&client_id={}",
@@ -294,43 +310,41 @@ async fn refresh_tokens_with_refresh_token(refresh_token: &str) -> Result<Refres
         urlencoding::encode(CLIENT_ID),
     );
 
-    let mut last_send_error = None;
-    let mut response = None;
-
-    for attempt in 1..=3u8 {
-        match client
-            .post(format!("{DEFAULT_ISSUER}/oauth/token"))
-            .timeout(Duration::from_secs(10))
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(body.clone())
-            .send()
-            .await
-        {
-            Ok(resp) => {
-                response = Some(resp);
-                break;
-            }
-            Err(err) => {
-                last_send_error = Some(err);
-                if attempt < 3 {
-                    sleep(Duration::from_millis(250 * u64::from(attempt))).await;
-                }
-            }
-        }
-    }
-
-    let response = match response {
-        Some(resp) => resp,
-        None => {
-            let err = last_send_error.context("Failed to send token refresh request")?;
-            return Err(err.into());
-        }
-    };
+    let response = client
+        .post(endpoint)
+        .timeout(timeout)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .context(
+            "Failed to send token refresh request; outcome unknown, not retrying single-use token",
+        )?;
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("Token refresh failed: {status} - {body}");
+        // Do not echo an identity-provider response that could contain secrets.
+        let code = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| {
+                v.pointer("/error/code")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            });
+        let safe_code = match code.as_deref() {
+            Some(
+                "refresh_token_invalidated"
+                | "refresh_token_reused"
+                | "refresh_token_expired"
+                | "invalid_grant",
+            ) => code,
+            _ => None,
+        };
+        if let Some(code) = safe_code {
+            anyhow::bail!("Token refresh failed: {status} ({code})");
+        }
+        anyhow::bail!("Token refresh failed: {status}");
     }
 
     response
@@ -358,6 +372,34 @@ mod tests {
             r#"{{"exp":{exp},"https://api.openai.com/auth":{{"chatgpt_account_id":"{account_id}"}}}}"#
         ));
         format!("header.{payload}.{signature}")
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ambiguous_transport_failure_does_not_retry_single_use_refresh() {
+        use tokio::net::TcpListener;
+        use tokio::time::{timeout, Duration};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/oauth/token", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut attempts = 0;
+            while let Ok(Ok((connection, _))) =
+                timeout(Duration::from_millis(400), listener.accept()).await
+            {
+                attempts += 1;
+                drop(connection);
+            }
+            attempts
+        });
+
+        assert!(super::refresh_tokens_with_refresh_token_at(
+            "test-refresh-token",
+            &endpoint,
+            Duration::from_millis(200),
+        )
+        .await
+        .is_err());
+        assert_eq!(server.await.unwrap(), 1);
     }
 
     #[test]
