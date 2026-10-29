@@ -3,7 +3,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     LazyLock, Mutex,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::{
     menu::{CheckMenuItemBuilder, Menu, MenuItemBuilder, PredefinedMenuItem, Submenu},
@@ -26,6 +26,44 @@ static TRAY_USAGE: LazyLock<Mutex<HashMap<String, UsageInfo>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static TRAY_SWITCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static TRAY_SWITCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static TRAY_RIGHT_CLICK_AT: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(|| Mutex::new(None));
+static LAST_TRAY_MENU: LazyLock<Mutex<Option<TrayMenuSignature>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+// Windows' native TrackPopupMenu may be dismissed when set_menu or set_icon
+// is called while it is open. The icon click API has no menu-closed event, so
+// avoid mutating it during the short interaction window.
+const TRAY_MENU_INTERACTION_GRACE: Duration = Duration::from_secs(20);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrayMenuSignature {
+    accounts: Vec<(String, String, bool)>,
+    #[cfg(target_os = "macos")]
+    dock_mode: crate::types::DockDisplayMode,
+}
+
+fn menu_signature(store: &AccountsStore) -> TrayMenuSignature {
+    TrayMenuSignature {
+        accounts: store
+            .accounts
+            .iter()
+            .map(|account| {
+                (
+                    account.id.clone(),
+                    format!("{}{}", account.name, usage_suffix(&account.id)),
+                    store.active_account_id.as_deref() == Some(&account.id),
+                )
+            })
+            .collect(),
+        #[cfg(target_os = "macos")]
+        dock_mode: load_app_settings().unwrap_or_default().dock_display_mode,
+    }
+}
+
+fn defer_menu_refresh(last_click: Option<Instant>, now: Instant) -> bool {
+    last_click
+        .is_some_and(|start| now.saturating_duration_since(start) < TRAY_MENU_INTERACTION_GRACE)
+}
 
 const TRAY_ID: &str = "codex-switcher-tray";
 const TRAY_ICON: tauri::image::Image<'static> = tauri::include_image!("./icons/tray.png");
@@ -261,14 +299,30 @@ fn create_tray_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 fn handle_tray_icon_event<R: Runtime>(tray: &tauri::tray::TrayIcon<R>, event: TrayIconEvent) {
-    if let TrayIconEvent::Click {
-        button: MouseButton::Left,
-        button_state: MouseButtonState::Up,
-        position,
-        ..
-    } = event
-    {
-        toggle_tray_window(tray.app_handle(), position);
+    match event {
+        TrayIconEvent::Click {
+            button: MouseButton::Right,
+            button_state: MouseButtonState::Down,
+            ..
+        } => {
+            // Keep periodic usage/metadata refreshes from destroying the open
+            // native Windows context menu before an item can be selected.
+            if let Ok(mut last) = TRAY_RIGHT_CLICK_AT.lock() {
+                *last = Some(Instant::now());
+            }
+        }
+        TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            position,
+            ..
+        } => {
+            if let Ok(mut last) = TRAY_RIGHT_CLICK_AT.lock() {
+                *last = None;
+            }
+            toggle_tray_window(tray.app_handle(), position);
+        }
+        _ => {}
     }
 }
 
@@ -367,6 +421,9 @@ fn append_dock_settings_menu<R: Runtime>(app: &AppHandle<R>, menu: &Menu<R>) -> 
 }
 
 fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
+    if let Ok(mut last) = TRAY_RIGHT_CLICK_AT.lock() {
+        *last = None;
+    }
     let item_id = event.id().as_ref();
 
     #[cfg(target_os = "macos")]
@@ -426,25 +483,52 @@ fn refresh_menu_on_main_thread<R: Runtime>(app: &AppHandle<R>) {
         return;
     };
 
-    match load_accounts()
-        .map_err(|error| error.to_string())
-        .and_then(|store| {
-            let settings = load_app_settings().unwrap_or_default();
-            let title = active_tray_title(
-                store.active_account_id.as_deref(),
-                settings.tray_display_mode,
-            );
-            let menu = build_menu(app, &store).map_err(|error| error.to_string())?;
-            Ok((menu, title, settings.tray_display_mode))
-        }) {
-        Ok((menu, title, mode)) => {
-            if let Err(error) = tray.set_menu(Some(menu)) {
-                eprintln!("Failed to refresh tray menu: {error}");
-            }
-            refresh_tray_display(&tray, mode, title.as_deref());
-        }
-        Err(error) => eprintln!("Failed to build tray menu: {error}"),
+    // A native Windows context menu is modal. Replacing it while open makes
+    // it disappear. Usage polling and external account updates can fire at
+    // any point during the interaction.
+    if cfg!(target_os = "windows")
+        && defer_menu_refresh(
+            TRAY_RIGHT_CLICK_AT.lock().ok().and_then(|last| *last),
+            Instant::now(),
+        )
+    {
+        return;
     }
+
+    let store = match load_accounts() {
+        Ok(store) => store,
+        Err(error) => {
+            eprintln!("Failed to load accounts for tray menu: {error}");
+            return;
+        }
+    };
+    let settings = load_app_settings().unwrap_or_default();
+    let title = active_tray_title(
+        store.active_account_id.as_deref(),
+        settings.tray_display_mode,
+    );
+
+    // Do not reassign the native menu for unchanged account labels/state.
+    // set_menu() is not a harmless no-op while a Windows popup is visible.
+    let signature = menu_signature(&store);
+    let changed = LAST_TRAY_MENU
+        .lock()
+        .ok()
+        .is_none_or(|previous| previous.as_ref() != Some(&signature));
+    if changed {
+        match build_menu(app, &store) {
+            Ok(menu) => match tray.set_menu(Some(menu)) {
+                Ok(()) => {
+                    if let Ok(mut previous) = LAST_TRAY_MENU.lock() {
+                        *previous = Some(signature);
+                    }
+                }
+                Err(error) => eprintln!("Failed to refresh tray menu: {error}"),
+            },
+            Err(error) => eprintln!("Failed to build tray menu: {error}"),
+        }
+    }
+    refresh_tray_display(&tray, settings.tray_display_mode, title.as_deref());
 }
 
 fn refresh_tray_display<R: Runtime>(
@@ -466,10 +550,9 @@ fn refresh_tray_display<R: Runtime>(
                     eprintln!("Failed to refresh tray icon template mode: {error}");
                 }
             }
-            #[cfg(target_os = "windows")]
-            if let Err(error) = tray.set_icon(Some(tray_icon_for_theme(current_system_theme()))) {
-                eprintln!("Failed to refresh tray icon: {error}");
-            }
+            // On Windows the icon is set at startup and on system theme
+            // changes; do not reset it for each usage refresh while a context
+            // menu might be open.
             if let Err(error) = tray.set_title(title) {
                 eprintln!("Failed to refresh tray title: {error}");
             }
@@ -482,10 +565,9 @@ fn refresh_tray_display<R: Runtime>(
             if let Err(error) = tray.set_icon(None) {
                 eprintln!("Failed to hide tray icon: {error}");
             }
-            #[cfg(target_os = "windows")]
-            if let Err(error) = tray.set_icon(Some(tray_icon_for_theme(current_system_theme()))) {
-                eprintln!("Failed to refresh tray icon: {error}");
-            }
+            // On Windows the icon is set at startup and on system theme
+            // changes; do not reset it for each usage refresh while a context
+            // menu might be open.
             if let Err(error) = tray.set_title(title) {
                 eprintln!("Failed to refresh tray title: {error}");
             }
@@ -535,14 +617,12 @@ fn active_usage_title(active_account_id: Option<&str>) -> String {
         .and_then(|cache| cache.get(active_account_id).cloned());
 
     match usage {
-        Some(usage) if usage.error.is_none() => {
-            usage_title(
-                usage.primary_used_percent,
-                usage.primary_window_minutes,
-                usage.secondary_used_percent,
-                usage.secondary_window_minutes,
-            )
-        }
+        Some(usage) if usage.error.is_none() => usage_title(
+            usage.primary_used_percent,
+            usage.primary_window_minutes,
+            usage.secondary_used_percent,
+            usage.secondary_window_minutes,
+        ),
         _ => "H:-- W:--".to_string(),
     }
 }
@@ -555,13 +635,13 @@ fn usage_title(
 ) -> String {
     let mut parts = Vec::new();
     if let Some(remaining) = remaining_percent_label(primary_used_percent) {
-        let label = window_duration_label(primary_window_minutes)
-            .unwrap_or_else(|| "H".to_string());
+        let label =
+            window_duration_label(primary_window_minutes).unwrap_or_else(|| "H".to_string());
         parts.push(format!("{label}:{remaining}"));
     }
     if let Some(remaining) = remaining_percent_label(secondary_used_percent) {
-        let label = window_duration_label(secondary_window_minutes)
-            .unwrap_or_else(|| "W".to_string());
+        let label =
+            window_duration_label(secondary_window_minutes).unwrap_or_else(|| "W".to_string());
         parts.push(format!("{label}:{remaining}"));
     }
 
@@ -615,8 +695,8 @@ fn usage_suffix(account_id: &str) -> String {
 
     let mut parts = Vec::new();
     if let Some(remaining) = session_remaining_title(usage.primary_used_percent, false) {
-        let label = window_duration_label(usage.primary_window_minutes)
-            .unwrap_or_else(|| "S".to_string());
+        let label =
+            window_duration_label(usage.primary_window_minutes).unwrap_or_else(|| "S".to_string());
         parts.push(format!("{label}:{remaining}"));
     }
     if let Some(used) = usage.secondary_used_percent {
@@ -730,6 +810,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_menu_refresh_is_deferred_after_right_click() {
+        let now = Instant::now();
+        assert!(defer_menu_refresh(Some(now), now + Duration::from_secs(1)));
+        assert!(defer_menu_refresh(Some(now), now + Duration::from_secs(19)));
+        assert!(!defer_menu_refresh(
+            Some(now),
+            now + Duration::from_secs(20)
+        ));
+        assert!(!defer_menu_refresh(None, now));
+    }
+
+    #[test]
+    fn menu_signature_only_changes_for_visible_menu_content() {
+        let store = AccountsStore::default();
+        assert_eq!(menu_signature(&store), menu_signature(&store));
+    }
+
+    #[test]
     fn themed_tray_icon_preserves_shape_and_switches_to_white() {
         let light = tray_icon_for_theme(tauri::Theme::Light);
         let dark = tray_icon_for_theme(tauri::Theme::Dark);
@@ -831,17 +929,17 @@ mod tests {
             usage_title(None, None, Some(35.0), Some(7 * 24 * 60)),
             "7d:65%"
         );
-        assert_eq!(
-            usage_title(Some(27.0), Some(5 * 60), None, None),
-            "5h:73%"
-        );
+        assert_eq!(usage_title(Some(27.0), Some(5 * 60), None, None), "5h:73%");
         assert_eq!(usage_title(None, None, None, None), "H:-- W:--");
     }
 
     #[test]
     fn window_duration_labels_round_to_hours_and_days() {
         assert_eq!(window_duration_label(Some(5 * 60)), Some("5h".to_string()));
-        assert_eq!(window_duration_label(Some(12 * 60)), Some("12h".to_string()));
+        assert_eq!(
+            window_duration_label(Some(12 * 60)),
+            Some("12h".to_string())
+        );
         assert_eq!(
             window_duration_label(Some(7 * 24 * 60)),
             Some("7d".to_string())
