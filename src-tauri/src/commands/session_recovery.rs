@@ -17,6 +17,7 @@ const CONTINUE_PROMPT: &str = "Continue the previous task.";
 struct StoppedSession {
     id: String,
     path: PathBuf,
+    running: Option<super::running_recovery::RunningTurn>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -53,8 +54,13 @@ pub struct RecoveryProgress {
 }
 
 #[tauri::command]
-pub fn prepare_codex_session_recovery() -> Result<usize, String> {
-    let sessions = find_quota_stopped_sessions();
+pub async fn prepare_codex_session_recovery() -> Result<usize, String> {
+    let open = super::running_recovery::open_rollouts().await?;
+    prepare_sessions(&open)
+}
+
+fn prepare_sessions(open: &std::collections::HashSet<PathBuf>) -> Result<usize, String> {
+    let sessions = find_recoverable_sessions(&open);
     let count = sessions.len();
     *PENDING_SESSIONS.lock().map_err(|error| error.to_string())? = sessions;
     Ok(count)
@@ -132,7 +138,11 @@ where
             current_session_id: Some(session.id.clone()),
         });
         // The user or another client may have continued it during the switch.
-        if !has_usage_limit_failure(&session.path) {
+        if !has_usage_limit_failure(&session.path)
+            && !session.running.as_ref().is_some_and(|snapshot| {
+                super::running_recovery::still_interrupted(&session.path, snapshot)
+            })
+        {
             report.skipped.push(session.id);
         } else {
             // Dropping an overdue attempt keeps its receipt and kills any CLI child.
@@ -397,14 +407,19 @@ fn read_resume_result(
     Ok(matched.then_some(Ok(())))
 }
 
+#[cfg(test)]
 fn find_quota_stopped_sessions() -> Vec<StoppedSession> {
+    find_recoverable_sessions(&std::collections::HashSet::new())
+}
+
+fn find_recoverable_sessions(open: &std::collections::HashSet<PathBuf>) -> Vec<StoppedSession> {
     let Ok(home) = crate::auth::get_codex_home() else {
         return Vec::new();
     };
     let root = home.join("sessions");
     let now = SystemTime::now();
     let mut sessions = Vec::new();
-    collect_jsonl(&root, &now, &mut sessions);
+    collect_jsonl(&root, &now, &mut sessions, open);
     sessions.sort_by(|(left, _), (right, _)| right.cmp(left));
     sessions
         .into_iter()
@@ -413,25 +428,36 @@ fn find_quota_stopped_sessions() -> Vec<StoppedSession> {
         .collect()
 }
 
-fn collect_jsonl(root: &Path, now: &SystemTime, sessions: &mut Vec<(SystemTime, StoppedSession)>) {
+fn collect_jsonl(
+    root: &Path,
+    now: &SystemTime,
+    sessions: &mut Vec<(SystemTime, StoppedSession)>,
+    open: &std::collections::HashSet<PathBuf>,
+) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_jsonl(&path, now, sessions);
+            collect_jsonl(&path, now, sessions, open);
         } else if path.extension().and_then(|value| value.to_str()) == Some("jsonl")
             && is_recent(&path, now)
-            && has_usage_limit_failure(&path)
         {
+            let running = open
+                .contains(&path)
+                .then(|| super::running_recovery::capture(&path))
+                .flatten();
+            if running.is_none() && !has_usage_limit_failure(&path) {
+                continue;
+            }
             if let (Some(modified), Some(id)) = (
                 fs::metadata(&path)
                     .ok()
                     .and_then(|metadata| metadata.modified().ok()),
                 session_id(&path),
             ) {
-                sessions.push((modified, StoppedSession { id, path }));
+                sessions.push((modified, StoppedSession { id, path, running }));
             }
         }
     }
@@ -715,7 +741,16 @@ mod tests {
         let binary = home.join("fake-codex");
         std::fs::write(&binary, "#!/bin/sh\n[ \"$1\" = queue ] || exit 1\nprintf 'queued\\n' >> \"$CODEX_HOME/queue-calls\"\nprintf '%s' \"$5\" > \"$CODEX_HOME/queued-prompt\"\n").unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-        (fixture, super::StoppedSession { id, path }, home, binary)
+        (
+            fixture,
+            super::StoppedSession {
+                id,
+                path,
+                running: None,
+            },
+            home,
+            binary,
+        )
     }
 
     #[cfg(unix)]
@@ -970,11 +1005,11 @@ mod tests {
         assert_eq!(found.len(), 32);
         assert_eq!(found[0].path.file_name().unwrap(), "rollout-0.jsonl");
         assert_eq!(found[31].path.file_name().unwrap(), "rollout-31.jsonl");
-        assert_eq!(super::prepare_codex_session_recovery().unwrap(), 32);
+        assert_eq!(super::prepare_sessions(&Default::default()).unwrap(), 32);
         super::cancel_codex_session_recovery().unwrap();
         let report = super::resume_pending_sessions(|_| {}).await.unwrap();
         assert!(report.resumed.is_empty() && report.failed.is_empty() && report.skipped.is_empty());
-        assert_eq!(super::prepare_codex_session_recovery().unwrap(), 32);
+        assert_eq!(super::prepare_sessions(&Default::default()).unwrap(), 32);
         for session in found {
             writeln!(
                 std::fs::OpenOptions::new()
@@ -998,6 +1033,103 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn recovers_quota_and_owned_running_chats_together() {
+        use std::io::Write;
+        let (_fixture, _, home, binary) = delivery_fixture();
+        let root = home.join("sessions");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut open = std::collections::HashSet::new();
+        let mut expected = Vec::new();
+        for n in 0..8 {
+            let id = uuid::Uuid::new_v4().to_string();
+            let path = root.join(format!("{id}.jsonl"));
+            let tail = match n {
+                0 => quota_failure(),
+                4 => event(json!({"type":"task_complete"})),
+                5 => format!(
+                    "{}\n{}",
+                    event(json!({"type":"task_started"})),
+                    json!({"type":"response_item","payload":{"type":"function_call","name":"request_user_input","call_id":"question"}})
+                ),
+                _ => event(json!({"type":"task_started"})),
+            };
+            std::fs::write(&path, format!("{}\n{tail}\n", json!({"type":"session_meta","payload":{"id":id,"agent_path":if n == 7 {"/root/child"} else {"/root"}}}))).unwrap();
+            if n != 6 {
+                open.insert(path);
+            }
+            if n < 4 {
+                expected.push(id);
+            }
+        }
+        let sessions = super::find_recoverable_sessions(&open);
+        assert_eq!(
+            sessions.len(),
+            4,
+            "quota plus three running chats, excluding idle, waiting, stale and child chats"
+        );
+        let report = super::recover_sessions(
+            sessions,
+            &home,
+            &binary,
+            |id| {
+                let path = root.join(format!("{id}.jsonl"));
+                let prompt = std::fs::read_to_string(home.join("queued-prompt")).unwrap();
+                async move {
+                    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+                    writeln!(
+                        file,
+                        "{}\n{}",
+                        event(json!({"type":"task_started"})),
+                        event(json!({"type":"user_message","message":prompt}))
+                    )
+                    .unwrap();
+                    Ok(())
+                }
+            },
+            |_| {},
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(report.skipped.is_empty());
+        expected.sort();
+        let mut resumed = report.resumed;
+        resumed.sort();
+        assert_eq!(resumed, expected);
+        assert_eq!(
+            std::fs::read_to_string(home.join("queue-calls"))
+                .unwrap()
+                .lines()
+                .count(),
+            4
+        );
+        // A second snapshot cannot enqueue continuations for old unfinished logs.
+        assert!(super::find_recoverable_sessions(&Default::default()).is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore = "Read-only inspection of the running desktop; no queue or restart"]
+    async fn live_running_snapshot() {
+        let open = super::super::running_recovery::open_rollouts()
+            .await
+            .unwrap();
+        let root = dirs::home_dir().unwrap().join(".codex/sessions");
+        let mut sessions = Vec::new();
+        super::collect_jsonl(&root, &std::time::SystemTime::now(), &mut sessions, &open);
+        let running = sessions
+            .iter()
+            .filter(|(_, session)| session.running.is_some())
+            .count();
+        println!(
+            "Open rollout files: {}; recoverable running chats: {running}",
+            open.len()
+        );
+        assert!(running > 0, "Run while a desktop chat is working");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn batch_deadline_reports_every_session_and_retains_pending_receipt() {
         use std::cell::RefCell;
         use std::io::Write;
@@ -1005,10 +1137,12 @@ mod tests {
         let second = super::StoppedSession {
             id: uuid::Uuid::new_v4().to_string(),
             path: home.join("second.jsonl"),
+            running: None,
         };
         let third = super::StoppedSession {
             id: uuid::Uuid::new_v4().to_string(),
             path: home.join("third.jsonl"),
+            running: None,
         };
         std::fs::copy(&first.path, &second.path).unwrap();
         std::fs::copy(&first.path, &third.path).unwrap();
@@ -1117,7 +1251,11 @@ mod tests {
             "test session must be quota stopped"
         );
         super::resume_session(
-            &super::StoppedSession { id, path },
+            &super::StoppedSession {
+                id,
+                path,
+                running: None,
+            },
             &home,
             &super::codex_binary(),
             super::open_desktop_thread,

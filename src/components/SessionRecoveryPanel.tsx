@@ -44,8 +44,8 @@ export function SessionRecoveryPanel({ state, onDismiss }: {
         {report && (
           <>
             <p>{report.resumed.length + report.skipped.length + report.failed.length === 0
-              ? "No recent conversations stopped by a usage limit were found."
-              : `Started continuation for ${report.resumed.length} conversation${report.resumed.length === 1 ? "" : "s"}. ${report.skipped.length} already continued or completed. ${report.failed.length} need attention.`}</p>
+              ? "No conversations needing recovery were found."
+              : `Started continuation for ${report.resumed.length} conversation${report.resumed.length === 1 ? "" : "s"}. ${report.skipped.length} no longer need recovery. ${report.failed.length} need attention.`}</p>
             {report.timed_out && <p className="mt-2 text-amber-700 dark:text-amber-300">The two-minute recovery limit was reached. Any pending messages and their receipts were kept; opening a conversation may start its queued continuation.</p>}
           </>
         )}

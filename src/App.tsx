@@ -2131,7 +2131,7 @@ function App() {
                       disabled={isCompletingForceClose || desktopReopen.checking || !desktopReopen.available || !desktopReopen.reopen}
                       className="mt-0.5 h-4 w-4 shrink-0 accent-orange-600 disabled:opacity-50"
                     />
-                    Auto-resume conversations stopped by usage limits
+                    Auto-resume interrupted conversations after switching
                   </label>
                   <p className="text-xs text-gray-500 dark:text-gray-400">
                     {desktopReopen.checking
@@ -2140,7 +2140,7 @@ function App() {
                         ? "Requires a supported Codex desktop app to reopen."
                         : !desktopReopen.reopen
                           ? "Enable desktop reopening to auto-resume conversations. You can change this in Settings."
-                          : "Continue recent conversations stopped by a usage limit after switching. This preference is saved in Settings."}
+                          : "Continue quota-stopped chats and, on macOS, running chats interrupted by the restart. This preference is saved in Settings."}
                   </p>
                 </div>
               )}
