@@ -7,6 +7,7 @@ import type {
   ImportAccountsSummary,
 } from "../types";
 import { invokeBackend, isTauriRuntime, type FileSource } from "../lib/platform";
+import { completeImportWithoutBlockingOnUsage } from "../lib/accountImportCompletion";
 
 export function useAccounts() {
   const [accounts, setAccounts] = useState<AccountWithUsage[]>([]);
@@ -316,22 +317,19 @@ export function useAccounts() {
   );
 
   const importFromFile = useCallback(
-    async (source: FileSource, name: string) => {
-      try {
-        if (typeof source === "string") {
-          await invokeBackend<AccountInfo>("add_account_from_file", { path: source, name });
-        } else {
+    async (source: FileSource, name: string): Promise<void> => {
+      await completeImportWithoutBlockingOnUsage(
+        async () => {
+          if (typeof source === "string") {
+            return invokeBackend<AccountInfo>("add_account_from_file", { path: source, name });
+          }
           const contents = await source.text();
-          await invokeBackend<AccountInfo>("add_account_from_auth_json_text", {
-            name,
-            contents,
-          });
-        }
-        const accountList = await loadAccounts();
-        await refreshUsage(accountList);
-      } catch (err) {
-        throw err;
-      }
+          return invokeBackend<AccountInfo>("add_account_from_auth_json_text", { name, contents });
+        },
+        () => loadAccounts(true),
+        (account) => refreshUsage([account]),
+        (err) => console.warn("Could not refresh imported account usage:", err),
+      );
     },
     [loadAccounts, refreshUsage]
   );
