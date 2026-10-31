@@ -1,3 +1,8 @@
+# Reminder: Perhaps you no longer need this software
+
+<img width="1015" height="244" alt="image" src="https://github.com/user-attachments/assets/3770389e-b2db-4b68-af1e-7bf4a5ff5ced" />
+
+
 <p align="center">
   <img src="src-tauri/icons/logo.svg" alt="Codex Switcher" width="128" height="128">
 </p>
