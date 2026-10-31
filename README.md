@@ -1,4 +1,4 @@
-# Reminder: Perhaps you no longer need this software
+# Reminder: perhaps you no longer need this software
 
 <img width="1015" height="244" alt="image" src="https://github.com/user-attachments/assets/3770389e-b2db-4b68-af1e-7bf4a5ff5ced" />
 
