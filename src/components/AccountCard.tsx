@@ -6,6 +6,7 @@ import { ResetCreditsMenu } from "./ResetCreditsMenu";
 import { UsageBar } from "./UsageBar";
 
 const RESET_CREDITS_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const USAGE_STATS_OPEN_STORAGE_KEY_PREFIX = "usage-stats-open:";
 
 interface AccountCardProps {
   account: AccountWithUsage;
@@ -16,6 +17,7 @@ interface AccountCardProps {
   onRename: (newName: string) => Promise<void>;
   switching?: boolean;
   switchDisabled?: boolean;
+  codexRunning?: boolean;
   warmingUp?: boolean;
   masked?: boolean;
   onToggleMask?: () => void;
@@ -102,6 +104,7 @@ export function AccountCard({
   onRename,
   switching,
   switchDisabled,
+  codexRunning = false,
   warmingUp,
   masked = false,
   onToggleMask,
@@ -117,8 +120,35 @@ export function AccountCard({
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState(account.name);
   const [resetCredits, setResetCredits] = useState<AccountResetCredits | null>(null);
+  const [statsOpen, setStatsOpen] = useState<boolean>(() => {
+    if (typeof window === "undefined") return account.is_active;
+    try {
+      const stored = window.localStorage.getItem(
+        `${USAGE_STATS_OPEN_STORAGE_KEY_PREFIX}${account.id}`
+      );
+      if (stored !== null) return stored === "1";
+    } catch {
+      // Fall back to default.
+    }
+    return account.is_active;
+  });
   const inputRef = useRef<HTMLInputElement>(null);
   const resetRequestSeq = useRef(0);
+
+  const toggleStatsOpen = () => {
+    setStatsOpen((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(
+          `${USAGE_STATS_OPEN_STORAGE_KEY_PREFIX}${account.id}`,
+          next ? "1" : "0"
+        );
+      } catch {
+        // Ignore storage errors; stats still toggle for the current session.
+      }
+      return next;
+    });
+  };
 
   useEffect(() => {
     if (isEditing && inputRef.current) {
@@ -127,11 +157,16 @@ export function AccountCard({
     }
   }, [isEditing]);
 
+  useEffect(() => {
+    if (account.usage && !account.usage.error) {
+      setLastRefresh(new Date());
+    }
+  }, [account.usage]);
+
   const handleRefresh = async () => {
     setIsRefreshing(true);
     try {
       await onRefresh();
-      setLastRefresh(new Date());
     } finally {
       setIsRefreshing(false);
     }
@@ -177,7 +212,8 @@ export function AccountCard({
 
   const planKey = account.plan_type?.toLowerCase() || "api_key";
   const planColorClass = planColors[planKey] || planColors.free;
-  const showSubscriptionStatus = account.auth_mode === "chat_g_p_t";
+  const showSubscriptionStatus =
+    account.auth_mode === "chat_g_p_t" && account.plan_type?.toLowerCase() !== "free";
   const subscriptionStatus = getSubscriptionStatus(account.subscription_expires_at);
   const compactResetCredits = !account.is_active;
 
@@ -237,7 +273,6 @@ export function AccountCard({
           <div className="flex items-center gap-2 mb-1">
             {account.is_active && (
               <span className="flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-2 w-2 rounded-full bg-green-400 opacity-75"></span>
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
               </span>
             )}
@@ -273,6 +308,15 @@ export function AccountCard({
         </div>
 
         <div className="flex max-w-[60%] flex-wrap items-center justify-end gap-2">
+          {/* Refresh */}
+          <button
+            onClick={handleRefresh}
+            disabled={isRefreshing}
+            className="p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition-colors disabled:opacity-50"
+            title="Refresh usage"
+          >
+            <span className={`inline-block h-4 w-4 text-base leading-none ${isRefreshing ? "animate-spin" : ""}`}>↻</span>
+          </button>
           {/* Eye toggle */}
           {onToggleMask && (
             <button
@@ -322,13 +366,6 @@ export function AccountCard({
         )}
       </div>
 
-      <AccountUsageStats
-        accountId={account.id}
-        enabled={account.auth_mode === "chat_g_p_t"}
-        defaultOpen={account.is_active}
-        onStatsLoaded={handleStatsLoaded}
-      />
-
       {/* Actions */}
       <div className="flex gap-2 mt-3">
         {account.is_active ? (
@@ -342,14 +379,19 @@ export function AccountCard({
           <button
             onClick={onSwitch}
             disabled={switching || switchDisabled}
-            className={`flex-1 px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50 ${
-              switchDisabled
-                ? "bg-gray-200 dark:bg-gray-800 text-gray-400 dark:text-gray-500 cursor-not-allowed"
+            className={`flex-1 flex items-center justify-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+              codexRunning
+                ? "bg-blue-100 hover:bg-blue-200 dark:bg-blue-900/30 dark:hover:bg-blue-900/50 text-blue-800 dark:text-blue-300"
                 : "bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900"
             }`}
-            title={switchDisabled ? "Close all Codex processes first" : undefined}
+            title={codexRunning ? "Close running Codex processes and switch account" : undefined}
           >
-            {switching ? "Switching..." : switchDisabled ? "Codex Running" : "Switch"}
+            {codexRunning && !switching && (
+              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M10.3 3.9 1.8 18.1A2 2 0 003.5 21h17a2 2 0 001.7-2.9L13.7 3.9a2 2 0 00-3.4 0Z" />
+              </svg>
+            )}
+            {switching ? "Switching..." : "Switch"}
           </button>
         )}
         <button
@@ -383,20 +425,32 @@ export function AccountCard({
                 : "Enable auto warm-up for this account"
             }
           >
-            {autoWarmupLabel ?? `Auto: ${autoWarmupEnabled ? "on" : "off"}`}
+            <span className="flex items-center gap-1">
+              <span>♻</span>
+              <span>{autoWarmupLabel ?? (autoWarmupEnabled ? "on" : "off")}</span>
+            </span>
           </button>
         )}
         <button
-          onClick={handleRefresh}
-          disabled={isRefreshing}
+          onClick={toggleStatsOpen}
           className={`px-3 py-2 text-sm rounded-lg transition-colors ${
-            isRefreshing
-              ? "bg-gray-200 dark:bg-gray-800 text-gray-400 dark:text-gray-500"
+            statsOpen
+              ? "bg-indigo-50 dark:bg-indigo-900/20 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 text-indigo-600 dark:text-indigo-300"
               : "bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300"
           }`}
-          title="Refresh usage"
+          title={statsOpen ? "Hide usage statistics" : "Show usage statistics"}
         >
-          <span className={isRefreshing ? "animate-spin inline-block" : ""}>↻</span>
+          <svg
+            className="h-4 w-4"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+          >
+            <path d="M4 19V5" strokeLinecap="round" />
+            <path d="M4 19h16" strokeLinecap="round" />
+            <path d="M8 15l3-4 3 2 4-6" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
         </button>
         <button
           onClick={onDelete}
@@ -406,6 +460,15 @@ export function AccountCard({
           ✕
         </button>
       </div>
+
+      <AccountUsageStats
+        accountId={account.id}
+        enabled={account.auth_mode === "chat_g_p_t"}
+        open={statsOpen}
+        usage={account.usage}
+        usageLoading={account.usageLoading}
+        onStatsLoaded={handleStatsLoaded}
+      />
     </div>
   );
 }

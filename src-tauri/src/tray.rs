@@ -1,5 +1,8 @@
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    LazyLock, Mutex,
+};
 use std::time::Duration;
 
 use tauri::{
@@ -21,6 +24,8 @@ use crate::{
 
 static TRAY_USAGE: LazyLock<Mutex<HashMap<String, UsageInfo>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static TRAY_SWITCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static TRAY_SWITCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 const TRAY_ID: &str = "codex-switcher-tray";
 const TRAY_ICON: tauri::image::Image<'static> = tauri::include_image!("./icons/tray.png");
@@ -32,6 +37,7 @@ const OPEN_ITEM_ID: &str = "open";
 const QUIT_ITEM_ID: &str = "quit";
 const TRAY_WIDTH: f64 = 300.0;
 const TRAY_HEIGHT: f64 = 420.0;
+const ACCOUNT_METADATA_REFRESH_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,8 +58,11 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .cloned()
         .expect("application icon should be configured");
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     let icon = TRAY_ICON;
+
+    #[cfg(target_os = "windows")]
+    let icon = tray_icon_for_theme(current_system_theme());
 
     let builder = TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
@@ -73,12 +82,137 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     refresh_menu(app);
 
     watch_accounts_file(app.clone());
+    #[cfg(target_os = "windows")]
+    watch_system_theme(app.clone());
     poll_active_account_usage(app.clone());
+    poll_account_metadata(app.clone());
     Ok(())
 }
 
 pub fn refresh<R: Runtime>(app: &AppHandle<R>) {
     refresh_menu(app);
+}
+
+#[cfg(target_os = "windows")]
+fn update_theme<R: Runtime>(app: &AppHandle<R>, theme: tauri::Theme) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+
+    if let Err(error) = tray.set_icon(Some(tray_icon_for_theme(theme))) {
+        eprintln!("Failed to update tray icon theme: {error}");
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn tray_icon_for_theme(theme: tauri::Theme) -> tauri::image::Image<'static> {
+    let mut rgba = TRAY_ICON.rgba().to_vec();
+    if theme == tauri::Theme::Dark {
+        for pixel in rgba.chunks_exact_mut(4) {
+            if pixel[3] > 0 {
+                pixel[..3].fill(255);
+            }
+        }
+    }
+
+    tauri::image::Image::new_owned(rgba, TRAY_ICON.width(), TRAY_ICON.height())
+}
+
+#[cfg(target_os = "windows")]
+fn current_system_theme() -> tauri::Theme {
+    read_system_theme().unwrap_or(tauri::Theme::Light)
+}
+
+#[cfg(target_os = "windows")]
+fn read_system_theme() -> Option<tauri::Theme> {
+    use windows_sys::Win32::{
+        Foundation::ERROR_SUCCESS,
+        System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD},
+    };
+
+    let subkey = wide_null(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+    // The notification area follows Windows' system mode, which is independent of app mode.
+    let value_name = wide_null("SystemUsesLightTheme");
+    let mut value = 0_u32;
+    let mut value_size = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            value_name.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            (&mut value as *mut u32).cast(),
+            &mut value_size,
+        )
+    };
+
+    (status == ERROR_SUCCESS).then_some(if value == 0 {
+        tauri::Theme::Dark
+    } else {
+        tauri::Theme::Light
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(target_os = "windows")]
+fn watch_system_theme<R: Runtime>(app: AppHandle<R>) {
+    std::thread::spawn(move || {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, ERROR_SUCCESS, WAIT_OBJECT_0},
+            System::Registry::{
+                RegCloseKey, RegNotifyChangeKeyValue, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER,
+                KEY_NOTIFY, REG_NOTIFY_CHANGE_LAST_SET,
+            },
+            System::Threading::{CreateEventW, WaitForSingleObject, INFINITE},
+        };
+
+        let subkey = wide_null(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+        let mut key: HKEY = std::ptr::null_mut();
+        let open_status =
+            unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_NOTIFY, &mut key) };
+        if open_status != ERROR_SUCCESS {
+            eprintln!("Failed to watch Windows system theme: {open_status}");
+            return;
+        }
+
+        let event = unsafe { CreateEventW(std::ptr::null(), 0, 0, std::ptr::null()) };
+        if event.is_null() {
+            eprintln!("Failed to create Windows system theme event");
+            unsafe {
+                RegCloseKey(key);
+            }
+            return;
+        }
+
+        loop {
+            let status =
+                unsafe { RegNotifyChangeKeyValue(key, 0, REG_NOTIFY_CHANGE_LAST_SET, event, 1) };
+            if status != ERROR_SUCCESS {
+                eprintln!("Failed to watch Windows system theme: {status}");
+                break;
+            }
+
+            if let Some(theme) = read_system_theme() {
+                update_theme(&app, theme);
+            }
+
+            let wait_status = unsafe { WaitForSingleObject(event, INFINITE) };
+            if wait_status != WAIT_OBJECT_0 {
+                eprintln!("Failed waiting for Windows system theme change: {wait_status}");
+                break;
+            }
+        }
+
+        unsafe {
+            CloseHandle(event);
+            RegCloseKey(key);
+        }
+    });
 }
 
 /// Store usage reported by the main app and refresh the native menu labels.
@@ -249,34 +383,31 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
                 return;
             };
 
-            if load_accounts()
-                .ok()
-                .and_then(|store| store.active_account_id)
-                .as_deref()
-                == Some(account_id)
-            {
-                refresh_menu(app);
-                return;
-            }
-
-            if let Err(error) = switch_account_by_id(account_id) {
-                eprintln!("Failed to switch account from tray: {error}");
-                refresh_menu(app);
-                if is_codex_running_switch_block(&error) {
-                    show_main_window(app);
-                    let _ = app.emit(
-                        SWITCH_ACCOUNT_BLOCKED_EVENT,
-                        SwitchAccountBlockedPayload {
-                            account_id: account_id.to_string(),
-                            error,
-                        },
-                    );
+            let app = app.clone();
+            let account_id = account_id.to_string();
+            let request_sequence = TRAY_SWITCH_SEQUENCE.fetch_add(1, Ordering::AcqRel) + 1;
+            tauri::async_runtime::spawn(async move {
+                let _tray_switch_guard = TRAY_SWITCH_LOCK.lock().await;
+                if request_sequence != TRAY_SWITCH_SEQUENCE.load(Ordering::Acquire) {
+                    return;
                 }
-                return;
-            }
 
-            refresh_menu(app);
-            let _ = app.emit(ACCOUNTS_CHANGED_EVENT, ());
+                if let Err(error) = switch_account_by_id(&account_id).await {
+                    eprintln!("Failed to switch account from tray: {error}");
+                    refresh_menu(&app);
+                    if is_codex_running_switch_block(&error) {
+                        show_main_window(&app);
+                        let _ = app.emit(
+                            SWITCH_ACCOUNT_BLOCKED_EVENT,
+                            SwitchAccountBlockedPayload { account_id, error },
+                        );
+                    }
+                    return;
+                }
+
+                refresh_menu(&app);
+                let _ = app.emit(ACCOUNTS_CHANGED_EVENT, ());
+            });
         }
     }
 }
@@ -326,17 +457,18 @@ fn refresh_tray_display<R: Runtime>(
             if let Err(error) = tray.set_visible(true) {
                 eprintln!("Failed to show tray icon: {error}");
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(target_os = "macos")]
             {
                 if let Err(error) = tray.set_icon(Some(TRAY_ICON)) {
                     eprintln!("Failed to refresh tray icon: {error}");
                 }
-                #[cfg(target_os = "macos")]
-                {
-                    if let Err(error) = tray.set_icon_as_template(true) {
-                        eprintln!("Failed to refresh tray icon template mode: {error}");
-                    }
+                if let Err(error) = tray.set_icon_as_template(true) {
+                    eprintln!("Failed to refresh tray icon template mode: {error}");
                 }
+            }
+            #[cfg(target_os = "windows")]
+            if let Err(error) = tray.set_icon(Some(tray_icon_for_theme(current_system_theme()))) {
+                eprintln!("Failed to refresh tray icon: {error}");
             }
             if let Err(error) = tray.set_title(title) {
                 eprintln!("Failed to refresh tray title: {error}");
@@ -351,7 +483,7 @@ fn refresh_tray_display<R: Runtime>(
                 eprintln!("Failed to hide tray icon: {error}");
             }
             #[cfg(target_os = "windows")]
-            if let Err(error) = tray.set_icon(Some(TRAY_ICON)) {
+            if let Err(error) = tray.set_icon(Some(tray_icon_for_theme(current_system_theme()))) {
                 eprintln!("Failed to refresh tray icon: {error}");
             }
             if let Err(error) = tray.set_title(title) {
@@ -404,25 +536,51 @@ fn active_usage_title(active_account_id: Option<&str>) -> String {
 
     match usage {
         Some(usage) if usage.error.is_none() => {
-            usage_title(usage.primary_used_percent, usage.secondary_used_percent)
+            usage_title(
+                usage.primary_used_percent,
+                usage.primary_window_minutes,
+                usage.secondary_used_percent,
+                usage.secondary_window_minutes,
+            )
         }
         _ => "H:-- W:--".to_string(),
     }
 }
 
-fn usage_title(primary_used_percent: Option<f64>, secondary_used_percent: Option<f64>) -> String {
+fn usage_title(
+    primary_used_percent: Option<f64>,
+    primary_window_minutes: Option<i64>,
+    secondary_used_percent: Option<f64>,
+    secondary_window_minutes: Option<i64>,
+) -> String {
     let mut parts = Vec::new();
     if let Some(remaining) = remaining_percent_label(primary_used_percent) {
-        parts.push(format!("H:{remaining}"));
+        let label = window_duration_label(primary_window_minutes)
+            .unwrap_or_else(|| "H".to_string());
+        parts.push(format!("{label}:{remaining}"));
     }
     if let Some(remaining) = remaining_percent_label(secondary_used_percent) {
-        parts.push(format!("W:{remaining}"));
+        let label = window_duration_label(secondary_window_minutes)
+            .unwrap_or_else(|| "W".to_string());
+        parts.push(format!("{label}:{remaining}"));
     }
 
     if parts.is_empty() {
         "H:-- W:--".to_string()
     } else {
         parts.join(" ")
+    }
+}
+
+fn window_duration_label(window_minutes: Option<i64>) -> Option<String> {
+    let minutes = window_minutes?;
+    if minutes <= 0 {
+        return None;
+    }
+    if minutes < 24 * 60 {
+        Some(format!("{}h", (minutes + 59) / 60))
+    } else {
+        Some(format!("{}d", (minutes + 24 * 60 - 1) / (24 * 60)))
     }
 }
 
@@ -457,11 +615,15 @@ fn usage_suffix(account_id: &str) -> String {
 
     let mut parts = Vec::new();
     if let Some(remaining) = session_remaining_title(usage.primary_used_percent, false) {
-        parts.push(format!("S:{remaining}"));
+        let label = window_duration_label(usage.primary_window_minutes)
+            .unwrap_or_else(|| "S".to_string());
+        parts.push(format!("{label}:{remaining}"));
     }
     if let Some(used) = usage.secondary_used_percent {
         if used.is_finite() {
-            parts.push(format!("W:{:.0}%", (100.0 - used).clamp(0.0, 100.0)));
+            let label = window_duration_label(usage.secondary_window_minutes)
+                .unwrap_or_else(|| "W".to_string());
+            parts.push(format!("{label}:{:.0}%", (100.0 - used).clamp(0.0, 100.0)));
         }
     }
 
@@ -534,9 +696,66 @@ fn poll_active_account_usage<R: Runtime>(app: AppHandle<R>) {
     });
 }
 
+/// Keep subscription dates current even when the main webview is hidden or
+/// suspended. Live metadata stays in memory and is announced to the webviews.
+fn poll_account_metadata<R: Runtime>(app: AppHandle<R>) {
+    std::thread::spawn(move || loop {
+        let accounts = load_accounts()
+            .map(|store| store.accounts)
+            .unwrap_or_default();
+
+        for account in accounts {
+            if matches!(account.auth_data, crate::types::AuthData::ApiKey { .. }) {
+                continue;
+            }
+
+            if tauri::async_runtime::block_on(crate::commands::refresh_account_metadata(account.id))
+                .is_err()
+            {
+                eprintln!(
+                    "[Account] Failed to refresh subscription metadata for: {}",
+                    account.name
+                );
+            }
+        }
+
+        let _ = app.emit(ACCOUNTS_CHANGED_EVENT, ());
+
+        std::thread::sleep(ACCOUNT_METADATA_REFRESH_INTERVAL);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn themed_tray_icon_preserves_shape_and_switches_to_white() {
+        let light = tray_icon_for_theme(tauri::Theme::Light);
+        let dark = tray_icon_for_theme(tauri::Theme::Dark);
+
+        assert_eq!(light.rgba(), TRAY_ICON.rgba());
+        assert_eq!(
+            dark.rgba().iter().skip(3).step_by(4).collect::<Vec<_>>(),
+            TRAY_ICON
+                .rgba()
+                .iter()
+                .skip(3)
+                .step_by(4)
+                .collect::<Vec<_>>()
+        );
+        assert!(dark
+            .rgba()
+            .chunks_exact(4)
+            .filter(|pixel| pixel[3] > 0)
+            .all(|pixel| pixel[..3] == [255, 255, 255]));
+        assert!(dark
+            .rgba()
+            .chunks_exact(4)
+            .zip(TRAY_ICON.rgba().chunks_exact(4))
+            .filter(|(_, original)| original[3] == 0)
+            .all(|(themed, original)| themed == original));
+    }
 
     #[test]
     fn embedded_tray_icon_is_not_an_opaque_block() {
@@ -604,10 +823,35 @@ mod tests {
 
     #[test]
     fn usage_title_omits_missing_windows() {
-        assert_eq!(usage_title(Some(27.0), Some(82.0)), "H:73% W:18%");
-        assert_eq!(usage_title(None, Some(35.0)), "W:65%");
-        assert_eq!(usage_title(Some(27.0), None), "H:73%");
-        assert_eq!(usage_title(None, None), "H:-- W:--");
+        assert_eq!(
+            usage_title(Some(27.0), Some(5 * 60), Some(82.0), Some(30 * 24 * 60)),
+            "5h:73% 30d:18%"
+        );
+        assert_eq!(
+            usage_title(None, None, Some(35.0), Some(7 * 24 * 60)),
+            "7d:65%"
+        );
+        assert_eq!(
+            usage_title(Some(27.0), Some(5 * 60), None, None),
+            "5h:73%"
+        );
+        assert_eq!(usage_title(None, None, None, None), "H:-- W:--");
+    }
+
+    #[test]
+    fn window_duration_labels_round_to_hours_and_days() {
+        assert_eq!(window_duration_label(Some(5 * 60)), Some("5h".to_string()));
+        assert_eq!(window_duration_label(Some(12 * 60)), Some("12h".to_string()));
+        assert_eq!(
+            window_duration_label(Some(7 * 24 * 60)),
+            Some("7d".to_string())
+        );
+        assert_eq!(
+            window_duration_label(Some(30 * 24 * 60)),
+            Some("30d".to_string())
+        );
+        assert_eq!(window_duration_label(Some(0)), None);
+        assert_eq!(window_duration_label(None), None);
     }
 
     #[test]

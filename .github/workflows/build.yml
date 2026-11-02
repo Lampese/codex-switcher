@@ -10,6 +10,10 @@ on:
         description: 'Version tag (e.g., v1.0.0)'
         required: true
         type: string
+      release_note:
+        description: 'Short release note shown in the update prompt'
+        required: true
+        type: string
 
 jobs:
   publish:
@@ -37,6 +41,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -72,6 +78,26 @@ jobs:
             echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
           fi
 
+      - name: Determine release note
+        id: release_note
+        shell: bash
+        env:
+          INPUT_RELEASE_NOTE: ${{ inputs.release_note }}
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            note="$INPUT_RELEASE_NOTE"
+          else
+            remote_tag_ref="refs/release-tags/$RELEASE_TAG"
+            git fetch --force --no-tags origin "refs/tags/$RELEASE_TAG:$remote_tag_ref"
+            note="$(git for-each-ref --format='%(contents)' "$remote_tag_ref")"
+          fi
+          {
+            echo 'note<<RELEASE_NOTE_EOF'
+            echo "$note"
+            echo 'RELEASE_NOTE_EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -81,6 +107,7 @@ jobs:
         with:
           tagName: ${{ steps.tag.outputs.tag }}
           releaseName: ${{ steps.tag.outputs.tag }}
+          releaseBody: ${{ steps.release_note.outputs.note }}
           generateReleaseNotes: true
           releaseDraft: false
           prerelease: false

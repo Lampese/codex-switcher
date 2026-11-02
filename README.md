@@ -1,3 +1,8 @@
+# Reminder: perhaps you no longer need this software
+
+<img width="1015" height="244" alt="image" src="https://github.com/user-attachments/assets/3770389e-b2db-4b68-af1e-7bf4a5ff5ced" />
+
+
 <p align="center">
   <img src="src-tauri/icons/logo.svg" alt="Codex Switcher" width="128" height="128">
 </p>
@@ -9,10 +14,16 @@
   Easily switch between accounts, monitor usage, schedule warm-ups, and stay in control of your quota
 </p>
 
+<div align="center">
+
+[![](https://dcbadge.limes.pink/api/server/4QzyJTC3S)](https://discord.gg/4QzyJTC3S)
+
+</div>
+
 ## Features
 
 - **Multi-Account Management** – Add, rename, mask, import, export, and manage multiple Codex accounts in one place
-- **Quick Switching** – Switch between accounts from the main window, native tray menu, or tray popup
+- **Quick Switching** – Switch between accounts from the main window, native tray menu, or tray popup while preserving rotated ChatGPT sessions
 - **Usage Stats** – View account usage stats for OAuth accounts, including lifetime tokens, daily buckets, streaks, activity insights, and top integrations
 - **Manual Reset Credits** – See available manual reset credits beside each account plan badge, with the closest expiry highlighted as it approaches
 - **Automatic Warm-Up** – Warm up one account or all accounts manually, after each 5-hour reset window, or at specific scheduled times of day
@@ -119,6 +130,23 @@ Codex Switcher shows two kinds of account usage information:
 The tray popup also includes compact active-account stats for today and
 the last 7 days, while keeping the normal rate-limit refresh flow separate.
 
+## Safe Account Switching
+
+ChatGPT can replace an OAuth refresh token after using it. Once replaced, the
+older token may no longer be accepted. Before Codex Switcher writes another
+account to `~/.codex/auth.json`, it now saves the latest tokens from the account
+that is currently active. Switching back therefore restores the current session
+instead of an older snapshot.
+
+Token refreshes and account switches are serialized so a background refresh
+cannot finish late and overwrite the account you just selected. Codex Switcher
+also avoids refreshing the active account while Codex or ChatGPT is running;
+close the running app before switching accounts.
+
+If an older Codex Switcher version already saved an invalid refresh token, sign
+in to that account again or remove and re-add it once. An invalidated token
+cannot be recovered locally.
+
 ## macOS Dock and Menu Bar Mode
 
 On macOS, Codex Switcher can either stay visible in the Dock or live only in the
@@ -183,10 +211,13 @@ pnpm version:minor
 pnpm version:major
 
 # Prepare a release commit and tag
-# This automatically runs the version bump first.
+# This prompts for a short release note and runs the version bump first.
 pnpm release patch
 
 # Prepare and push a release
-# This automatically runs the version bump first.
+# The tag stores the release note for the in-app update prompt.
 pnpm release patch -- --push
+
+# For non-interactive use, pass the note explicitly.
+pnpm release patch -- --push --note "Fixed account switching issues"
 ```

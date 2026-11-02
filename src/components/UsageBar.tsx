@@ -65,7 +65,7 @@ function RateLimitBar({
   return (
     <div className="space-y-1">
       <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400">
-        <span>{label} {windowLabel && `(${windowLabel})`}</span>
+        <span>{windowLabel ? `${windowLabel} limit` : label}</span>
         <span>
           {remainingPercent.toFixed(0)}% left
           {resetLabel && ` • resets ${resetLabel}`}

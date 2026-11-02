@@ -1,14 +1,42 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { createInterface } from "node:readline/promises";
 
 const root = process.cwd();
 const input = process.argv[2];
 const shouldPush = process.argv.includes("--push");
+const noteFlagIndex = process.argv.indexOf("--note");
+const noteFlagValue = noteFlagIndex === -1 ? undefined : process.argv[noteFlagIndex + 1];
+
+if (noteFlagIndex !== -1 && (!noteFlagValue || noteFlagValue.startsWith("--"))) {
+  console.error('--note requires a value, for example: --note "Fixed account switching".');
+  process.exit(1);
+}
+
+let releaseNote = noteFlagValue?.trim() ?? "";
 
 if (!input) {
-  console.error("Usage: node scripts/release.mjs <version|major|minor|patch> [--push]");
+  console.error(
+    "Usage: node scripts/release.mjs <version|major|minor|patch> [--push] [--note \"short note\"]",
+  );
   process.exit(1);
+}
+
+if (!releaseNote) {
+  if (!process.stdin.isTTY) {
+    console.error("A release note is required. Pass it with --note \"short note\".");
+    process.exit(1);
+  }
+
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  releaseNote = (await prompt.question("Short release note: ")).trim();
+  prompt.close();
+
+  if (!releaseNote) {
+    console.error("Release note cannot be empty.");
+    process.exit(1);
+  }
 }
 
 const VERSION_FILES = [
@@ -105,7 +133,7 @@ assertVersionsMatch(nextVersion);
 
 run("git", ["add", ...VERSION_FILES]);
 run("git", ["commit", "-m", `chore: release ${nextVersion}`]);
-run("git", ["tag", "-a", `v${nextVersion}`, "-m", `v${nextVersion}`]);
+run("git", ["tag", "-a", `v${nextVersion}`, "-m", releaseNote]);
 
 console.log(`Created commit and tag for v${nextVersion}.`);
 

@@ -1,8 +1,12 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAccounts } from "./hooks/useAccounts";
+import { useDesktopReopen } from "./hooks/useDesktopReopen";
+import { useCodexClosePreference } from "./hooks/useCodexClosePreference";
+import { SettingsModal } from "./components/SettingsModal";
+import { finishForceClose, type DesktopReopenPreference } from "./lib/desktopReopen";
+import type { CodexClosePreference } from "./lib/codexClosePreference";
 import { useForceCloseCodexProcesses } from "./hooks/useForceCloseCodexProcesses";
-import { AccountCard, AddAccountModal, UpdateChecker } from "./components";
+import { AccountCard, AddAccountModal, UpdateChecker, WindowResizeBorders } from "./components";
 import type { AccountWithUsage, CodexProcessInfo, DockDisplayMode, UsageInfo } from "./types";
 import {
   exportFullBackupFile,
@@ -37,6 +41,7 @@ import {
   type AutoWarmupWindow,
   type AutoWarmupWindowKind,
 } from "./lib/autoWarmupPolicy";
+import { getTauriWindow } from "./lib/tauriWindow";
 import "./App.css";
 
 const AUTO_WARMUP_CHECK_INTERVAL_MS = 30 * 1000;
@@ -60,7 +65,6 @@ type AutoWarmupLedger = Record<
     lastAutoWindowKind?: AutoWarmupWindowKind;
   }
 >;
-const appWindow = getCurrentWindow();
 const isMacOs =
   typeof navigator !== "undefined" &&
   /(Mac|iPhone|iPod|iPad)/i.test(navigator.userAgent);
@@ -194,7 +198,7 @@ function App() {
   const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [processInfo, setProcessInfo] = useState<CodexProcessInfo | null>(null);
-  const [pendingTraySwitchAccountId, setPendingTraySwitchAccountId] = useState<string | null>(null);
+  const [pendingSwitchAccountId, setPendingSwitchAccountId] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isOpeningCodex, setIsOpeningCodex] = useState(false);
   const [isExportingSlim, setIsExportingSlim] = useState(false);
@@ -230,6 +234,7 @@ function App() {
   const [timedWarmupDraft, setTimedWarmupDraft] = useState("");
   const [maskedAccounts, setMaskedAccounts] = useState<Set<string>>(new Set());
   const [accountSearchQuery, setAccountSearchQuery] = useState("");
+  const [isAccountSearchOpen, setIsAccountSearchOpen] = useState(false);
   const isAccountSearchEnabled = accounts.length >= ACCOUNT_SEARCH_THRESHOLD;
   const [otherAccountsSort, setOtherAccountsSort] = useState<
     | "deadline_asc"
@@ -240,8 +245,31 @@ function App() {
     | "subscription_desc"
   >("deadline_asc");
   const [isActionsMenuOpen, setIsActionsMenuOpen] = useState(false);
+  const [isNavMenuOpen, setIsNavMenuOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isCompletingForceClose, setIsCompletingForceClose] = useState(false);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const forceCloseInFlightRef = useRef(false);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/event").then(async ({ listen }) => {
+      const stop = await listen("desktop-reopen-settings-requested", () => {
+        setIsSettingsOpen(true);
+      });
+      if (disposed) stop();
+      else unlisten = stop;
+    }).catch((err) => console.error("Failed to listen for settings requests:", err));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
   const actionsMenuRef = useRef<HTMLDivElement | null>(null);
-  const timedWarmupRef = useRef<HTMLDivElement | null>(null);
+  const navMenuRef = useRef<HTMLDivElement | null>(null);
   const [themeMode, setThemeMode] = useState<ThemeMode>(readStoredTheme);
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
   const [closeBehaviorPromptOpen, setCloseBehaviorPromptOpen] = useState(false);
@@ -359,14 +387,14 @@ function App() {
   const handleTitlebarDrag = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
       if (!isTauriRuntime() || event.button !== 0) return;
-      void appWindow.startDragging();
+      void getTauriWindow()?.startDragging();
     },
     []
   );
 
   const handleTitlebarDoubleClick = useCallback(() => {
     if (!isTauriRuntime()) return;
-    void appWindow.toggleMaximize();
+    void getTauriWindow()?.toggleMaximize();
   }, []);
 
   const toggleMask = (accountId: string) => {
@@ -448,11 +476,25 @@ function App() {
   }, [isActionsMenuOpen]);
 
   useEffect(() => {
+    if (!isNavMenuOpen) return;
+
+    const handleClickOutside = (event: MouseEvent) => {
+      if (!navMenuRef.current) return;
+      if (!navMenuRef.current.contains(event.target as Node)) {
+        setIsNavMenuOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [isNavMenuOpen]);
+
+  useEffect(() => {
     if (!isTimedWarmupOpen) return;
 
     const handleClickOutside = (event: MouseEvent) => {
-      if (!timedWarmupRef.current) return;
-      if (!timedWarmupRef.current.contains(event.target as Node)) {
+      if (!navMenuRef.current) return;
+      if (!navMenuRef.current.contains(event.target as Node)) {
         setIsTimedWarmupOpen(false);
       }
     };
@@ -478,6 +520,9 @@ function App() {
 
   useEffect(() => {
     if (!isTauriRuntime() || isMacOs) return;
+
+    const appWindow = getTauriWindow();
+    if (!appWindow) return;
 
     let unlisten: (() => void) | undefined;
 
@@ -508,17 +553,29 @@ function App() {
   }, []);
 
   const handleSwitch = async (accountId: string) => {
-    // Check processes before switching
-    const latestProcessInfo = await checkProcesses();
-    if (latestProcessInfo && !latestProcessInfo.can_switch) {
-      return;
-    }
-
     try {
       setSwitchingId(accountId);
+      const latestProcessInfo = await checkProcesses();
+      if (!latestProcessInfo) {
+        showWarmupToast("Could not check running Codex processes. Try again.", true);
+        return;
+      }
+      if (!latestProcessInfo.can_switch) {
+        setPendingSwitchAccountId(accountId);
+        setForceCloseConfirmOpen(true);
+        return;
+      }
+
       await switchAccount(accountId);
     } catch (err) {
       console.error("Failed to switch account:", err);
+      const latestProcessInfo = await checkProcesses();
+      if (latestProcessInfo && !latestProcessInfo.can_switch) {
+        setPendingSwitchAccountId(accountId);
+        setForceCloseConfirmOpen(true);
+      } else {
+        showWarmupToast(`Switch failed: ${formatWarmupError(err)}`, true);
+      }
     } finally {
       setSwitchingId(null);
     }
@@ -552,8 +609,9 @@ function App() {
   };
 
   const showWarmupToast = useCallback((message: string, isError = false) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     setWarmupToast({ message, isError });
-    setTimeout(() => setWarmupToast(null), 2500);
+    toastTimerRef.current = setTimeout(() => setWarmupToast(null), isError ? 10000 : 2500);
   }, []);
 
   const formatWarmupError = useCallback((err: unknown) => {
@@ -589,14 +647,32 @@ function App() {
   const {
     forceCloseConfirmOpen,
     setForceCloseConfirmOpen,
-    isForceClosingCodex,
-    forceCloseCodexProcesses,
+    isForceClosingCodex: isKillingCodex,
+    closeCodexProcesses,
   } = useForceCloseCodexProcesses({
     processCount: processInfo?.count ?? 0,
     checkProcesses,
     showToast: showWarmupToast,
     formatError: formatWarmupError,
   });
+  const isForceClosingCodex = isKillingCodex || isCompletingForceClose;
+  const desktopReopen = useDesktopReopen(forceCloseConfirmOpen);
+  const codexClose = useCodexClosePreference(forceCloseConfirmOpen);
+  const saveDesktopReopenPreference = (value: DesktopReopenPreference) => {
+    try {
+      desktopReopen.savePreference(value);
+    } catch (err) {
+      showWarmupToast(`Could not save preference: ${formatWarmupError(err)}`, true);
+    }
+  };
+  const saveCodexClosePreference = (value: CodexClosePreference) => {
+    try {
+      codexClose.savePreference(value);
+    } catch (err) {
+      showWarmupToast(`Could not save close preference: ${formatWarmupError(err)}`, true);
+    }
+  };
+
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -609,11 +685,12 @@ function App() {
       unlisten = await listen<SwitchAccountBlockedPayload>(
         SWITCH_ACCOUNT_BLOCKED_EVENT,
         async (event) => {
+          if (forceCloseInFlightRef.current) return;
           const latestProcessInfo = await checkProcesses();
           const accountId = event.payload?.accountId;
 
           if (accountId && latestProcessInfo && !latestProcessInfo.can_switch) {
-            setPendingTraySwitchAccountId(accountId);
+            setPendingSwitchAccountId(accountId);
             setForceCloseConfirmOpen(true);
             return;
           }
@@ -622,7 +699,7 @@ function App() {
             try {
               setSwitchingId(accountId);
               await switchAccount(accountId);
-              setPendingTraySwitchAccountId(null);
+              setPendingSwitchAccountId(null);
               showWarmupToast("Switched account from tray.");
             } catch (err) {
               console.error("Failed to retry tray account switch:", err);
@@ -686,41 +763,56 @@ function App() {
     [closeBehaviorDontAskAgain, formatWarmupError, showWarmupToast]
   );
 
-  const handleForceCloseConfirm = useCallback(async () => {
-    const accountId = pendingTraySwitchAccountId;
-    const latestProcessInfo = await forceCloseCodexProcesses();
-
-    if (!accountId) {
-      return;
-    }
-
-    if (!latestProcessInfo?.can_switch) {
-      setPendingTraySwitchAccountId(null);
-      return;
-    }
-
+  const handleForceCloseConfirm = async () => {
+    if (forceCloseInFlightRef.current || desktopReopen.checking) return;
+    forceCloseInFlightRef.current = true;
+    const accountId = pendingSwitchAccountId;
+    const shouldReopen = desktopReopen.available && desktopReopen.reopen;
+    setIsCompletingForceClose(true);
     try {
-      setSwitchingId(accountId);
-      await switchAccount(accountId);
-      setPendingTraySwitchAccountId(null);
-      showWarmupToast("Switched account after force closing Codex.");
-    } catch (err) {
-      console.error("Failed to switch account after force close:", err);
-      setPendingTraySwitchAccountId(null);
-      showWarmupToast(
-        `Switch failed after force close: ${formatWarmupError(err)}`,
-        true
+      try {
+        desktopReopen.rememberSelection();
+      } catch (err) {
+        showWarmupToast(`Could not save preference: ${formatWarmupError(err)}`, true);
+      }
+      try {
+        codexClose.rememberSelection();
+      } catch (err) {
+        showWarmupToast(`Could not save close preference: ${formatWarmupError(err)}`, true);
+      }
+      const result = await closeCodexProcesses(shouldReopen, codexClose.forceClose);
+      if (!result?.processInfo?.can_switch) return;
+
+      await finishForceClose(
+        { canSwitch: true, reopenToken: result.reopenToken },
+        accountId ? async () => {
+          setSwitchingId(accountId);
+          await switchAccount(accountId);
+          showWarmupToast(`Switched account after ${codexClose.forceClose ? "force closing" : "closing"} Codex.`);
+        } : null,
+        async (token) => {
+          try {
+            await invokeBackend("reopen_closed_codex_desktop", { token });
+            showWarmupToast(accountId ? "Account switched. Codex desktop reopened." : "Codex desktop reopened.");
+          } catch (err) {
+            showWarmupToast(`Codex closed${accountId ? " and account switched" : ""}, but reopening failed: ${formatWarmupError(err)}`, true);
+          }
+        },
       );
+      if (shouldReopen && !result.reopenToken) {
+        showWarmupToast("No closed desktop app could be identified for reopening. Open Codex manually.", true);
+      }
+    } catch (err) {
+      console.error("Failed to switch account after closing Codex:", err);
+      showWarmupToast(`Switch failed after closing Codex: ${formatWarmupError(err)}`, true);
     } finally {
+      setPendingSwitchAccountId(null);
       setSwitchingId(null);
+      setIsCompletingForceClose(false);
+      forceCloseInFlightRef.current = false;
+      void checkProcesses();
     }
-  }, [
-    forceCloseCodexProcesses,
-    formatWarmupError,
-    pendingTraySwitchAccountId,
-    showWarmupToast,
-    switchAccount,
-  ]);
+  };
 
   const handleWarmupAccount = async (accountId: string, accountName: string) => {
     try {
@@ -795,6 +887,14 @@ function App() {
     []
   );
 
+  const formatWindowDuration = (minutes: number | null | undefined): string => {
+    if (!minutes || minutes <= 0) return "";
+    if (minutes < 24 * 60) {
+      return `${Math.ceil(minutes / 60)}h`;
+    }
+    return `${Math.ceil(minutes / (24 * 60))}d`;
+  };
+
   const getAutoWarmupLabel = useCallback(
     (
       usage: UsageInfo | undefined,
@@ -802,17 +902,22 @@ function App() {
       isRunning: boolean
     ) => {
       if (isRunning) return "Warming...";
-      if (!isEnabled) return "Auto: off";
-      if (!usage || usage.error) return "Auto: on";
+      if (!isEnabled) return "off";
+      if (!usage || usage.error) return "on";
 
       const windowKind = getAutoWarmupWindowKind(usage);
       if (windowKind === "session" && isLimitFull(usage.secondary_used_percent)) {
-        return "Waiting weekly reset";
+        const weeklyDuration = formatWindowDuration(usage.secondary_window_minutes);
+        return weeklyDuration ? `Waiting ${weeklyDuration}` : "Waiting reset";
       }
-      if (windowKind === "session") return "Auto: 5h";
-      if (windowKind === "weekly") return "Auto: weekly";
+      if (windowKind === "session") {
+        return formatWindowDuration(usage.primary_window_minutes) || "5h";
+      }
+      if (windowKind === "weekly") {
+        return formatWindowDuration(usage.secondary_window_minutes) || "7d";
+      }
 
-      return "Auto: on";
+      return "on";
     },
     []
   );
@@ -1132,13 +1237,13 @@ function App() {
   const activeAccount = accounts.find((a) => a.is_active);
   const otherAccounts = accounts.filter((a) => !a.is_active);
   const hasRunningProcesses = processInfo && processInfo.count > 0;
-  const pendingTraySwitchAccount = useMemo(
-    () => accounts.find((account) => account.id === pendingTraySwitchAccountId),
-    [accounts, pendingTraySwitchAccountId]
+  const pendingSwitchAccount = useMemo(
+    () => accounts.find((account) => account.id === pendingSwitchAccountId),
+    [accounts, pendingSwitchAccountId]
   );
-  const forceCloseConfirmLabel = pendingTraySwitchAccount
-    ? "Force close and switch account"
-    : "Force close running Codex processes";
+  const closeConfirmLabel = pendingSwitchAccount
+    ? "Close and switch account"
+    : "Close Codex";
 
   const sortedOtherAccounts = useMemo(() => {
     const getResetDeadline = (resetAt: number | null | undefined) =>
@@ -1244,6 +1349,7 @@ function App() {
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
+      <WindowResizeBorders isMaximized={isWindowMaximized} />
       <header className="sticky top-0 z-40 border-b border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-900">
         <div className="flex h-9 items-center bg-white px-3 dark:bg-gray-900">
           <div
@@ -1251,11 +1357,11 @@ function App() {
             onDoubleClick={handleTitlebarDoubleClick}
             className={`h-full flex-1 select-none cursor-default ${isMacOs ? "ml-18 mr-2" : "mr-3"}`}
           />
-          {!isMacOs && (
+          {isTauriRuntime() && !isMacOs && (
             <div className="flex items-center gap-1">
               <button
                 onClick={() => {
-                  void appWindow.minimize();
+                  void getTauriWindow()?.minimize();
                 }}
                 className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
                 title="Minimize"
@@ -1266,7 +1372,7 @@ function App() {
               </button>
               <button
                 onClick={() => {
-                  void appWindow.toggleMaximize();
+                  void getTauriWindow()?.toggleMaximize();
                 }}
                 className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100"
                 title={isWindowMaximized ? "Restore" : "Maximize"}
@@ -1284,7 +1390,7 @@ function App() {
               </button>
               <button
                 onClick={() => {
-                  void appWindow.close();
+                  void getTauriWindow()?.close();
                 }}
                 className="flex h-8 w-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-red-500 hover:text-white dark:text-gray-400 dark:hover:bg-red-500 dark:hover:text-white"
                 title="Close"
@@ -1326,14 +1432,14 @@ function App() {
                       {hasRunningProcesses && (
                         <button
                           onClick={() => {
-                            setPendingTraySwitchAccountId(null);
+                            setPendingSwitchAccountId(null);
                             setForceCloseConfirmOpen(true);
                           }}
                           disabled={isForceClosingCodex}
                           className="inline-flex items-center rounded-md border border-red-200 bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700 transition-colors hover:bg-red-100 disabled:opacity-50 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300 dark:hover:bg-red-900/30"
-                          title="Force close running Codex processes"
+                          title="Close running Codex processes"
                         >
-                          Force close
+                          Close
                         </button>
                       )}
                     </div>
@@ -1341,7 +1447,7 @@ function App() {
                   {isTauriRuntime() && processInfo && !hasRunningProcesses && (
                     <button
                       onClick={handleOpenCodexApp}
-                      disabled={isOpeningCodex}
+                      disabled={isOpeningCodex || isCompletingForceClose || switchingId !== null}
                       className="inline-flex items-center rounded-md border border-green-200 bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700 transition-colors hover:bg-green-100 disabled:opacity-50 dark:border-green-800 dark:bg-green-900/20 dark:text-green-300 dark:hover:bg-green-900/30"
                       title="Open Codex app"
                     >
@@ -1383,41 +1489,120 @@ function App() {
                 <span className={isRefreshing ? "animate-spin inline-block" : ""}>↻</span>
               </button>
               <button
-                onClick={handleWarmupAll}
+                onClick={() => void handleWarmupAll()}
                 disabled={isWarmingAll || accounts.length === 0}
-                className="flex h-10 w-10 items-center justify-center rounded-lg bg-gray-100 text-gray-700 transition-colors hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700 shrink-0"
-                title="Send minimal traffic using all accounts"
+                className={`flex h-10 w-10 items-center justify-center rounded-lg transition-colors disabled:opacity-50 shrink-0 ${
+                  isWarmingAll
+                    ? "bg-amber-100 text-amber-500 dark:bg-amber-900/30 dark:text-amber-300"
+                    : "bg-amber-50 text-amber-700 hover:bg-amber-100 dark:bg-amber-900/20 dark:text-amber-300 dark:hover:bg-amber-900/40"
+                }`}
+                title={isWarmingAll ? "Warming up all accounts" : "Warm up all accounts"}
               >
                 <span className={isWarmingAll ? "animate-pulse" : ""}>⚡</span>
               </button>
-              <button
-                onClick={() => setAutoWarmupAllEnabled((prev) => !prev)}
-                disabled={accounts.length === 0}
-                className={`flex h-10 items-center justify-center rounded-lg px-3 text-xs font-semibold transition-colors disabled:opacity-50 shrink-0 whitespace-nowrap ${
-                  autoWarmupAllEnabled
-                    ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-900/20 dark:text-emerald-300 dark:hover:bg-emerald-900/30"
-                    : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
-                }`}
-                title={
-                  autoWarmupAllEnabled
-                    ? "Disable auto warm-up for all accounts"
-                    : "Enable auto warm-up for all accounts"
-                }
-              >
-                {headerAutoWarmupLabel}
-              </button>
-              <div className="relative shrink-0" ref={timedWarmupRef}>
+              {isAccountSearchEnabled && (
                 <button
-                  onClick={() => setIsTimedWarmupOpen((prev) => !prev)}
-                  className={`flex h-10 items-center justify-center rounded-lg px-3 text-xs font-semibold transition-colors whitespace-nowrap ${
-                    timedWarmupEnabled
-                      ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-900/20 dark:text-emerald-300 dark:hover:bg-emerald-900/30"
+                  onClick={() => {
+                    if (isAccountSearchOpen) {
+                      setAccountSearchQuery("");
+                    }
+                    setIsAccountSearchOpen((prev) => !prev);
+                  }}
+                  className={`flex h-10 w-10 items-center justify-center rounded-lg transition-colors shrink-0 ${
+                    isAccountSearchOpen
+                      ? "bg-gray-900 text-white hover:bg-gray-800 dark:bg-black dark:text-white dark:hover:bg-neutral-900"
                       : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
                   }`}
-                  title="Schedule warm-up at specific times of day for all accounts"
+                  title={isAccountSearchOpen ? "Hide account search" : "Search accounts"}
                 >
-                  {timedWarmupLabel} ▾
+                  <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <circle cx="11" cy="11" r="7" />
+                    <path d="m20 20-3.5-3.5" strokeLinecap="round" />
+                  </svg>
                 </button>
+              )}
+
+              <div className="relative" ref={navMenuRef}>
+                <button
+                  onClick={() => {
+                    setIsTimedWarmupOpen(false);
+                    setIsNavMenuOpen((prev) => !prev);
+                  }}
+                  className={`flex h-10 w-10 items-center justify-center rounded-lg transition-colors shrink-0 ${
+                    isNavMenuOpen
+                      ? "bg-gray-900 text-white hover:bg-gray-800 dark:bg-black dark:text-white dark:hover:bg-neutral-900"
+                      : "bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
+                  }`}
+                  title="Menu"
+                >
+                  <svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
+                    <circle cx="12" cy="5" r="1.6" />
+                    <circle cx="12" cy="12" r="1.6" />
+                    <circle cx="12" cy="19" r="1.6" />
+                  </svg>
+                </button>
+                {isNavMenuOpen && (
+                  <div className="absolute right-0 z-50 mt-2 w-64 rounded-xl border border-gray-200 bg-white p-2 text-gray-700 shadow-xl dark:border-neutral-800 dark:bg-black dark:text-white">
+                    <button
+                      onClick={() => {
+                        setIsNavMenuOpen(false);
+                        setIsSettingsOpen(true);
+                      }}
+                      className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 dark:text-white dark:hover:bg-neutral-900"
+                    >
+                      Settings
+                    </button>
+                    <button
+                      onClick={() => {
+                        setIsNavMenuOpen(false);
+                        setAutoWarmupAllEnabled((prev) => !prev);
+                      }}
+                      disabled={accounts.length === 0}
+                      className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 disabled:opacity-50 dark:text-white dark:hover:bg-neutral-900"
+                    >
+                      <span>Auto Warm Up</span>
+                      <span
+                        className={`rounded-md px-1.5 py-0.5 text-[11px] font-medium ${
+                          autoWarmupAllEnabled
+                            ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
+                            : "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400"
+                        }`}
+                      >
+                        {headerAutoWarmupLabel}
+                      </span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        setIsNavMenuOpen(false);
+                        setIsTimedWarmupOpen((prev) => !prev);
+                      }}
+                      className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 dark:text-white dark:hover:bg-neutral-900"
+                    >
+                      <span>Timer</span>
+                      <span
+                        className={`rounded-md px-1.5 py-0.5 text-[11px] font-medium ${
+                          timedWarmupEnabled
+                            ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
+                            : "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400"
+                        }`}
+                      >
+                        {timedWarmupLabel}
+                      </span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        setIsNavMenuOpen(false);
+                        setThemeMode((prev) => (prev === "dark" ? "light" : "dark"));
+                      }}
+                      className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-gray-100 dark:text-white dark:hover:bg-neutral-900"
+                    >
+                      <span>Appearance</span>
+                      <span className="text-[11px] text-gray-400 dark:text-gray-500">
+                        {themeMode === "dark" ? "☾ Dark" : "☀ Light"}
+                      </span>
+                    </button>
+                  </div>
+                )}
                 {isTimedWarmupOpen && (
                   <div className="absolute right-0 z-20 mt-2 w-64 rounded-lg border border-gray-200 bg-white p-3 shadow-lg dark:border-gray-700 dark:bg-gray-900">
                     <label className="flex items-center justify-between text-sm font-medium text-gray-800 dark:text-gray-100">
@@ -1476,14 +1661,6 @@ function App() {
                   </div>
                 )}
               </div>
-              <button
-                onClick={() => setThemeMode((prev) => (prev === "dark" ? "light" : "dark"))}
-                className="flex h-10 w-10 items-center justify-center rounded-lg bg-gray-100 text-lg text-gray-700 transition-colors hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700 shrink-0"
-                title={themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-              >
-                {themeMode === "dark" ? "☀" : "☾"}
-              </button>
-
               <div className="relative" ref={actionsMenuRef}>
                 <button
                   onClick={() => setIsActionsMenuOpen((prev) => !prev)}
@@ -1551,7 +1728,7 @@ function App() {
       </header>
 
       {/* Main Content */}
-      <main className="max-w-5xl mx-auto px-6 py-8">
+      <main className="max-w-5xl mx-auto px-6 pt-4 pb-8">
         {loading && accounts.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20">
             <div className="animate-spin h-10 w-10 border-2 border-gray-900 dark:border-gray-100 border-t-transparent rounded-full mb-4"></div>
@@ -1581,9 +1758,20 @@ function App() {
             </button>
           </div>
         ) : (
-          <div className="space-y-8">
-            {isAccountSearchEnabled && (
-              <div className="relative max-w-lg">
+          <div className="space-y-4">
+            {hasNoMatchingAccounts && (
+              <div className="rounded-2xl border border-dashed border-gray-300 px-6 py-12 text-center dark:border-gray-700">
+                <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">
+                  No matching accounts
+                </h2>
+                <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                  Try a different account name or email address.
+                </p>
+              </div>
+            )}
+
+            {isAccountSearchEnabled && isAccountSearchOpen && (
+              <div className="relative w-full">
                 <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-gray-400 dark:text-gray-500">
                   <svg
                     className="h-4 w-4"
@@ -1603,6 +1791,7 @@ function App() {
                   onChange={(event) => setAccountSearchQuery(event.target.value)}
                   placeholder="Search accounts by name or email"
                   aria-label="Search accounts"
+                  autoFocus
                   className="w-full rounded-xl border border-gray-300 bg-white py-2.5 pl-10 pr-10 text-sm text-gray-900 shadow-sm transition-colors placeholder:text-gray-400 focus:border-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-200 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100 dark:placeholder:text-gray-500 dark:focus:border-gray-600 dark:focus:ring-gray-800"
                 />
                 {accountSearchQuery.length > 0 && (
@@ -1627,17 +1816,6 @@ function App() {
               </div>
             )}
 
-            {hasNoMatchingAccounts && (
-              <div className="rounded-2xl border border-dashed border-gray-300 px-6 py-12 text-center dark:border-gray-700">
-                <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">
-                  No matching accounts
-                </h2>
-                <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                  Try a different account name or email address.
-                </p>
-              </div>
-            )}
-
             {/* Active Account */}
             {activeAccount &&
               matchesAccountSearch(activeAccount, normalizedAccountSearchQuery) && (
@@ -1657,7 +1835,8 @@ function App() {
                     }
                     onRename={(newName) => renameAccount(activeAccount.id, newName)}
                     switching={switchingId === activeAccount.id}
-                    switchDisabled={hasRunningProcesses ?? false}
+                    switchDisabled={switchingId !== null || isForceClosingCodex}
+                    codexRunning={hasRunningProcesses ?? false}
                     warmingUp={
                       isWarmingAll ||
                       warmingUpId === activeAccount.id ||
@@ -1753,7 +1932,8 @@ function App() {
                       }
                       onRename={(newName) => renameAccount(account.id, newName)}
                       switching={switchingId === account.id}
-                      switchDisabled={hasRunningProcesses ?? false}
+                      switchDisabled={switchingId !== null || isForceClosingCodex}
+                      codexRunning={hasRunningProcesses ?? false}
                       warmingUp={
                         isWarmingAll ||
                         warmingUpId === account.id ||
@@ -1807,37 +1987,96 @@ function App() {
         </div>
       )}
 
+      {isSettingsOpen && (
+        <SettingsModal
+          reopenPreference={desktopReopen.preference}
+          onReopenPreferenceChange={saveDesktopReopenPreference}
+          closePreference={codexClose.preference}
+          onClosePreferenceChange={saveCodexClosePreference}
+          onClose={() => setIsSettingsOpen(false)}
+        />
+      )}
+
       {forceCloseConfirmOpen && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
           <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-md mx-4 shadow-xl">
             <div className="p-5 border-b border-gray-100 dark:border-gray-800">
               <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-                Force close running Codex processes?
+                Close running Codex processes?
               </h2>
             </div>
             <div className="p-5 space-y-3">
               <p className="text-sm text-gray-600 dark:text-gray-300">
-                This will force close {processInfo?.count ?? 0} Codex process
-                {(processInfo?.count ?? 0) === 1 ? "" : "es"} that currently
-                block account switching.
+                This will {codexClose.forceClose ? "force close" : "gracefully close"} {processInfo?.count ?? 0} Codex process
+                {(processInfo?.count ?? 0) === 1 ? "" : "es"} that currently{" "}
+                {(processInfo?.count ?? 0) === 1 ? "blocks" : "block"} account switching.
               </p>
-              {pendingTraySwitchAccount && (
+              <div className="space-y-2 rounded-lg border border-gray-200 bg-gray-50 p-3 dark:border-gray-700 dark:bg-gray-800">
+                {codexClose.preference !== "ask" ? (
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    Codex will {codexClose.forceClose ? "be force closed" : "close gracefully"}. You can change this in Settings.
+                  </p>
+                ) : (
+                  <>
+                    <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
+                      <input type="checkbox" checked={codexClose.forceClose} onChange={(event) => codexClose.setForceClose(event.target.checked)} disabled={isForceClosingCodex} className="h-4 w-4 accent-red-600" />
+                      Force close Codex
+                    </label>
+                    <label className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
+                      <input type="checkbox" checked={codexClose.remember} onChange={(event) => codexClose.setRemember(event.target.checked)} disabled={isForceClosingCodex} className="h-4 w-4 accent-orange-600" />
+                      Remember this selection
+                    </label>
+                    <p className="text-xs text-gray-500 dark:text-gray-400">
+                      {codexClose.forceClose
+                        ? "Stops Codex immediately. Unsaved work may be lost."
+                        : "Asks Codex to quit normally so it can finish cleanup."}
+                    </p>
+                  </>
+                )}
+              </div>
+              {pendingSwitchAccount && (
                 <p className="text-sm text-gray-600 dark:text-gray-300">
                   After closing Codex, Codex Switcher will switch to{" "}
                   <span className="font-medium text-gray-900 dark:text-gray-100">
-                    {pendingTraySwitchAccount.name}
+                    {pendingSwitchAccount.name}
                   </span>
                   .
                 </p>
               )}
-              <p className="text-sm text-red-600 dark:text-red-300">
-                Unsaved Codex work may be lost.
-              </p>
+              <div className="space-y-2 rounded-lg bg-gray-50 dark:bg-gray-800 p-3">
+                {desktopReopen.checking ? (
+                  <p className="text-sm text-gray-500 dark:text-gray-400">Checking for a desktop app to reopen...</p>
+                ) : desktopReopen.available && desktopReopen.preference !== "ask" ? (
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    {desktopReopen.preference === "always"
+                      ? "Codex desktop will reopen automatically."
+                      : "Codex desktop will stay closed."}{" "}
+                    You can change this in Settings.
+                  </p>
+                ) : desktopReopen.available ? (
+                  <>
+                    <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
+                      <input type="checkbox" checked={desktopReopen.reopen} onChange={(event) => desktopReopen.setReopen(event.target.checked)} disabled={isForceClosingCodex} className="h-4 w-4 accent-orange-600" />
+                      Reopen Codex desktop after close
+                    </label>
+                    <label className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
+                      <input type="checkbox" checked={desktopReopen.remember} onChange={(event) => desktopReopen.setRemember(event.target.checked)} disabled={isForceClosingCodex} className="h-4 w-4 accent-orange-600" />
+                      Remember this selection
+                    </label>
+                    <p className="text-xs text-gray-500 dark:text-gray-400">You can change this later in Settings. Terminal and IDE sessions will not reopen.</p>
+                  </>
+                ) : (
+                  <p className="text-sm text-gray-500 dark:text-gray-400">No supported desktop app could be identified for reopening. Codex will only be closed.</p>
+                )}
+              </div>
+              {codexClose.forceClose && (
+                <p className="text-sm text-red-600 dark:text-red-300">Unsaved Codex work may be lost.</p>
+              )}
             </div>
             <div className="flex justify-end gap-3 p-5 border-t border-gray-100 dark:border-gray-800">
               <button
                 onClick={() => {
-                  setPendingTraySwitchAccountId(null);
+                  setPendingSwitchAccountId(null);
                   setForceCloseConfirmOpen(false);
                 }}
                 disabled={isForceClosingCodex}
@@ -1849,12 +2088,12 @@ function App() {
                 onClick={() => {
                   void handleForceCloseConfirm();
                 }}
-                disabled={isForceClosingCodex}
-                className="px-4 py-2.5 text-sm font-medium rounded-lg bg-red-600 hover:bg-red-700 text-white transition-colors disabled:opacity-50"
+                disabled={isForceClosingCodex || desktopReopen.checking}
+                className={`px-4 py-2.5 text-sm font-medium rounded-lg text-white transition-colors disabled:opacity-50 ${codexClose.forceClose ? "bg-red-600 hover:bg-red-700" : "bg-orange-600 hover:bg-orange-700"}`}
               >
                 {isForceClosingCodex
-                  ? "Force closing..."
-                  : forceCloseConfirmLabel}
+                  ? (codexClose.forceClose ? "Force closing..." : "Closing...")
+                  : closeConfirmLabel}
               </button>
             </div>
           </div>

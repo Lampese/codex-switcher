@@ -9,7 +9,7 @@ use tauri::{AppHandle, Manager, Runtime};
 
 use crate::{
     auth::{load_app_settings, save_app_settings},
-    types::{DockDisplayMode, UsageInfo},
+    types::{DockDisplayMode, TrayDisplayMode, UsageInfo},
 };
 
 /// Label of the borderless tray popup window.
@@ -97,6 +97,38 @@ pub fn restore_main_window<R: Runtime>(app: &AppHandle<R>) {
 #[tauri::command]
 pub fn quit_app(app: AppHandle) {
     app.exit(0);
+}
+
+#[derive(serde::Serialize)]
+pub struct DisplaySettings {
+    tray_display_mode: TrayDisplayMode,
+    dock_display_mode: Option<DockDisplayMode>,
+}
+
+#[tauri::command]
+pub fn get_display_settings() -> Result<DisplaySettings, String> {
+    let settings = load_app_settings().map_err(|error| error.to_string())?;
+    Ok(DisplaySettings {
+        tray_display_mode: settings.tray_display_mode,
+        dock_display_mode: if cfg!(target_os = "macos") {
+            Some(settings.dock_display_mode)
+        } else {
+            None
+        },
+    })
+}
+
+#[tauri::command]
+pub fn set_tray_display_mode(app: AppHandle, mode: TrayDisplayMode) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        crate::app_menu::set_tray_display_mode(&app, mode).map_err(|error| error.to_string())
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = (app, mode);
+        Err("Tray settings are only available on desktop".into())
+    }
 }
 
 #[tauri::command]
