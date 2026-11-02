@@ -224,7 +224,7 @@ pub fn add_account(account: StoredAccount, overwrite_existing: bool) -> Result<S
 }
 
 #[cfg(test)]
-mod tests {
+mod replacement_tests {
     use super::insert_or_replace_account;
     use crate::types::{AccountsStore, AuthData, StoredAccount};
 
