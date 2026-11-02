@@ -235,7 +235,6 @@ pub fn add_account(account: StoredAccount) -> Result<StoredAccount> {
     Ok(account_clone)
 }
 
-
 fn add_account_to_store(
     store: &mut AccountsStore,
     account: StoredAccount,

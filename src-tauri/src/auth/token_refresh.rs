@@ -504,16 +504,19 @@ mod tests {
         let invalid_grant = anyhow::Error::msg(
             r#"Token refresh failed: 401 Unauthorized - {"error":{"code":"invalid_grant","message":"Invalid refresh token."}}"#,
         );
-        let generic_unauthorized = anyhow::anyhow!(
-            "Token refresh failed: 401 Unauthorized - Please try again."
-        );
+        let generic_unauthorized =
+            anyhow::anyhow!("Token refresh failed: 401 Unauthorized - Please try again.");
         let transient = anyhow::anyhow!("Failed to send token refresh request: timed out");
 
         assert!(refresh_error_invalidates_saved_session(&invalidated));
         assert!(refresh_error_invalidates_saved_session(&reused));
-        assert!(refresh_error_invalidates_saved_session(&invalid_refresh_token));
+        assert!(refresh_error_invalidates_saved_session(
+            &invalid_refresh_token
+        ));
         assert!(refresh_error_invalidates_saved_session(&invalid_grant));
-        assert!(!refresh_error_invalidates_saved_session(&generic_unauthorized));
+        assert!(!refresh_error_invalidates_saved_session(
+            &generic_unauthorized
+        ));
         assert!(!refresh_error_invalidates_saved_session(&transient));
     }
 
