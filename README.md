@@ -1,3 +1,8 @@
+# Reminder: perhaps you no longer need this software
+
+<img width="1015" height="244" alt="image" src="https://github.com/user-attachments/assets/3770389e-b2db-4b68-af1e-7bf4a5ff5ced" />
+
+
 <p align="center">
   <img src="src-tauri/icons/logo.svg" alt="Codex Switcher" width="128" height="128">
 </p>
@@ -8,6 +13,12 @@
   A Desktop Application for Managing Multiple OpenAI <a href="https://github.com/openai/codex">Codex</a> Accounts<br>
   Easily switch between accounts, monitor usage, schedule warm-ups, and stay in control of your quota
 </p>
+
+<div align="center">
+
+[![](https://dcbadge.limes.pink/api/server/4QzyJTC3S)](https://discord.gg/4QzyJTC3S)
+
+</div>
 
 ## Features
 

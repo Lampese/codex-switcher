@@ -1,0 +1,25 @@
+name: Linux startup regression tests
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'fix/**']
+
+permissions:
+  contents: read
+
+jobs:
+  linux-startup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test GTK module filtering
+        run: |
+          rustc --edition=2021 --test src-tauri/src/linux_gtk.rs -o "$RUNNER_TEMP/linux-gtk-tests"
+          "$RUNNER_TEMP/linux-gtk-tests"
+      - name: Test the Linux entry point before Tauri initialization
+        run: node --experimental-strip-types --test tests/linuxGtkStartup.test.ts

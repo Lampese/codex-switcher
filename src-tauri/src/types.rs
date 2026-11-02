@@ -239,6 +239,7 @@ pub enum AuthMode {
     /// Using an OpenAI API key
     ApiKey,
     /// Using ChatGPT OAuth tokens
+    #[serde(alias = "chat_gpt", alias = "chatgpt", alias = "chat_g_pt")]
     ChatGPT,
 }
 
@@ -252,6 +253,7 @@ pub enum AuthData {
         key: String,
     },
     /// ChatGPT OAuth authentication
+    #[serde(alias = "chat_gpt", alias = "chatgpt", alias = "chat_g_pt")]
     ChatGPT {
         /// JWT ID token containing user info
         id_token: String,
@@ -360,22 +362,14 @@ pub struct AccountInfo {
 
 impl AccountInfo {
     pub fn from_stored(account: &StoredAccount, active_id: Option<&str>) -> Self {
-        let fallback_subscription_expires_at = match &account.auth_data {
-            AuthData::ChatGPT { id_token, .. } => {
-                parse_chatgpt_id_token_claims(id_token).subscription_expires_at
-            }
-            AuthData::ApiKey { .. } => None,
-        };
-
         Self {
             id: account.id.clone(),
             name: account.name.clone(),
             email: account.email.clone(),
             plan_type: account.plan_type.clone(),
-            subscription_expires_at: account
-                .subscription_expires_at
-                .clone()
-                .or(fallback_subscription_expires_at),
+            // Subscription expiry is live account metadata. Stored values and
+            // ID-token claims become stale and must not be used for display.
+            subscription_expires_at: None,
             auth_mode: account.auth_mode,
             is_active: active_id == Some(&account.id),
             created_at: account.created_at,
@@ -500,8 +494,12 @@ pub struct CreditStatusDetails {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_chatgpt_id_token_claims, AppSettings, DockDisplayMode, TrayDisplayMode};
+    use super::{
+        parse_chatgpt_id_token_claims, AccountInfo, AppSettings, DockDisplayMode, StoredAccount,
+        TrayDisplayMode,
+    };
     use base64::Engine;
+    use chrono::{TimeZone, Utc};
 
     #[test]
     fn parses_subscription_expiry_from_realistic_id_token_claims() {
@@ -523,6 +521,25 @@ mod tests {
     }
 
     #[test]
+    fn stored_subscription_expiry_is_not_exposed_as_live_metadata() {
+        let stored_expiry = Utc.with_ymd_and_hms(2026, 8, 27, 5, 23, 19).unwrap();
+        let account = StoredAccount::new_chatgpt(
+            "account".into(),
+            None,
+            Some("plus".into()),
+            Some(stored_expiry),
+            "header.payload.signature".into(),
+            "access".into(),
+            "refresh".into(),
+            Some("account-id".into()),
+        );
+
+        let info = AccountInfo::from_stored(&account, None);
+
+        assert_eq!(info.subscription_expires_at, None);
+    }
+
+    #[test]
     fn app_settings_default_missing_dock_display_mode_to_show_in_dock() {
         let settings: AppSettings =
             serde_json::from_str(r#"{"tray_display_mode":"active_usage_text"}"#).unwrap();
@@ -530,5 +547,44 @@ mod tests {
         assert_eq!(settings.tray_display_mode, TrayDisplayMode::ActiveUsageText);
         assert_eq!(settings.dock_display_mode, DockDisplayMode::ShowInDock);
         assert!(settings.close_behavior_prompt_enabled);
+    }
+}
+
+#[cfg(test)]
+mod auth_deserialization_tests {
+    use super::*;
+
+    #[test]
+    fn test_legacy_chatgpt_spellings_deserialize() {
+        let legacy_spellings = ["chat_g_p_t", "chat_g_pt", "chat_gpt", "chatgpt"];
+
+        for spelling in legacy_spellings {
+            let mode_json = format!("\"{}\"", spelling);
+            let mode: Result<AuthMode, _> = serde_json::from_str(&mode_json);
+            assert_eq!(
+                mode.expect(&format!("Failed to deserialize AuthMode for {}", spelling)),
+                AuthMode::ChatGPT
+            );
+
+            let data_json = format!(
+                r#"{{"type": "{}", "id_token": "id", "access_token": "acc", "refresh_token": "ref", "account_id": null}}"#,
+                spelling
+            );
+            let data: Result<AuthData, _> = serde_json::from_str(&data_json);
+            match data.expect(&format!("Failed to deserialize AuthData for {}", spelling)) {
+                AuthData::ChatGPT {
+                    id_token,
+                    access_token,
+                    refresh_token,
+                    account_id,
+                } => {
+                    assert_eq!(id_token, "id");
+                    assert_eq!(access_token, "acc");
+                    assert_eq!(refresh_token, "ref");
+                    assert!(account_id.is_none());
+                }
+                _ => panic!("Expected AuthData::ChatGPT"),
+            }
+        }
     }
 }
