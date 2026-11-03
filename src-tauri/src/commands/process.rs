@@ -641,8 +641,8 @@ Get-Process -Name Codex,ChatGPT -ErrorAction SilentlyContinue | ForEach-Object {
   $windowTitles[[uint32]$_.Id] = $_.MainWindowTitle
 }
 
-Get-CimInstance Win32_Process |
-  Where-Object { $_.Name -ieq 'Codex.exe' -or $_.Name -ieq 'ChatGPT.exe' } |
+# Restrict WMI query on the server instead of enumerating all processes.
+Get-CimInstance -ClassName Win32_Process -Filter "Name='Codex.exe' OR Name='ChatGPT.exe'" |
   ForEach-Object {
     [PSCustomObject]@{
       Name = $_.Name
