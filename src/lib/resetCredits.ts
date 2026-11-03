@@ -33,6 +33,30 @@ export function getAvailableResetCredits(
     .map(({ credit }) => credit);
 }
 
+/** Show a confirmed count even if individual credit expiry rows are omitted. */
+export function getResetCreditsDisplayCount(
+  resetCredits: AccountResetCredits | null,
+  now = Date.now(),
+): number {
+  if (!resetCredits) return 0;
+  const reported = resetCredits.available_count;
+  const count = Number.isFinite(reported) ? Math.max(0, Math.floor(reported)) : 0;
+  return Math.max(count, getAvailableResetCredits(resetCredits, now).length);
+}
+
+// Account cards mount together, but OAuth refresh is serialized by the backend.
+// Queue their independent credit checks instead of causing lock contention.
+let resetCreditsQueue: Promise<void> = Promise.resolve();
+
+export function queueResetCreditsCheck<T>(request: () => Promise<T>): Promise<T> {
+  const next = resetCreditsQueue.then(request);
+  resetCreditsQueue = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
+
 export function formatResetCreditDateTime(
   expiresAt: string | null,
   options: ResetCreditDateTimeFormatOptions = {},
