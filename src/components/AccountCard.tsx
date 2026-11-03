@@ -1,8 +1,9 @@
 import { useCallback, useState, useRef, useEffect } from "react";
-import type { AccountResetCredits, AccountUsageStats as AccountUsageStatsInfo, AccountWithUsage } from "../types";
+import type { AccountResetCredits, AccountWithUsage } from "../types";
 import { invokeBackend } from "../lib/platform";
 import { AccountUsageStats } from "./AccountUsageStats";
 import { ResetCreditsMenu } from "./ResetCreditsMenu";
+import { queueResetCreditsCheck } from "../lib/resetCredits";
 import { UsageBar } from "./UsageBar";
 
 const RESET_CREDITS_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -120,6 +121,8 @@ export function AccountCard({
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState(account.name);
   const [resetCredits, setResetCredits] = useState<AccountResetCredits | null>(null);
+  const [resetCreditsError, setResetCreditsError] = useState(false);
+  const [resetCreditsLoading, setResetCreditsLoading] = useState(false);
   const [statsOpen, setStatsOpen] = useState<boolean>(() => {
     if (typeof window === "undefined") return account.is_active;
     try {
@@ -167,6 +170,7 @@ export function AccountCard({
     setIsRefreshing(true);
     try {
       await onRefresh();
+      void loadResetCredits();
     } finally {
       setIsRefreshing(false);
     }
@@ -222,30 +226,33 @@ export function AccountCard({
 
     if (account.auth_mode !== "chat_g_p_t") {
       setResetCredits(null);
+      setResetCreditsError(false);
       return;
     }
 
+    setResetCreditsLoading(true);
     try {
-      const stats = await invokeBackend<AccountUsageStatsInfo>("get_account_usage_stats", {
-        accountId: account.id,
-      });
+      const credits = await queueResetCreditsCheck(() =>
+        invokeBackend<AccountResetCredits>("get_account_reset_credits", {
+          accountId: account.id,
+        })
+      );
       if (requestId !== resetRequestSeq.current) return;
-      setResetCredits(stats.account_id === account.id ? stats.reset_credits : null);
-    } catch {
+      setResetCredits(credits);
+      setResetCreditsError(false);
+    } catch (error) {
       if (requestId !== resetRequestSeq.current) return;
-      setResetCredits(null);
+      console.warn("Could not check reset credits:", error);
+      // Preserve the last confirmed count rather than implying zero resets.
+      setResetCreditsError(true);
+    } finally {
+      if (requestId === resetRequestSeq.current) setResetCreditsLoading(false);
     }
   }, [account.auth_mode, account.id]);
 
-  const handleStatsLoaded = useCallback(
-    (stats: AccountUsageStatsInfo | null) => {
-      setResetCredits(stats?.account_id === account.id ? stats.reset_credits : null);
-    },
-    [account.id]
-  );
-
   useEffect(() => {
     setResetCredits(null);
+    setResetCreditsError(false);
 
     void loadResetCredits();
     const timer = window.setInterval(() => {
@@ -258,6 +265,11 @@ export function AccountCard({
     };
   }, [loadResetCredits]);
 
+  useEffect(() => {
+    if (!resetCreditsError) return;
+    const timer = window.setInterval(() => void loadResetCredits(), 5 * 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, [loadResetCredits, resetCreditsError]);
 
   return (
     <div
@@ -347,6 +359,17 @@ export function AccountCard({
             resetCredits={resetCredits}
           />
         </div>
+        {resetCreditsError && (
+          <button
+            type="button"
+            onClick={() => void loadResetCredits()}
+            disabled={resetCreditsLoading}
+            title="Reset credits could not be checked. Your reset count may be out of date."
+            className="mt-1 text-[11px] text-amber-700 underline decoration-dotted disabled:opacity-50 dark:text-amber-300"
+          >
+            {resetCreditsLoading ? "Checking resets…" : "Resets not verified · Retry"}
+          </button>
+        )}
       </div>
 
       {/* Usage */}
@@ -467,8 +490,7 @@ export function AccountCard({
         open={statsOpen}
         usage={account.usage}
         usageLoading={account.usageLoading}
-        onStatsLoaded={handleStatsLoaded}
-      />
+       />
     </div>
   );
 }
