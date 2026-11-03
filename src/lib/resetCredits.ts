@@ -49,7 +49,20 @@ export function getResetCreditsDisplayCount(
 let resetCreditsQueue: Promise<void> = Promise.resolve();
 
 export function queueResetCreditsCheck<T>(request: () => Promise<T>): Promise<T> {
-  const next = resetCreditsQueue.then(request);
+  const next = resetCreditsQueue.then(async () => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await request();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/Background OAuth refresh busy/i.test(message) || attempt >= 2) {
+          throw error;
+        }
+        // A busy lock means the GET never ran; never retry a token refresh POST.
+        await new Promise<void>((resolve) => setTimeout(resolve, (attempt + 1) * 300));
+      }
+    }
+  });
   resetCreditsQueue = next.then(
     () => undefined,
     () => undefined,
