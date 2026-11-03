@@ -26,6 +26,7 @@ fn complete_with(result: anyhow::Result<OAuthLoginResult>) {
     *PENDING_OAUTH.lock().unwrap() = Some(PendingOAuth {
         rx,
         cancelled: Arc::new(AtomicBool::new(false)),
+        overwrite_existing: false,
     });
 }
 
