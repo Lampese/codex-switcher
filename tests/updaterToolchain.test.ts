@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-const lockfile = readFileSync(new URL("../pnpm-lock.yaml", import.meta.url), "utf8");
+const lockfile = readFileSync(new URL("../pnpm-lock.yaml", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 
 function assertCompatibleCli(version: string) {
   const match = /^(?:\^|~)?2\.(\d+)\.(\d+)$/.exec(version);

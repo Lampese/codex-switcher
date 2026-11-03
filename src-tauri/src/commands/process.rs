@@ -272,6 +272,14 @@ fn expand_process_targets(root_pids: &[u32], snapshot: Option<&UnixProcessSnapsh
     targets
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn recovery_process_targets() -> Result<Vec<u32>, String> {
+    let (roots, _) = find_codex_processes().map_err(|error| error.to_string())?;
+    let snapshot =
+        read_unix_process_snapshot().ok_or("Could not inspect Codex processes before recovery")?;
+    Ok(expand_process_targets(&roots, Some(&snapshot)))
+}
+
 #[cfg(windows)]
 fn expand_process_targets(root_pids: &[u32]) -> Vec<u32> {
     root_pids.to_vec()
