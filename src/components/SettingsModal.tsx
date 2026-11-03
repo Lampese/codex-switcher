@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DesktopReopenPreference } from "../lib/desktopReopen";
 import type { CodexClosePreference } from "../lib/codexClosePreference";
+import { CHECK_FOR_UPDATES_EVENT } from "./UpdateChecker";
 import { invokeBackend, isTauriRuntime } from "../lib/platform";
 import type { DockDisplayMode } from "../types";
 
@@ -27,9 +28,26 @@ export function SettingsModal({
 }: SettingsModalProps) {
   const [displaySettings, setDisplaySettings] = useState<DisplaySettings | null>(null);
   const [saving, setSaving] = useState(false);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const requestId = useRef(0);
   const desktop = isTauriRuntime();
+
+  useEffect(() => {
+    if (!desktop) return;
+    let active = true;
+    void import("@tauri-apps/api/app")
+      .then(({ getVersion }) => getVersion())
+      .then((version) => { if (active) setAppVersion(version); })
+      .catch((err) => console.error("Failed to read app version:", err));
+    return () => { active = false; };
+  }, [desktop]);
+
+  const handleCheckForUpdates = () => {
+    window.dispatchEvent(new Event(CHECK_FOR_UPDATES_EVENT));
+    onClose();
+  };
+
   const loadDisplaySettings = useCallback(async () => {
     const currentRequest = ++requestId.current;
     try {
@@ -125,6 +143,23 @@ export function SettingsModal({
                 </>
               ) : !error && <p className="text-sm text-gray-500 dark:text-gray-400">Loading display settings...</p>}
               {error && <p role="alert" className="text-sm text-red-600 dark:text-red-300">Could not update display settings: {error}</p>}
+              <div className="border-t border-gray-100 dark:border-gray-800" />
+            </>
+          )}
+          {desktop && (
+            <>
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-gray-900 dark:text-gray-100">App updates</p>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    {appVersion ? `Version v${appVersion}. ` : ""}Checks automatically on launch and every 6 hours.
+                  </p>
+                </div>
+                <button type="button" onClick={handleCheckForUpdates}
+                  className="shrink-0 rounded-lg border border-gray-300 dark:border-gray-700 px-3 py-2 text-xs font-medium text-gray-900 dark:text-gray-100 hover:bg-gray-100 dark:hover:bg-gray-800">
+                  Check for Updates
+                </button>
+              </div>
               <div className="border-t border-gray-100 dark:border-gray-800" />
             </>
           )}
