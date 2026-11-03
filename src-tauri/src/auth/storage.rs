@@ -207,11 +207,8 @@ pub fn add_or_replace_account(
     let account_clone = account.clone();
     store.accounts.push(account);
 
-    // If this is the first account, make it active
-    if store.accounts.len() == 1 {
-        store.active_account_id = Some(account_clone.id.clone());
-    }
-
+    // OAuth login adds credentials but must not silently activate the
+    // account. Switching explicitly is responsible for changing CLI auth.
     save_accounts(&store)?;
     Ok(account_clone)
 }
