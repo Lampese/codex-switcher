@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   describeFileSource,
   isTauriRuntime,
@@ -7,11 +7,14 @@ import {
   type FileSource,
 } from "../lib/platform";
 
+import type { AccountInfo } from "../types";
+
 interface AddAccountModalProps {
+  reloginAccount?: AccountInfo | null;
   isOpen: boolean;
   onClose: () => void;
   onImportFile: (source: FileSource, name: string) => Promise<void>;
-  onStartOAuth: (name: string) => Promise<{ auth_url: string }>;
+  onStartOAuth: (name: string, reauthAccountId?: string) => Promise<{ auth_url: string }>;
   onCompleteOAuth: () => Promise<unknown>;
   onCancelOAuth: () => Promise<void>;
 }
@@ -20,6 +23,7 @@ type Tab = "oauth" | "import";
 
 export function AddAccountModal({
   isOpen,
+  reloginAccount,
   onClose,
   onImportFile,
   onStartOAuth,
@@ -27,7 +31,7 @@ export function AddAccountModal({
   onCancelOAuth,
 }: AddAccountModalProps) {
   const [activeTab, setActiveTab] = useState<Tab>("oauth");
-  const [name, setName] = useState("");
+  const [name, setName] = useState(reloginAccount?.name ?? "");
   const [fileSource, setFileSource] = useState<FileSource | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -36,6 +40,8 @@ export function AddAccountModal({
   const [copied, setCopied] = useState<boolean>(false);
   const isPrimaryDisabled = loading || (activeTab === "oauth" && oauthPending);
   const tauriRuntime = isTauriRuntime();
+  const requestId = useRef(0);
+  useEffect(() => () => { requestId.current += 1; }, []);
 
   const resetForm = () => {
     setName("");
@@ -46,27 +52,39 @@ export function AddAccountModal({
     setAuthUrl("");
   };
 
-  const handleClose = () => {
+  const handleClose = async () => {
+    if (loading) return;
+    requestId.current += 1;
     if (oauthPending) {
-      onCancelOAuth();
+      setLoading(true);
+      try {
+        await onCancelOAuth();
+      } catch (err) {
+        setError(String(err));
+        setLoading(false);
+        return;
+      }
     }
     resetForm();
     onClose();
   };
 
   const handleOAuthLogin = async () => {
+    const currentRequest = ++requestId.current;
     try {
       setLoading(true);
       setError(null);
-      const info = await onStartOAuth(name.trim());
+      const info = await onStartOAuth(name.trim(), reloginAccount?.id);
+      if (currentRequest !== requestId.current) return;
       setAuthUrl(info.auth_url);
       setOauthPending(true);
       setLoading(false);
-
-      // Wait for completion
       await onCompleteOAuth();
-      handleClose();
+      if (currentRequest !== requestId.current) return;
+      resetForm();
+      onClose();
     } catch (err) {
+      if (currentRequest !== requestId.current) return;
       setError(err instanceof Error ? err.message : String(err));
       setLoading(false);
       setOauthPending(false);
@@ -92,7 +110,8 @@ export function AddAccountModal({
       setLoading(true);
       setError(null);
       await onImportFile(fileSource, name.trim());
-      handleClose();
+      resetForm();
+      onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setLoading(false);
@@ -106,9 +125,10 @@ export function AddAccountModal({
       <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl w-full max-w-md mx-4 shadow-xl">
         {/* Header */}
         <div className="flex items-center justify-between p-5 border-b border-gray-100 dark:border-gray-800">
-          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Add Account</h2>
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">{reloginAccount ? "Re-login to account" : "Add Account"}</h2>
           <button
-            onClick={handleClose}
+            onClick={() => { void handleClose(); }}
+            disabled={loading}
             className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
           >
             ✕
@@ -116,18 +136,13 @@ export function AddAccountModal({
         </div>
 
         {/* Tabs */}
-        <div className="flex border-b border-gray-100 dark:border-gray-800">
+        {!reloginAccount && <div className="flex border-b border-gray-100 dark:border-gray-800">
           {(["oauth", "import"] as Tab[]).map((tab) => (
             <button
               key={tab}
+              disabled={loading || oauthPending}
               onClick={() => {
-                if (tab === "import" && oauthPending) {
-                  void onCancelOAuth().catch((err) => {
-                    console.error("Failed to cancel login:", err);
-                  });
-                  setOauthPending(false);
-                  setLoading(false);
-                }
+                requestId.current += 1;
                 setActiveTab(tab);
                 setError(null);
               }}
@@ -139,12 +154,19 @@ export function AddAccountModal({
               {tab === "oauth" ? "ChatGPT Login" : "Import File"}
             </button>
           ))}
-        </div>
+        </div>}
 
         {/* Content */}
         <div className="p-5 space-y-4">
+          {reloginAccount && (
+            <div className="space-y-2 text-sm text-gray-600 dark:text-gray-300">
+              <p>Sign in as <strong>{reloginAccount.email ?? reloginAccount.name}</strong> and select the same workspace.</p>
+              <p>Your saved account name and settings will be kept.</p>
+              {reloginAccount.is_active && <p>Close Codex or switch to another account first so Codex cannot overwrite the renewed login.</p>}
+            </div>
+          )}
           {/* Account name is optional; the backend derives one when blank. */}
-          <div>
+          {!reloginAccount && <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
               Account Name (optional)
             </label>
@@ -155,7 +177,7 @@ export function AddAccountModal({
               placeholder="Leave blank to use email"
               className="w-full px-4 py-2.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-gray-400 dark:focus:border-gray-500 focus:ring-1 focus:ring-gray-400 dark:focus:ring-gray-500 transition-colors"
             />
-          </div>
+          </div>}
 
           {/* Tab-specific content */}
           {activeTab === "oauth" && (
@@ -252,7 +274,8 @@ export function AddAccountModal({
         {/* Footer */}
         <div className="flex gap-3 p-5 border-t border-gray-100 dark:border-gray-800">
           <button
-            onClick={handleClose}
+            onClick={() => { void handleClose(); }}
+            disabled={loading}
             className="flex-1 px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 transition-colors"
           >
             Cancel
@@ -263,9 +286,9 @@ export function AddAccountModal({
             className="flex-1 px-4 py-2.5 text-sm font-medium rounded-lg bg-gray-900 hover:bg-gray-800 dark:bg-gray-100 dark:hover:bg-gray-200 text-white dark:text-gray-900 transition-colors disabled:opacity-50"
           >
             {loading
-              ? "Adding..."
+              ? "Please wait..."
               : activeTab === "oauth"
-                ? "Generate Login Link"
+                ? (reloginAccount ? "Start re-login" : "Generate Login Link")
                 : "Import"}
           </button>
         </div>
