@@ -431,6 +431,7 @@ function App() {
           prev.can_switch === info.can_switch &&
           prev.count === info.count &&
           prev.background_count === info.background_count &&
+          prev.cli_daemon_running === info.cli_daemon_running &&
           prev.pids.length === info.pids.length &&
           prev.pids.every((pid, index) => pid === info.pids[index])
         ) {
@@ -1429,6 +1430,27 @@ function App() {
                             : "0 Codex running"}
                         </span>
                       </span>
+                      {processInfo.cli_daemon_running !== null && (
+                        <span
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs border ${processInfo.cli_daemon_running
+                              ? "bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-900/30 dark:text-sky-300 dark:border-sky-700"
+                              : "bg-gray-50 text-gray-600 border-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:border-gray-700"
+                            }`}
+                          title={
+                            processInfo.cli_daemon_running
+                              ? "The Codex CLI daemon keeps the account it started with. Switching stops it, and the next CLI session starts it again with the new account."
+                              : "The Codex CLI daemon is not running. The next CLI session starts it with the active account."
+                          }
+                        >
+                          <span
+                            className={`inline-block w-1.5 h-1.5 rounded-full ${processInfo.cli_daemon_running ? "bg-sky-500" : "bg-gray-400"
+                              }`}
+                          ></span>
+                          <span>
+                            {processInfo.cli_daemon_running ? "CLI daemon on" : "CLI daemon off"}
+                          </span>
+                        </span>
+                      )}
                       {hasRunningProcesses && (
                         <button
                           onClick={() => {
