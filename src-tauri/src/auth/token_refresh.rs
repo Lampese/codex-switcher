@@ -316,7 +316,9 @@ async fn refresh_tokens_with_refresh_token_at(
         .body(body)
         .send()
         .await
-        .context("Failed to send token refresh request; outcome unknown, not retrying single-use token")?;
+        .context(
+            "Failed to send token refresh request; outcome unknown, not retrying single-use token",
+        )?;
 
     if !response.status().is_success() {
         let status = response.status();
