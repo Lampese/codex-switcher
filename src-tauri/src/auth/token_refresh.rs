@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use base64::Engine;
 use chrono::Utc;
-use tokio::time::{sleep, Duration};
+use tokio::time::Duration;
 
 use super::{
     load_accounts, read_current_auth, save_accounts, switch_to_account, sync_active_account_tokens,
@@ -287,45 +287,36 @@ fn parse_jwt_exp(token: &str) -> Option<i64> {
 }
 
 async fn refresh_tokens_with_refresh_token(refresh_token: &str) -> Result<RefreshTokenResponse> {
-    let client = reqwest::Client::new();
+    refresh_tokens_with_refresh_token_at(
+        refresh_token,
+        &format!("{DEFAULT_ISSUER}/oauth/token"),
+        Duration::from_secs(10),
+    )
+    .await
+}
+
+/// Refresh tokens may be single-use. If the POST times out or the connection
+/// drops, the identity provider might already have consumed the credential.
+/// Replaying it could revoke a valid session. Do not retry automatically.
+async fn refresh_tokens_with_refresh_token_at(
+    refresh_token: &str,
+    endpoint: &str,
+    timeout: Duration,
+) -> Result<RefreshTokenResponse> {
     let body = format!(
         "grant_type=refresh_token&refresh_token={}&client_id={}",
         urlencoding::encode(refresh_token),
         urlencoding::encode(CLIENT_ID),
     );
 
-    let mut last_send_error = None;
-    let mut response = None;
-
-    for attempt in 1..=3u8 {
-        match client
-            .post(format!("{DEFAULT_ISSUER}/oauth/token"))
-            .timeout(Duration::from_secs(10))
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(body.clone())
-            .send()
-            .await
-        {
-            Ok(resp) => {
-                response = Some(resp);
-                break;
-            }
-            Err(err) => {
-                last_send_error = Some(err);
-                if attempt < 3 {
-                    sleep(Duration::from_millis(250 * u64::from(attempt))).await;
-                }
-            }
-        }
-    }
-
-    let response = match response {
-        Some(resp) => resp,
-        None => {
-            let err = last_send_error.context("Failed to send token refresh request")?;
-            return Err(err.into());
-        }
-    };
+    let response = reqwest::Client::new()
+        .post(endpoint)
+        .timeout(timeout)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .context("Failed to send token refresh request; outcome unknown, not retrying single-use token")?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -347,6 +338,35 @@ mod tests {
     };
     use crate::types::{AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData};
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ambiguous_network_failure_does_not_replay_single_use_token() {
+        use tokio::net::TcpListener;
+        use tokio::time::{timeout, Duration};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/oauth/token", listener.local_addr().unwrap());
+        let requests = tokio::spawn(async move {
+            let mut count = 0;
+            while let Ok(Ok((connection, _))) =
+                timeout(Duration::from_millis(400), listener.accept()).await
+            {
+                count += 1;
+                // Simulate a dropped connection after the provider sees a POST.
+                drop(connection);
+            }
+            count
+        });
+
+        assert!(super::refresh_tokens_with_refresh_token_at(
+            "dummy-refresh-token",
+            &endpoint,
+            Duration::from_millis(200),
+        )
+        .await
+        .is_err());
+        assert_eq!(requests.await.unwrap(), 1);
+    }
 
     fn jwt_with_exp(exp: i64) -> String {
         let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{exp}}}"#));
