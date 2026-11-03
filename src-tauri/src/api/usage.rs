@@ -97,9 +97,20 @@ pub async fn fetch_chatgpt_account_metadata(
     account: &StoredAccount,
 ) -> Result<ChatGptAccountMetadata> {
     let (access_token, chatgpt_account_id) = extract_chatgpt_auth(account)?;
-    let response =
+    let mut response =
         send_chatgpt_get_request(CHATGPT_ACCOUNTS_CHECK_API, access_token, chatgpt_account_id)
             .await?;
+
+    // If Cloudflare temporarily challenged with 403, wait briefly and retry once.
+    if response.status() == StatusCode::FORBIDDEN {
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        if let Ok(retry_resp) =
+            send_chatgpt_get_request(CHATGPT_ACCOUNTS_CHECK_API, access_token, chatgpt_account_id)
+                .await
+        {
+            response = retry_resp;
+        }
+    }
 
     let status = response.status();
     if !status.is_success() {
@@ -141,7 +152,7 @@ async fn get_usage_with_chatgpt_auth(account: &StoredAccount) -> Result<UsageInf
     let fresh_account = ensure_chatgpt_tokens_fresh(account).await?;
     let (access_token, chatgpt_account_id) = extract_chatgpt_auth(&fresh_account)?;
 
-    let response = send_chatgpt_usage_request(access_token, chatgpt_account_id).await?;
+    let mut response = send_chatgpt_usage_request(access_token, chatgpt_account_id).await?;
 
     // 401 means the token is genuinely expired — refresh and retry once.
     // 403 is a Cloudflare challenge or permissions error; refreshing the token
@@ -162,6 +173,19 @@ async fn get_usage_with_chatgpt_auth(account: &StoredAccount) -> Result<UsageInf
         .await;
     }
 
+    // If Cloudflare temporarily challenged with 403, wait briefly and retry once
+    // without refreshing or burning the token.
+    if response.status() == StatusCode::FORBIDDEN {
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        if let Ok(retry_resp) = send_chatgpt_usage_request(access_token, chatgpt_account_id).await {
+            if retry_resp.status().is_success() {
+                return parse_usage_response(&fresh_account.id, &fresh_account.name, retry_resp)
+                    .await;
+            }
+            response = retry_resp;
+        }
+    }
+
     parse_usage_response(&fresh_account.id, &fresh_account.name, response).await
 }
 
@@ -173,10 +197,12 @@ async fn parse_usage_response(
     let status = response.status();
 
     if !status.is_success() {
-        return Ok(UsageInfo::error(
-            account_id.to_string(),
-            format!("API error: {status}"),
-        ));
+        let error_message = if status == StatusCode::FORBIDDEN {
+            "Rate limited by Cloudflare (403). Try again in a moment.".to_string()
+        } else {
+            format!("API error: {status}")
+        };
+        return Ok(UsageInfo::error(account_id.to_string(), error_message));
     }
 
     let body_text = response
@@ -539,7 +565,7 @@ fn extract_credits(credits: Option<CreditStatusDetails>) -> Option<CreditStatusD
 
 /// Refresh all account usage
 pub async fn refresh_all_usage(accounts: &[StoredAccount]) -> Vec<UsageInfo> {
-    let concurrency = accounts.len().min(10).max(1);
+    let concurrency = accounts.len().min(2).max(1);
     let results: Vec<UsageInfo> = stream::iter(accounts.iter().cloned())
         .map(|account| async move {
             match get_account_usage(&account).await {
