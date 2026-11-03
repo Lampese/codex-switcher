@@ -490,7 +490,7 @@ export function AccountCard({
         open={statsOpen}
         usage={account.usage}
         usageLoading={account.usageLoading}
-       />
+      />
     </div>
   );
 }
