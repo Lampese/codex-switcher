@@ -194,10 +194,8 @@ fn insert_or_replace_account(
     let account_clone = account.clone();
     store.accounts.push(account);
 
-    // If this is the first account, make it active.
-    if store.accounts.len() == 1 {
-        store.active_account_id = Some(account_clone.id.clone());
-    }
+    // Saving OAuth credentials does not mean the user selected this account.
+    // Only an explicit switch may activate it and change the CLI auth file.
     Ok(account_clone)
 }
 
