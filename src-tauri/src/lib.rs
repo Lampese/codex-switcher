@@ -70,6 +70,7 @@ pub fn run() {
             get_active_account_info,
             add_account_from_file,
             switch_account,
+            commands::switch_account_if_current,
             delete_account,
             rename_account,
             export_accounts_slim_text,
