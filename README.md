@@ -143,6 +143,20 @@ cannot finish late and overwrite the account you just selected. Codex Switcher
 also avoids refreshing the active account while Codex or ChatGPT is running;
 close the running app before switching accounts.
 
+Recent Codex desktop versions save the local project sidebar separately for each
+account. Switching to an account without that state can make existing local
+projects disappear from the sidebar even though their folders are still on disk.
+Before a switch, Codex Switcher carries the current local project list, names,
+ordering, pins, and local chat associations into the destination account's desktop
+state. This also works for a newly added account. Projects unique to the target
+account are retained on the first transfer. A local ID-only baseline in
+`$CODEX_HOME/.codex-switcher-project-baselines.json` tracks which projects each
+account has already shared, so later renames and removals propagate without
+restoring deleted projects from older account snapshots.
+Cloud caches, remote projects, permissions, and account-specific preferences stay
+separate. Codex must be closed while this local state is updated; an unreadable or
+incompatible state file stops the switch instead of overwriting it.
+
 If an older Codex Switcher version already saved an invalid refresh token, sign
 in to that account again or remove and re-add it once. An invalidated token
 cannot be recovered locally.
