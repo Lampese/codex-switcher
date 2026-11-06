@@ -156,8 +156,9 @@ pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
 
     // ChatGPT rotates single-use refresh tokens. Preserve the latest token
     // before replacing auth.json, otherwise switching back restores a stale one.
-    if let Some(auth) = read_current_auth().map_err(|e| e.to_string())? {
-        if sync_active_account_tokens(&mut store, &auth) {
+    let current_auth = read_current_auth().map_err(|e| e.to_string())?;
+    if let Some(auth) = current_auth.as_ref() {
+        if sync_active_account_tokens(&mut store, auth) {
             save_accounts(&store).map_err(|e| e.to_string())?;
         }
     }
@@ -165,6 +166,11 @@ pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
     let account = ensure_chatgpt_tokens_fresh_locked(&store.accounts[target_index])
         .await
         .map_err(|e| e.to_string())?;
+
+    // A refresh can take time. Do not edit desktop state if Codex reopened.
+    ensure_codex_not_running()?;
+    crate::auth::project_state::preserve_local_projects(current_auth.as_ref(), &account)
+        .map_err(|e| format!("Could not preserve local Codex projects: {e:#}"))?;
 
     // Write to ~/.codex/auth.json
     switch_to_account(&account).map_err(|e| e.to_string())?;
