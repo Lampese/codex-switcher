@@ -688,6 +688,22 @@ Get-CimInstance Win32_Process |
     parse_windows_codex_processes(&stdout)
 }
 
+#[cfg(windows)]
+pub(super) fn running_windows_cli_paths() -> Vec<std::path::PathBuf> {
+    read_windows_codex_processes()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|process| {
+            process.name.eq_ignore_ascii_case("codex.exe")
+                && process
+                    .command_line
+                    .split_whitespace()
+                    .any(|arg| matches!(arg, "app-server" | "exec-server"))
+        })
+        .map(|process| std::path::PathBuf::from(process.executable_path))
+        .collect()
+}
+
 #[cfg(any(windows, test))]
 fn classify_windows_codex_processes(processes: &[WindowsCodexProcess]) -> (Vec<u32>, usize) {
     let mut active_pids = Vec::new();

@@ -191,6 +191,14 @@ fn codex_binary() -> PathBuf {
     if let Some(binary) = std::env::var_os("CODEX_BIN") {
         return binary.into();
     }
+    #[cfg(windows)]
+    if let Some(local_data) = dirs::data_local_dir() {
+        if let Some(binary) =
+            super::windows_cli::resolve(&local_data, &super::process::running_windows_cli_paths())
+        {
+            return binary;
+        }
+    }
     // Finder-launched apps do not inherit the interactive shell's PATH.
     #[cfg(target_os = "macos")]
     for bundle in ["/Applications/ChatGPT.app", "/Applications/Codex.app"] {
@@ -212,12 +220,23 @@ async fn open_desktop_thread(id: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut command = tokio::process::Command::new("open");
     #[cfg(windows)]
-    let mut command = tokio::process::Command::new("explorer.exe");
+    let mut command = {
+        let mut command = tokio::process::Command::new("powershell.exe");
+        command.creation_flags(0x08000000);
+        command.args(["-NoProfile", "-NonInteractive", "-Command",
+            "$ErrorActionPreference = 'Stop'; Start-Process -FilePath $env:CODEX_SWITCHER_THREAD_URL"]);
+        command.env("CODEX_SWITCHER_THREAD_URL", &url);
+        command
+    };
     #[cfg(not(any(target_os = "macos", windows)))]
     let mut command = tokio::process::Command::new("xdg-open");
+    // Explorer's exit status does not reliably report URL activation. On Windows,
+    // use the registered protocol handler via Start-Process and verify delivery below.
+    #[cfg(not(windows))]
+    command.arg(url);
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        command.arg(url).kill_on_drop(true).output(),
+        command.kill_on_drop(true).output(),
     )
     .await
     .map_err(|_| "Opening the conversation timed out".to_string())?
@@ -280,9 +299,12 @@ where
     });
     if needs_queue {
         save_receipt(&receipt, &delivery)?;
+        let mut command = tokio::process::Command::new(binary);
+        #[cfg(windows)]
+        command.creation_flags(0x08000000);
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            tokio::process::Command::new(binary)
+            command
                 .env("CODEX_HOME", home)
                 .kill_on_drop(true)
                 .args([
@@ -566,6 +588,53 @@ fn is_usage_limit_error(error: &Value) -> bool {
 mod tests {
     use super::has_usage_limit_failure_lines;
     use serde_json::{json, Value};
+
+    #[tokio::test]
+    async fn missing_cli_does_not_open_a_chat_or_leave_a_pending_receipt() {
+        let _fixture = crate::auth::test_support::TestHome::new();
+        let home = crate::auth::get_codex_home().unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let session = super::StoppedSession {
+            id: uuid::Uuid::new_v4().to_string(),
+            path: home.join("rollout.jsonl"),
+            running: None,
+        };
+        std::fs::write(&session.path, quota_failure()).unwrap();
+        let error = super::resume_session(
+            &session,
+            &home,
+            &home.join("missing-codex.exe"),
+            |_| async { panic!("must not open a chat when CLI launch fails") },
+            0,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("Could not run Codex CLI"));
+        assert!(!home
+            .join("switcher-recovery")
+            .join(format!("{}.offset", session.id))
+            .exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "Read-only smoke test for a Windows PC with Codex desktop installed"]
+    fn installed_windows_cli_supports_recovery_queue() {
+        let binary = super::codex_binary();
+        assert!(
+            binary.is_absolute() && binary.is_file(),
+            "CLI was not discovered: {}",
+            binary.display()
+        );
+        let output = std::process::Command::new(&binary)
+            .args(["queue", "--help"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let help = String::from_utf8_lossy(&output.stdout);
+        assert!(help.contains("--thread") && help.contains("--message"));
+        println!("Recovery CLI resolved successfully: {}", binary.display());
+    }
 
     fn event(payload: Value) -> String {
         json!({"type": "event_msg", "payload": payload}).to_string()
