@@ -148,9 +148,9 @@ pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
         .position(|account| account.id == account_id)
         .ok_or_else(|| format!("Account not found: {account_id}"))?;
 
-    if store.active_account_id.as_deref() == Some(account_id) {
-        return Ok(());
-    }
+    // The selected account may still be marked active even if Codex has
+    // replaced or removed its auth.json. Explicit Switch should repair it.
+    let already_active = store.active_account_id.as_deref() == Some(account_id);
 
     ensure_codex_not_running()?;
 
@@ -169,8 +169,10 @@ pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
     // Write to ~/.codex/auth.json
     switch_to_account(&account).map_err(|e| e.to_string())?;
 
-    // Update the active account in our store
-    set_active_account(account_id).map_err(|e| e.to_string())?;
+    // A repeated switch repairs auth.json without changing the active ID.
+    if !already_active {
+        set_active_account(account_id).map_err(|e| e.to_string())?;
+    }
 
     // Update last_used_at
     touch_account(account_id).map_err(|e| e.to_string())?;
@@ -766,4 +768,54 @@ pub async fn get_masked_account_ids() -> Result<Vec<String>, String> {
 #[tauri::command]
 pub async fn set_masked_account_ids(ids: Vec<String>) -> Result<(), String> {
     crate::auth::storage::set_masked_account_ids(ids).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod active_account_repair_tests {
+    use super::switch_account_by_id;
+    use crate::auth::{get_codex_auth_file, load_accounts, read_current_auth, save_accounts};
+    use crate::types::{AccountsStore, StoredAccount};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn explicit_switch_restores_missing_auth_for_already_active_account() {
+        let _home = crate::auth::test_support::TestHome::new();
+        let account = StoredAccount::new_api_key("Active".into(), "sk-test".into());
+        save_accounts(&AccountsStore {
+            active_account_id: Some(account.id.clone()),
+            accounts: vec![account.clone()],
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!get_codex_auth_file().unwrap().exists());
+
+        switch_account_by_id(&account.id).await.unwrap();
+
+        let live = read_current_auth().unwrap().unwrap();
+        assert_eq!(live.openai_api_key.as_deref(), Some("sk-test"));
+        assert_eq!(
+            load_accounts().unwrap().active_account_id.as_deref(),
+            Some(account.id.as_str())
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn explicit_switch_replaces_stale_active_auth_file() {
+        let _home = crate::auth::test_support::TestHome::new();
+        let account = StoredAccount::new_api_key("Active".into(), "sk-current".into());
+        save_accounts(&AccountsStore {
+            active_account_id: Some(account.id.clone()),
+            accounts: vec![account.clone()],
+            ..Default::default()
+        })
+        .unwrap();
+
+        let auth_path = get_codex_auth_file().unwrap();
+        std::fs::create_dir_all(auth_path.parent().unwrap()).unwrap();
+        std::fs::write(&auth_path, r#"{"OPENAI_API_KEY":"sk-old"}"#).unwrap();
+
+        switch_account_by_id(&account.id).await.unwrap();
+
+        let live = read_current_auth().unwrap().unwrap();
+        assert_eq!(live.openai_api_key.as_deref(), Some("sk-current"));
+    }
 }
