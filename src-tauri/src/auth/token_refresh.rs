@@ -372,9 +372,10 @@ mod tests {
         );
         let result = super::sync_active_codex_auth_after_refresh(&account);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains(
-            "OAuth tokens were saved, but Codex auth.json could not be updated"
-        ));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("OAuth tokens were saved, but Codex auth.json could not be updated"));
     }
 
     fn jwt_with_exp(exp: i64) -> String {
