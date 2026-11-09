@@ -7,7 +7,7 @@ use tokio::time::{sleep, Duration};
 
 use super::{
     load_accounts, read_current_auth, save_accounts, switch_to_account, sync_active_account_tokens,
-    update_account_chatgpt_tokens, AUTH_OPERATION_LOCK,
+    update_account_chatgpt_tokens, try_acquire_background_auth_operation_lock,
 };
 use crate::types::{
     parse_chatgpt_id_token_claims, AccountsStore, AuthData, AuthDotJson, StoredAccount,
@@ -41,7 +41,7 @@ pub async fn ensure_chatgpt_tokens_fresh(account: &StoredAccount) -> Result<Stor
         return Ok(account.clone());
     }
 
-    let _auth_guard = AUTH_OPERATION_LOCK.lock().await;
+    let _auth_guard = try_acquire_background_auth_operation_lock()?;
     ensure_chatgpt_tokens_fresh_locked(account).await
 }
 
@@ -79,7 +79,7 @@ pub async fn refresh_chatgpt_tokens(account: &StoredAccount) -> Result<StoredAcc
         return Ok(account.clone());
     }
 
-    let _auth_guard = AUTH_OPERATION_LOCK.lock().await;
+    let _auth_guard = try_acquire_background_auth_operation_lock()?;
     refresh_chatgpt_tokens_locked(account).await
 }
 
