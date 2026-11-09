@@ -799,6 +799,42 @@ mod active_account_repair_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn explicit_switch_restores_missing_chatgpt_auth_for_active_account() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+
+        let _home = crate::auth::test_support::TestHome::new();
+        let expiry = chrono::Utc::now().timestamp() + 24 * 60 * 60;
+        let jwt = format!(
+            "header.{}.signature",
+            URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{expiry}}}"#))
+        );
+        let account = StoredAccount::new_chatgpt(
+            "Active ChatGPT".into(),
+            None,
+            None,
+            None,
+            jwt.clone(),
+            jwt.clone(),
+            "refresh".into(),
+            Some("workspace".into()),
+        );
+        save_accounts(&AccountsStore {
+            active_account_id: Some(account.id.clone()),
+            accounts: vec![account.clone()],
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!get_codex_auth_file().unwrap().exists());
+
+        switch_account_by_id(&account.id).await.unwrap();
+
+        let live = read_current_auth().unwrap().unwrap();
+        let tokens = live.tokens.unwrap();
+        assert_eq!(tokens.account_id.as_deref(), Some("workspace"));
+        assert_eq!(tokens.access_token, jwt);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn explicit_switch_replaces_stale_active_auth_file() {
         let _home = crate::auth::test_support::TestHome::new();
         let account = StoredAccount::new_api_key("Active".into(), "sk-current".into());
