@@ -183,6 +183,26 @@ struct ResetCredit {
     description: Option<String>,
 }
 
+/// Reset credits can be available even when profile statistics are not.
+#[tauri::command]
+pub async fn get_account_reset_credits(account_id: String) -> Result<AccountResetCredits, String> {
+    let store = load_accounts().map_err(|e| e.to_string())?;
+    let account = store
+        .accounts
+        .iter()
+        .find(|account| account.id == account_id)
+        .ok_or_else(|| format!("Account not found: {account_id}"))?;
+
+    if account.auth_mode != AuthMode::ChatGPT {
+        return Err("Reset credits are available for ChatGPT accounts only.".into());
+    }
+
+    let fresh = ensure_chatgpt_tokens_fresh(account)
+        .await
+        .map_err(|e| e.to_string())?;
+    fetch_reset_credits(&fresh).await.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn get_account_usage_stats(account_id: String) -> Result<AccountUsageStats, String> {
     let store = load_accounts().map_err(|e| e.to_string())?;
