@@ -205,12 +205,17 @@ pub fn sync_local_projects_with_baselines(
     let mut hosts = object_field(target, MIGRATION_IDS)?
         .cloned()
         .unwrap_or_default();
+    let mut alias_updates = Vec::new();
     for (host, ids) in &mut hosts {
         if local_host(host) {
             let ids = ids.as_object_mut().unwrap();
             old_ids.extend(ids.values().map(|id| id.as_str().unwrap().to_owned()));
-            ids.retain(|id, _| retained.contains_key(id));
-            retained_ids.extend(ids.values().map(|id| id.as_str().unwrap().to_owned()));
+            ids.retain(|id, _| merged.contains_key(id));
+            retained_ids.extend(
+                ids.iter()
+                    .filter(|(id, _)| retained.contains_key(*id))
+                    .map(|(_, id)| id.as_str().unwrap().to_owned()),
+            );
         }
     }
     for (host, value) in object_field(source, MIGRATION_IDS)?.unwrap_or(&empty) {
@@ -222,12 +227,31 @@ pub fn sync_local_projects_with_baselines(
                 .unwrap();
             for (id, value) in value.as_object().unwrap() {
                 if projects.contains_key(id) {
-                    ids.insert(id.clone(), value.clone());
+                    if let Some(previous) = ids.insert(id.clone(), value.clone()) {
+                        if previous != *value {
+                            alias_updates.push((
+                                host.clone(),
+                                previous.as_str().unwrap().to_owned(),
+                                value.clone(),
+                            ));
+                        }
+                    }
                     local_ids.insert(value.as_str().unwrap().to_owned());
                 } else if known_ids.contains(id) {
                     old_ids.insert(value.as_str().unwrap().to_owned());
                 }
             }
+        }
+    }
+    let mut surviving_ids: HashSet<String> = merged.keys().cloned().collect();
+    for (host, ids) in &hosts {
+        if local_host(host) {
+            surviving_ids.extend(
+                ids.as_object()
+                    .unwrap()
+                    .values()
+                    .map(|id| id.as_str().unwrap().to_owned()),
+            );
         }
     }
     replacement.insert(MIGRATION_IDS.into(), Value::Object(hosts));
@@ -291,12 +315,28 @@ pub fn sync_local_projects_with_baselines(
     let mut memberships = object_field(target, MEMBERSHIP_HOSTS)?
         .cloned()
         .unwrap_or_default();
+    // Keep destination-only chats attached when a shared project's database
+    // alias changes. Explicit remote memberships and cloud assignments stay private.
+    for (thread, project) in &mut assignments {
+        if let Some((_, _, current)) = alias_updates.iter().find(|(host, previous, _)| {
+            local_assignment_id(project) == Some(previous.as_str())
+                && memberships.get(thread).map_or(true, |membership| {
+                    membership == "local" || membership == host.as_str()
+                })
+        }) {
+            if project.is_string() {
+                *project = current.clone();
+            } else {
+                project["projectId"] = current.clone();
+            }
+        }
+    }
     let removed: Vec<String> = assignments
         .iter()
         .filter(|(thread, project)| {
-            local_assignment_id(project).is_some_and(|id| {
-                (old_ids.contains(id) && !retained_ids.contains(id)) || local_ids.contains(id)
-            }) && local_membership(&memberships, thread)
+            local_assignment_id(project)
+                .is_some_and(|id| old_ids.contains(id) && !surviving_ids.contains(id))
+                && local_membership(&memberships, thread)
         })
         .map(|(thread, _)| thread.clone())
         .collect();
@@ -304,6 +344,14 @@ pub fn sync_local_projects_with_baselines(
         assignments.remove(&thread);
         memberships.remove(&thread);
     }
+    // Project-ID baselines do not tell us whether an absent source assignment
+    // was deliberately removed or was never seen. Preserve it unless its project
+    // was deleted or an explicit source assignment replaces it below.
+    let target_has_local_state = !old_projects.is_empty()
+        || assignments.iter().any(|(thread, project)| {
+            local_assignment_id(project).is_some_and(|id| surviving_ids.contains(id))
+                && local_membership(&memberships, thread)
+        });
     let source_memberships = object_field(source, MEMBERSHIP_HOSTS)?.unwrap_or(&empty);
     for (thread, project) in object_field(source, ASSIGNMENTS)?.unwrap_or(&empty) {
         if local_assignment_id(project).is_some_and(|id| local_ids.contains(id))
@@ -326,7 +374,6 @@ pub fn sync_local_projects_with_baselines(
     let mut migration = object_field(target, MIGRATION_STATE)?
         .cloned()
         .unwrap_or_default();
-    migration.retain(|host, _| !local_host(host) || !retained.is_empty());
     let source_migration = object_field(source, MIGRATION_STATE)?.unwrap_or(&empty);
     for (host, value) in &mut migration {
         if local_host(host) && !projects.is_empty() && !source_migration.contains_key(host) {
@@ -340,31 +387,30 @@ pub fn sync_local_projects_with_baselines(
             continue;
         }
         let mut value = value.clone();
-        if let Some(previous) = migration.get(host) {
-            for flag in [
-                "projectsMigrated",
-                "threadAssignmentsMigrated",
-                "threadAssignmentsReadMigrated",
-            ] {
-                value[flag] = json!(value[flag] == true && previous[flag] == true);
-            }
-            let mut pending =
-                string_array(value.as_object().unwrap(), "pendingThreadAssignmentIds")?
-                    .into_iter()
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>();
+        let previous = migration.get(host);
+        for flag in [
+            "projectsMigrated",
+            "threadAssignmentsMigrated",
+            "threadAssignmentsReadMigrated",
+        ] {
+            value[flag] = json!(
+                value[flag] == true
+                    && previous.map_or(!target_has_local_state, |previous| previous[flag] == true)
+            );
+        }
+        let mut pending = string_array(value.as_object().unwrap(), "pendingThreadAssignmentIds")?
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if let Some(previous) = previous {
             for thread in string_array(previous.as_object().unwrap(), "pendingThreadAssignmentIds")?
             {
                 if !pending.iter().any(|id| id == thread) {
                     pending.push(thread.to_owned());
                 }
             }
-            value["pendingThreadAssignmentIds"] = json!(pending);
-        } else if !retained.is_empty() {
-            value["projectsMigrated"] = json!(false);
-            value["threadAssignmentsMigrated"] = json!(false);
-            value["threadAssignmentsReadMigrated"] = json!(false);
         }
+        value["pendingThreadAssignmentIds"] = json!(pending);
         migration.insert(host.clone(), value);
     }
     // Pending IDs may have no legacy assignment: Codex still needs to fetch
@@ -838,6 +884,256 @@ mod tests {
             state[ACCOUNT_STATE]["inactive"]["b"]["globals"][ASSIGNMENTS]["local-chat"],
             cloud
         );
+    }
+
+    fn shared_project_fixture() -> Value {
+        let mut state = fixture();
+        let projects = state[PROJECTS].clone();
+        let target = &mut state[ACCOUNT_STATE]["inactive"]["b"]["globals"];
+        target[PROJECTS] = projects;
+        target[MIGRATION_IDS]["local:/codex"] = json!({"p":"db-p"});
+        target[ASSIGNMENTS] = json!({
+            "b-only-chat":{"projectKind":"local","projectId":"p"},
+            "b-string-chat":"p",
+            "b-alias-chat":{"projectKind":"local","projectId":"db-p"},
+            "remote-chat":"remote-project"
+        });
+        target[MEMBERSHIP_HOSTS] = json!({
+            "b-only-chat":"local:/codex", "b-string-chat":"local",
+            "b-alias-chat":"local:/codex", "remote-chat":"ssh:server"
+        });
+        state
+    }
+
+    #[test]
+    fn review_target_only_shared_project_assignments_survive_first_share_and_retry() {
+        let mut state = shared_project_fixture();
+        let before = state[ACCOUNT_STATE]["inactive"]["b"].clone();
+        let mut baselines = json!({"version":1,"accounts":{}});
+        sync_local_projects_with_baselines(&mut state, &mut baselines, "a", "b").unwrap();
+        let target = &state[ACCOUNT_STATE]["inactive"]["b"];
+        for thread in [
+            "b-only-chat",
+            "b-string-chat",
+            "b-alias-chat",
+            "remote-chat",
+        ] {
+            assert_eq!(
+                target["globals"][ASSIGNMENTS][thread],
+                before["globals"][ASSIGNMENTS][thread]
+            );
+            assert_eq!(
+                target["globals"][MEMBERSHIP_HOSTS][thread],
+                before["globals"][MEMBERSHIP_HOSTS][thread]
+            );
+        }
+        assert_eq!(target["globals"][ASSIGNMENTS]["local-chat"], "p");
+        assert_eq!(target["atoms"], before["atoms"]);
+        for key in [
+            "remote-projects",
+            "thread-writable-roots",
+            "queued-follow-ups",
+        ] {
+            assert_eq!(target["globals"][key], before["globals"][key]);
+        }
+        let prepared = state.clone();
+        assert!(!sync_local_projects_with_baselines(&mut state, &mut baselines, "a", "b").unwrap());
+        assert_eq!(state, prepared);
+    }
+
+    #[test]
+    fn review_pending_migration_survives_without_independent_projects() {
+        let mut state = shared_project_fixture();
+        state[MIGRATION_STATE]["local:/codex"] = json!({
+            "version":1, "projectsMigrated":true, "threadAssignmentsMigrated":true,
+            "threadAssignmentsReadMigrated":true, "pendingThreadAssignmentIds":["shared", "a-pending"]
+        });
+        state[ACCOUNT_STATE]["inactive"]["b"]["globals"][MIGRATION_STATE] = json!({
+            "local:/codex":{
+                "version":1, "projectsMigrated":true, "threadAssignmentsMigrated":false,
+                "threadAssignmentsReadMigrated":false, "pendingThreadAssignmentIds":["b-only-pending", "shared"]
+            },
+            "ssh:server":{"private":"unchanged"}
+        });
+        let mut baselines = json!({"version":1,"accounts":{}});
+        sync_local_projects_with_baselines(&mut state, &mut baselines, "a", "b").unwrap();
+        let migration = &state[ACCOUNT_STATE]["inactive"]["b"]["globals"][MIGRATION_STATE];
+        assert_eq!(migration["local:/codex"]["projectsMigrated"], true);
+        assert_eq!(
+            migration["local:/codex"]["threadAssignmentsMigrated"],
+            false
+        );
+        assert_eq!(
+            migration["local:/codex"]["threadAssignmentsReadMigrated"],
+            false
+        );
+        assert_eq!(
+            migration["local:/codex"]["pendingThreadAssignmentIds"],
+            json!(["shared", "a-pending", "b-only-pending"])
+        );
+        assert_eq!(migration["ssh:server"], json!({"private":"unchanged"}));
+        let prepared = state.clone();
+        assert!(!sync_local_projects_with_baselines(&mut state, &mut baselines, "a", "b").unwrap());
+        assert_eq!(state, prepared);
+    }
+
+    #[test]
+    fn review_target_pending_migration_survives_without_source_record_or_projects() {
+        for no_projects in [false, true] {
+            let mut state = shared_project_fixture();
+            state[MIGRATION_STATE] = json!({});
+            if no_projects {
+                state[PROJECTS] = json!({});
+                state[ACCOUNT_STATE]["inactive"]["b"]["globals"][PROJECTS] = json!({});
+            }
+            let pending = json!({
+                "version":1, "projectsMigrated":false, "threadAssignmentsMigrated":false,
+                "threadAssignmentsReadMigrated":false, "pendingThreadAssignmentIds":["b-only-pending"]
+            });
+            state[ACCOUNT_STATE]["inactive"]["b"]["globals"][MIGRATION_STATE] =
+                json!({"local:/codex":pending});
+            sync_local_projects(&mut state, "a", "b").unwrap();
+            assert_eq!(
+                state[ACCOUNT_STATE]["inactive"]["b"]["globals"][MIGRATION_STATE]["local:/codex"],
+                pending
+            );
+        }
+    }
+
+    #[test]
+    fn review_missing_target_migration_does_not_skip_shared_project_assignments() {
+        let mut state = shared_project_fixture();
+        let complete = json!({
+            "version":1, "projectsMigrated":true, "threadAssignmentsMigrated":true,
+            "threadAssignmentsReadMigrated":true, "pendingThreadAssignmentIds":[]
+        });
+        state[MIGRATION_STATE]["local:/codex"] = complete.clone();
+        sync_local_projects(&mut state, "a", "b").unwrap();
+        let migration =
+            &state[ACCOUNT_STATE]["inactive"]["b"]["globals"][MIGRATION_STATE]["local:/codex"];
+        for flag in [
+            "projectsMigrated",
+            "threadAssignmentsMigrated",
+            "threadAssignmentsReadMigrated",
+        ] {
+            assert_eq!(migration[flag], false);
+        }
+        sync_local_projects(&mut state, "a", "new").unwrap();
+        assert_eq!(
+            state[ACCOUNT_STATE]["inactive"]["new"]["globals"][MIGRATION_STATE]["local:/codex"],
+            complete
+        );
+    }
+
+    #[test]
+    fn review_shared_project_aliases_remain_usable() {
+        for source_has_alias in [false, true] {
+            let mut state = shared_project_fixture();
+            if !source_has_alias {
+                state[MIGRATION_IDS] = json!({});
+            }
+            let target = &mut state[ACCOUNT_STATE]["inactive"]["b"]["globals"];
+            target[MIGRATION_IDS]["local:/codex"]["p"] = json!("db-b");
+            target[ASSIGNMENTS]["b-alias-chat"]["projectId"] = json!("db-b");
+            target[ASSIGNMENTS]["b-string-chat"] = json!("db-b");
+            sync_local_projects(&mut state, "a", "b").unwrap();
+            let target = &state[ACCOUNT_STATE]["inactive"]["b"]["globals"];
+            let expected = if source_has_alias { "db-p" } else { "db-b" };
+            assert_eq!(target[MIGRATION_IDS]["local:/codex"]["p"], expected);
+            assert_eq!(target[ASSIGNMENTS]["b-alias-chat"]["projectId"], expected);
+            assert_eq!(target[ASSIGNMENTS]["b-string-chat"], expected);
+        }
+    }
+
+    #[test]
+    fn review_shared_project_deletion_still_cleans_legacy_and_alias_assignments() {
+        let mut state = shared_project_fixture();
+        let mut baselines = json!({"version":1,"accounts":{}});
+        sync_local_projects_with_baselines(&mut state, &mut baselines, "a", "b").unwrap();
+        state[PROJECTS] = json!({});
+        sync_local_projects_with_baselines(&mut state, &mut baselines, "a", "b").unwrap();
+        let target = &state[ACCOUNT_STATE]["inactive"]["b"]["globals"];
+        assert_eq!(target[ASSIGNMENTS], json!({"remote-chat":"remote-project"}));
+        assert_eq!(
+            target[MEMBERSHIP_HOSTS],
+            json!({"remote-chat":"ssh:server"})
+        );
+    }
+
+    #[test]
+    fn review_alias_remapping_does_not_chain_into_another_project() {
+        let mut state = shared_project_fixture();
+        state[PROJECTS]["q"] = json!({"id":"q", "name":"Other", "rootPaths":["/other"]});
+        let projects = state[PROJECTS].clone();
+        state[MIGRATION_IDS]["local:/codex"] = json!({"p":"db-2", "q":"db-3"});
+        let target = &mut state[ACCOUNT_STATE]["inactive"]["b"]["globals"];
+        target[PROJECTS] = projects;
+        target[MIGRATION_IDS]["local:/codex"] = json!({"p":"db-1", "q":"db-2"});
+        target[ASSIGNMENTS]["b-alias-chat"]["projectId"] = json!("db-1");
+        target[ASSIGNMENTS]["b-string-chat"] = json!("db-2");
+        sync_local_projects(&mut state, "a", "b").unwrap();
+        let target = &state[ACCOUNT_STATE]["inactive"]["b"]["globals"];
+        assert_eq!(target[ASSIGNMENTS]["b-alias-chat"]["projectId"], "db-2");
+        assert_eq!(target[ASSIGNMENTS]["b-string-chat"], "db-3");
+    }
+
+    #[test]
+    fn review_explicit_source_assignments_win_without_overwriting_private_assignments() {
+        let mut state = shared_project_fixture();
+        state[PROJECTS]["q"] = json!({"id":"q", "name":"Other", "rootPaths":["/other"]});
+        for thread in ["b-only-chat", "cloud-chat", "remote-chat"] {
+            state[ASSIGNMENTS][thread] = json!({"projectKind":"local", "projectId":"q"});
+            state[MEMBERSHIP_HOSTS][thread] = json!("local:/codex");
+        }
+        let cloud = json!({"projectKind":"local", "projectId":"p", "projectOrigin":"chatgpt"});
+        state[ACCOUNT_STATE]["inactive"]["b"]["globals"][ASSIGNMENTS]["cloud-chat"] = cloud.clone();
+        sync_local_projects(&mut state, "a", "b").unwrap();
+        let target = &state[ACCOUNT_STATE]["inactive"]["b"]["globals"];
+        assert_eq!(
+            target[ASSIGNMENTS]["b-only-chat"],
+            json!({"projectKind":"local", "projectId":"q"})
+        );
+        assert_eq!(target[ASSIGNMENTS]["cloud-chat"], cloud);
+        assert_eq!(target[ASSIGNMENTS]["remote-chat"], "remote-project");
+        assert_eq!(target[MEMBERSHIP_HOSTS]["remote-chat"], "ssh:server");
+    }
+
+    #[test]
+    fn review_file_flow_preserves_destination_assignments_and_pending_migrations() {
+        let _home = TestHome::new();
+        let mut state = shared_project_fixture();
+        state[MIGRATION_STATE]["local:/codex"] = json!({
+            "version":1, "projectsMigrated":true, "threadAssignmentsMigrated":true,
+            "threadAssignmentsReadMigrated":true, "pendingThreadAssignmentIds":[]
+        });
+        state[ACCOUNT_STATE]["inactive"]["b"]["globals"][MIGRATION_STATE] = json!({"local:/codex":{
+            "version":1, "projectsMigrated":true, "threadAssignmentsMigrated":false,
+            "threadAssignmentsReadMigrated":false, "pendingThreadAssignmentIds":["b-only-pending"]
+        }});
+        let path = state_file(&serde_json::to_vec(&state).unwrap());
+        preserve_local_projects_in_file(&path, "a", "b").unwrap();
+        let first = fs::read(&path).unwrap();
+        let result: Value = serde_json::from_slice(&first).unwrap();
+        let target = &result[ACCOUNT_STATE]["inactive"]["b"]["globals"];
+        assert_eq!(
+            target[ASSIGNMENTS]["b-only-chat"],
+            state[ACCOUNT_STATE]["inactive"]["b"]["globals"][ASSIGNMENTS]["b-only-chat"]
+        );
+        assert_eq!(
+            target[MIGRATION_STATE]["local:/codex"]["pendingThreadAssignmentIds"],
+            json!(["b-only-pending"])
+        );
+        assert_eq!(
+            target[MIGRATION_STATE]["local:/codex"]["threadAssignmentsMigrated"],
+            false
+        );
+        assert_eq!(
+            target[MIGRATION_STATE]["local:/codex"]["threadAssignmentsReadMigrated"],
+            false
+        );
+        preserve_local_projects_in_file(&path, "a", "b").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), first);
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 2);
     }
 
     #[test]

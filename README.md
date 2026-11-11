@@ -153,6 +153,11 @@ account are retained on the first transfer. A local ID-only baseline in
 `$CODEX_HOME/.codex-switcher-project-baselines.json` tracks which projects each
 account has already shared, so later renames and removals propagate without
 restoring deleted projects from older account snapshots.
+Destination-only local chat associations are preserved even inside shared projects.
+An explicit source association takes precedence, but an absent source association
+does not delete a destination association: the baseline tracks project IDs, not
+individual chat assignments. Pending local migrations are merged and completion
+is kept conservative, including when all destination projects are shared.
 Cloud caches, remote projects, permissions, and account-specific preferences stay
 separate. Codex must be closed while this local state is updated; an unreadable or
 incompatible state file stops the switch instead of overwriting it.
