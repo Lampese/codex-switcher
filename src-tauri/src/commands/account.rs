@@ -149,7 +149,11 @@ fn live_auth_matches_account(account: &StoredAccount, live: &AuthDotJson) -> boo
         AuthData::ApiKey { key } => {
             live.tokens.is_none() && live.openai_api_key.as_deref() == Some(key.as_str())
         }
-        AuthData::ChatGPT { id_token, account_id, .. } => {
+        AuthData::ChatGPT {
+            id_token,
+            account_id,
+            ..
+        } => {
             let Some(tokens) = live.tokens.as_ref() else {
                 return false;
             };
@@ -207,7 +211,9 @@ pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
     // Never import a different user's tokens solely because of a shared team
     // workspace ID. A mismatched active account must take the repair path.
     if let Some(auth) = live_auth.as_ref() {
-        let can_sync = store.active_account_id.as_deref()
+        let can_sync = store
+            .active_account_id
+            .as_deref()
             .and_then(|id| store.accounts.iter().find(|account| account.id == id))
             .is_some_and(|account| live_auth_matches_account(account, auth));
         if can_sync && sync_active_account_tokens(&mut store, auth) {
@@ -862,12 +868,21 @@ mod active_account_repair_tests {
                 "email": email,
                 "https://api.openai.com/auth": { "chatgpt_account_id": "shared-team" }
             });
-            format!("header.{}.signature", URL_SAFE_NO_PAD.encode(payload.to_string()))
+            format!(
+                "header.{}.signature",
+                URL_SAFE_NO_PAD.encode(payload.to_string())
+            )
         };
         let original = jwt("alice@example.com");
         let account = StoredAccount::new_chatgpt(
-            "Alice".into(), None, None, None, original.clone(), "access".into(),
-            "refresh".into(), Some("shared-team".into()),
+            "Alice".into(),
+            None,
+            None,
+            None,
+            original.clone(),
+            "access".into(),
+            "refresh".into(),
+            Some("shared-team".into()),
         );
         let other = serde_json::from_value(serde_json::json!({
             "tokens": {
@@ -876,7 +891,8 @@ mod active_account_repair_tests {
                 "refresh_token": "other-refresh",
                 "account_id": "shared-team"
             }
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(!live_auth_matches_account(&account, &other));
 
         let rotated = serde_json::from_value(serde_json::json!({
@@ -886,7 +902,8 @@ mod active_account_repair_tests {
                 "refresh_token": "rotated-refresh",
                 "account_id": "shared-team"
             }
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(live_auth_matches_account(&account, &rotated));
     }
 
