@@ -8,7 +8,7 @@ import { finishForceClose, type DesktopReopenPreference } from "./lib/desktopReo
 import type { CodexClosePreference } from "./lib/codexClosePreference";
 import { useForceCloseCodexProcesses } from "./hooks/useForceCloseCodexProcesses";
 import { AccountCard, AddAccountModal, UpdateChecker, WindowResizeBorders } from "./components";
-import type { AccountWithUsage, CodexProcessInfo, DockDisplayMode, UsageInfo } from "./types";
+import type { AccountInfo, AccountWithUsage, CodexProcessInfo, DockDisplayMode, UsageInfo } from "./types";
 import {
   exportFullBackupFile,
   importFullBackupFile,
@@ -190,6 +190,7 @@ function App() {
   } = useAccounts();
 
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [reloginAccount, setReloginAccount] = useState<AccountInfo | null>(null);
   const [isConfigModalOpen, setIsConfigModalOpen] = useState(false);
   const [configModalMode, setConfigModalMode] = useState<"slim_export" | "slim_import">(
     "slim_export"
@@ -1875,6 +1876,7 @@ function App() {
                   </h2>
                   <AccountCard
                     account={activeAccount}
+                    onRelogin={() => setReloginAccount(activeAccount)}
                     onSwitch={() => { }}
                     onWarmup={() =>
                       handleWarmupAccount(activeAccount.id, activeAccount.name)
@@ -1974,6 +1976,7 @@ function App() {
                     <AccountCard
                       key={account.id}
                       account={account}
+                      onRelogin={() => setReloginAccount(account)}
                       onSwitch={() => handleSwitch(account.id)}
                       onWarmup={() => handleWarmupAccount(account.id, account.name)}
                       onDelete={() => handleDelete(account.id)}
@@ -2229,8 +2232,10 @@ function App() {
 
       {/* Add Account Modal */}
       <AddAccountModal
-        isOpen={isAddModalOpen}
-        onClose={() => setIsAddModalOpen(false)}
+        key={reloginAccount?.id ?? (isAddModalOpen ? "add-open" : "closed")}
+        isOpen={isAddModalOpen || reloginAccount !== null}
+        reloginAccount={reloginAccount}
+        onClose={() => { setIsAddModalOpen(false); setReloginAccount(null); }}
         onImportFile={importFromFile}
         onStartOAuth={startOAuthLogin}
         onCompleteOAuth={completeOAuthLogin}
