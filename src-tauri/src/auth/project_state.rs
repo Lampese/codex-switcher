@@ -16,9 +16,32 @@ const ASSIGNMENTS: &str = "thread-project-assignments";
 const MEMBERSHIP_HOSTS: &str = "thread-project-membership-host-ids";
 const BASELINES_FILE: &str = ".codex-switcher-project-baselines.json";
 
+// Only read/parse/validation errors before any write receive this marker.
+// Persistence errors, including concurrent changes, must still stop switching.
+#[derive(Debug, thiserror::Error)]
+#[error("Local project state is unavailable or unsupported")]
+struct SkipPreservation;
+
 /// Called under AUTH_OPERATION_LOCK, after confirming Codex has completely exited.
 /// Token refresh alone must not call this: the desktop may still own the state file.
 pub fn preserve_local_projects(
+    current: Option<&AuthDotJson>,
+    target: &StoredAccount,
+) -> Result<()> {
+    allow_unavailable_state(preserve_local_projects_checked(current, target))
+}
+
+fn allow_unavailable_state(result: Result<()>) -> Result<()> {
+    match result {
+        Err(error) if error.is::<SkipPreservation>() => {
+            eprintln!("[Projects] Warning: skipping project preservation; state left untouched: {error:#}");
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+fn preserve_local_projects_checked(
     current: Option<&AuthDotJson>,
     target: &StoredAccount,
 ) -> Result<()> {
@@ -33,20 +56,28 @@ pub fn preserve_local_projects(
     let Some(current) = current.and_then(|auth| auth.tokens.as_ref()) else {
         return Ok(());
     };
-    let path = super::get_codex_home()?.join(".codex-global-state.json");
+    let path = super::get_codex_home()
+        .context(SkipPreservation)?
+        .join(".codex-global-state.json");
     let original = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error).context("Could not read Codex project state"),
+        Err(error) => {
+            return Err(error)
+                .context("Could not read Codex project state")
+                .context(SkipPreservation)
+        }
     };
     let state: Value = serde_json::from_slice(&original)
-        .context("Codex project state is invalid; account switch cancelled")?;
+        .context("Codex project state is invalid")
+        .context(SkipPreservation)?;
     // Older Codex versions keep their local project list globally already.
     if state.get(ACCOUNT_STATE).is_none() {
         return Ok(());
     }
-    let source = renderer_owner(&current.id_token, current.account_id.as_deref())?;
-    let target = renderer_owner(id_token, account_id.as_deref())?;
+    let source = renderer_owner(&current.id_token, current.account_id.as_deref())
+        .context(SkipPreservation)?;
+    let target = renderer_owner(id_token, account_id.as_deref()).context(SkipPreservation)?;
     preserve_local_projects_in_file(&path, &source, &target)
 }
 
@@ -57,18 +88,26 @@ pub fn preserve_local_projects_in_file(
     source_owner: &str,
     target_owner: &str,
 ) -> Result<()> {
-    let original = fs::read(path).context("Could not read Codex project state")?;
+    let original = fs::read(path)
+        .context("Could not read Codex project state")
+        .context(SkipPreservation)?;
     let mut state: Value = serde_json::from_slice(&original)
-        .context("Codex project state is invalid; account switch cancelled")?;
+        .context("Codex project state is invalid")
+        .context(SkipPreservation)?;
     let baseline_path = path.with_file_name(BASELINES_FILE);
-    let baseline_original = read_optional(&baseline_path)?;
+    let baseline_original = read_optional(&baseline_path).context(SkipPreservation)?;
     let mut baselines = match &baseline_original {
         Some(bytes) => serde_json::from_slice(bytes)
-            .context("Invalid Switcher project baselines; account switch cancelled")?,
+            .context("Invalid Switcher project baselines")
+            .context(SkipPreservation)?,
         None => json!({"version":1,"accounts":{}}),
     };
     let previous_baselines = baselines.clone();
-    if sync_local_projects_with_baselines(&mut state, &mut baselines, source_owner, target_owner)? {
+    let changed =
+        sync_local_projects_with_baselines(&mut state, &mut baselines, source_owner, target_owner)
+            .context(SkipPreservation)?;
+    // No errors after this point may be treated as an optional preparation failure.
+    if changed {
         write_project_state(path, &original, &state)?;
     }
     // Write after the project state. If interrupted, a retry may retain an old
@@ -157,10 +196,12 @@ pub fn sync_local_projects_with_baselines(
         .context("Unsupported Codex inactive account state format")?;
     let source = if owner.as_str() == Some(source_owner) {
         root
+    } else if let Some(slot) = inactive.get(source_owner) {
+        slot_globals(slot)?
     } else {
-        slot_globals(inactive.get(source_owner).context(
-            "Current account has no saved Codex state; open and close Codex before switching",
-        )?)?
+        // Authentication can change without opening the desktop. No snapshot
+        // means nothing to share, not an empty project list or a failed switch.
+        return Ok(false);
     };
     let Some(projects) = object_field(source, PROJECTS)? else {
         return Ok(false);
@@ -341,8 +382,8 @@ pub fn sync_local_projects_with_baselines(
         .map(|(thread, _)| thread.clone())
         .collect();
     for thread in removed {
-        assignments.remove(&thread);
-        memberships.remove(&thread);
+        assignments.shift_remove(&thread);
+        memberships.shift_remove(&thread);
     }
     // Project-ID baselines do not tell us whether an absent source assignment
     // was deliberately removed or was never seen. Preserve it unless its project
@@ -448,19 +489,19 @@ pub fn sync_local_projects_with_baselines(
 
 fn validate_baselines(baselines: &Value) -> Result<&Map<String, Value>> {
     if baselines.get("version").and_then(Value::as_u64) != Some(1) {
-        bail!("Unsupported Switcher project baseline version; account switch cancelled");
+        bail!("Unsupported Switcher project baseline version");
     }
     let accounts = baselines
         .get("accounts")
         .and_then(Value::as_object)
-        .context("Invalid Switcher project baselines; account switch cancelled")?;
+        .context("Invalid Switcher project baselines")?;
     for owner in accounts.keys() {
         if owner.is_empty()
             || string_array(accounts, owner)?
                 .iter()
                 .any(|id| id.is_empty())
         {
-            bail!("Invalid Switcher project baseline identity; account switch cancelled");
+            bail!("Invalid Switcher project baseline identity");
         }
     }
     Ok(accounts)
@@ -502,7 +543,7 @@ fn validate_local_fields(state: &Map<String, Value>) -> Result<()> {
                     .and_then(Value::as_array)
                     .is_some_and(|paths| paths.iter().all(Value::is_string))
             {
-                bail!("Unsupported Codex local project record; account switch cancelled");
+                bail!("Unsupported Codex local project record");
             }
         }
     }
@@ -516,7 +557,7 @@ fn validate_local_fields(state: &Map<String, Value>) -> Result<()> {
     for key in ["electron-workspace-root-labels", MEMBERSHIP_HOSTS] {
         if let Some(values) = object_field(state, key)? {
             if !values.values().all(Value::is_string) {
-                bail!("Invalid Codex {key} entry; account switch cancelled");
+                bail!("Invalid Codex {key} entry");
             }
         }
     }
@@ -529,14 +570,14 @@ fn validate_local_fields(state: &Map<String, Value>) -> Result<()> {
                     .is_some_and(|kind| matches!(kind, "local" | "remote"))
                     && assignment.get("projectId").is_some_and(Value::is_string))
             {
-                bail!("Invalid Codex thread project assignment; account switch cancelled");
+                bail!("Invalid Codex thread project assignment");
             }
             if assignment.get("projectKind").and_then(Value::as_str) == Some("local")
                 && assignment
                     .get("projectOrigin")
                     .is_some_and(|origin| origin.as_str() != Some("chatgpt"))
             {
-                bail!("Unsupported Codex project origin; account switch cancelled");
+                bail!("Unsupported Codex project origin");
             }
         }
     }
@@ -554,13 +595,11 @@ fn validate_local_fields(state: &Map<String, Value>) -> Result<()> {
                         .values()
                         .all(|id| id.as_str().is_some_and(|id| !id.is_empty()))
                     {
-                        bail!("Invalid local project migration ID; account switch cancelled");
+                        bail!("Invalid local project migration ID");
                     }
                 } else {
                     if local.get("version").and_then(Value::as_u64) != Some(1) {
-                        bail!(
-                            "Unsupported local project migration version; account switch cancelled"
-                        );
+                        bail!("Unsupported local project migration version");
                     }
                     for flag in [
                         "projectsMigrated",
@@ -568,9 +607,7 @@ fn validate_local_fields(state: &Map<String, Value>) -> Result<()> {
                         "threadAssignmentsReadMigrated",
                     ] {
                         if local.get(flag).is_some_and(|flag| !flag.is_boolean()) {
-                            bail!(
-                                "Invalid local project migration status; account switch cancelled"
-                            );
+                            bail!("Invalid local project migration status");
                         }
                     }
                     string_array(local, "pendingThreadAssignmentIds")?;
@@ -634,11 +671,49 @@ pub fn write_project_state(path: &Path, original: &[u8], state: &Value) -> Resul
     write_json_state(path, Some(original), state)
 }
 
+fn serialize_like_original(state: &Value, original: &[u8]) -> Result<Vec<u8>> {
+    use serde::Serialize;
+
+    // Preserve the desktop's compact layout, or its usual indentation and
+    // line endings. JSON string newlines are escaped, so these are layout only.
+    let indent = original
+        .split(|byte| *byte == b'\n')
+        .skip(1)
+        .find_map(|line| {
+            let width = line
+                .iter()
+                .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                .count();
+            (width > 0 && line.get(width) == Some(&b'"')).then_some(&line[..width])
+        });
+    let mut contents = Vec::new();
+    if let Some(indent) = indent {
+        let formatter = serde_json::ser::PrettyFormatter::with_indent(indent);
+        state.serialize(&mut serde_json::Serializer::with_formatter(
+            &mut contents,
+            formatter,
+        ))?;
+        if original.windows(2).any(|bytes| bytes == b"\r\n") {
+            contents = String::from_utf8(contents)?
+                .replace('\n', "\r\n")
+                .into_bytes();
+        }
+    } else {
+        contents = serde_json::to_vec(state)?;
+    }
+    let trailing = original
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map_or(0, |index| index + 1);
+    contents.extend_from_slice(&original[trailing..]);
+    Ok(contents)
+}
+
 fn write_json_state(path: &Path, original: Option<&[u8]>, state: &Value) -> Result<()> {
     if read_optional(path)?.as_deref() != original {
         bail!("Codex project state changed; close Codex and retry the switch");
     }
-    let contents = serde_json::to_vec_pretty(state)?;
+    let contents = serialize_like_original(state, original.unwrap_or_default())?;
     let suffix = uuid::Uuid::new_v4();
     let backup = path.with_extension(format!("switcher-projects-{suffix}.bak"));
     let temporary = path.with_extension(format!("switcher-projects-{suffix}.tmp"));
@@ -1311,7 +1386,9 @@ mod tests {
         assert!(sync_local_projects(&mut malformed, "a", "b").is_err());
         assert_eq!(malformed, before);
         let mut missing_source = fixture();
-        assert!(sync_local_projects(&mut missing_source, "unknown", "b").is_err());
+        let before = missing_source.clone();
+        assert!(!sync_local_projects(&mut missing_source, "unknown", "b").unwrap());
+        assert_eq!(missing_source, before);
     }
 
     #[test]
@@ -1347,6 +1424,236 @@ mod tests {
                 assert_eq!(state, before);
             }
         }
+    }
+
+    #[test]
+    fn review2_consecutive_switches_without_projects_leave_state_untouched() {
+        let _home = TestHome::new();
+        let original = br#"{"electron-account-renderer-state-v1":{"owner":"b","inactive":{}},"private":"unchanged"}"#;
+        let path = state_file(original);
+        preserve_local_projects_in_file(&path, "b", "a").unwrap();
+        preserve_local_projects_in_file(&path, "a", "c").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!path.with_file_name(BASELINES_FILE).exists());
+    }
+
+    #[test]
+    fn review2_external_login_without_a_source_slot_does_not_use_another_owners_projects() {
+        let mut state = fixture();
+        let original = state.clone();
+        let mut baselines = json!({"version":1,"accounts":{"external":["p"]}});
+        let previous = baselines.clone();
+        assert!(
+            !sync_local_projects_with_baselines(&mut state, &mut baselines, "external", "b")
+                .unwrap()
+        );
+        assert_eq!(state, original);
+        assert_eq!(baselines, previous);
+        assert!(sync_local_projects_with_baselines(&mut state, &mut baselines, "a", "c").unwrap());
+        assert_eq!(
+            state[ACCOUNT_STATE]["inactive"]["c"]["globals"][PROJECTS],
+            original[PROJECTS]
+        );
+    }
+
+    #[test]
+    fn review2_unsupported_state_is_optional_for_account_switching() {
+        let _home = TestHome::new();
+        let current = current_auth("user-a", "workspace-a");
+        let target = account("user-b", "workspace-b");
+        let mut cases = vec![b"{truncated".to_vec()];
+        for (field, value) in [
+            (MIGRATION_STATE, json!({"local:/codex":{"version":2}})),
+            (
+                ASSIGNMENTS,
+                json!({"chat":{"projectKind":"future", "projectId":"p"}}),
+            ),
+            (ACCOUNT_STATE, json!({"owner":42,"inactive":{}})),
+        ] {
+            let mut state = fixture();
+            state[ACCOUNT_STATE]["owner"] =
+                json!(renderer_owner(&current.tokens.as_ref().unwrap().id_token, None).unwrap());
+            state[field] = value;
+            cases.push(serde_json::to_vec(&state).unwrap());
+        }
+        for original in cases {
+            let path = state_file(&original);
+            preserve_local_projects(Some(&current), &target).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), original);
+            assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn review2_unreadable_state_does_not_block_account_switching() {
+        let _home = TestHome::new();
+        let path = super::super::get_codex_home()
+            .unwrap()
+            .join(".codex-global-state.json");
+        fs::create_dir_all(&path).unwrap();
+        preserve_local_projects(
+            Some(&current_auth("user-a", "workspace-a")),
+            &account("user-b", "workspace-b"),
+        )
+        .unwrap();
+        assert!(path.is_dir());
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn review2_serialization_preserves_private_key_order_float_and_compact_layout() {
+        let _home = TestHome::new();
+        let original = br#"{"z-private":51.248178375505404,"a-private":{"z":2,"a":1},"edited":0}"#;
+        let path = state_file(original);
+        let mut state: Value = serde_json::from_slice(original).unwrap();
+        state["edited"] = json!(1);
+        write_project_state(&path, original, &state).unwrap();
+        let output = fs::read(&path).unwrap();
+        assert_eq!(
+            output,
+            br#"{"z-private":51.248178375505404,"a-private":{"z":2,"a":1},"edited":1}"#
+        );
+        let parsed: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            parsed["z-private"].as_f64().unwrap().to_bits(),
+            51.248178375505404_f64.to_bits()
+        );
+    }
+
+    #[test]
+    fn review2_serialization_preserves_indentation_newlines_and_trailing_newline() {
+        let _home = TestHome::new();
+        for (indent, newline, trailing) in [
+            ("    ", "\r\n", true),
+            ("\t", "\n", false),
+            ("  ", "\n", true),
+        ] {
+            let original = format!(
+                "{{{newline}{indent}\"z\": 1,{newline}{indent}\"a\": 0{newline}}}{}",
+                if trailing { newline } else { "" }
+            );
+            let path = state_file(original.as_bytes());
+            let mut state: Value = serde_json::from_str(&original).unwrap();
+            state["a"] = json!(1);
+            write_project_state(&path, original.as_bytes(), &state).unwrap();
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                original.replace("\"a\": 0", "\"a\": 1")
+            );
+        }
+    }
+
+    #[test]
+    fn review2_invalid_baseline_is_skipped_without_touching_either_file() {
+        let _home = TestHome::new();
+        let current = current_auth("user-a", "workspace-a");
+        let mut state = fixture();
+        state[ACCOUNT_STATE]["owner"] =
+            json!(renderer_owner(&current.tokens.as_ref().unwrap().id_token, None).unwrap());
+        let original = serde_json::to_vec(&state).unwrap();
+        let path = state_file(&original);
+        let baseline = path.with_file_name(BASELINES_FILE);
+        for bytes in [b"{truncated".as_slice(), br#"{"version":2,"accounts":{}}"#] {
+            fs::write(&baseline, bytes).unwrap();
+            preserve_local_projects(Some(&current), &account("user-b", "workspace-b")).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), original);
+            assert_eq!(fs::read(&baseline).unwrap(), bytes);
+            assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 2);
+        }
+    }
+
+    #[test]
+    fn review2_optional_preservation_failure_allows_the_credential_write() {
+        let _home = TestHome::new();
+        let original = b"{truncated";
+        let path = state_file(original);
+        let current = current_auth("user-a", "workspace-a");
+        let target = account("user-b", "workspace-b");
+        // Same ordered operations as switch_account_by_id after the shutdown guard.
+        preserve_local_projects(Some(&current), &target).unwrap();
+        super::super::switch_to_account(&target).unwrap();
+        let auth = super::super::read_current_auth().unwrap().unwrap();
+        assert_eq!(
+            auth.tokens.unwrap().account_id.as_deref(),
+            Some("workspace-b")
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn review2_concurrent_changes_and_write_errors_are_not_optional() {
+        let _home = TestHome::new();
+        let path = state_file(b"{\"newer\":true}");
+        let auth_path = path.with_file_name("auth.json");
+        fs::write(&auth_path, b"unchanged-credentials").unwrap();
+        let result = allow_unavailable_state(write_project_state(&path, b"{}", &fixture()))
+            .and_then(|()| super::super::switch_to_account(&account("user-b", "workspace-b")));
+        assert!(result.is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"{\"newer\":true}");
+        assert_eq!(fs::read(&auth_path).unwrap(), b"unchanged-credentials");
+
+        // A missing parent deterministically fails persistence, not preparation.
+        let missing = path
+            .parent()
+            .unwrap()
+            .join("missing-parent")
+            .join("state.json");
+        let result = allow_unavailable_state(write_json_state(&missing, None, &fixture()))
+            .and_then(|()| super::super::switch_to_account(&account("user-b", "workspace-b")));
+        assert!(result.is_err());
+        assert_eq!(fs::read(&auth_path).unwrap(), b"unchanged-credentials");
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn review2_deleting_a_project_preserves_other_assignment_key_order() {
+        let mut state = fixture();
+        state[ASSIGNMENTS] = json!({});
+        let target = &mut state[ACCOUNT_STATE]["inactive"]["b"]["globals"];
+        target[ASSIGNMENTS] = serde_json::from_str(
+            r#"{"first":"remote-a","deleted":"removed","middle":"remote-b","last":"remote-c"}"#,
+        )
+        .unwrap();
+        target[MEMBERSHIP_HOSTS] = serde_json::from_str(
+            r#"{"first":"ssh:server","deleted":"local","middle":"ssh:server","last":"ssh:server"}"#,
+        )
+        .unwrap();
+        let mut baselines = json!({"version":1,"accounts":{"a":["p","removed"]}});
+        sync_local_projects_with_baselines(&mut state, &mut baselines, "a", "b").unwrap();
+        let target = &state[ACCOUNT_STATE]["inactive"]["b"]["globals"];
+        for key in [ASSIGNMENTS, MEMBERSHIP_HOSTS] {
+            assert_eq!(
+                target[key]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                vec!["first", "middle", "last"]
+            );
+        }
+    }
+
+    #[test]
+    fn review2_real_file_sync_preserves_large_private_history_and_is_idempotent() {
+        let _home = TestHome::new();
+        let entry = format!(r#"{{"z":51.248178375505404,"a":"{}"}}"#, "x".repeat(280));
+        let history = format!("[{}]", vec![entry; 7000].join(","));
+        let fixture_text = serde_json::to_string(&fixture()).unwrap();
+        let original = format!("{{\"z-private-history\":{history},{}", &fixture_text[1..]);
+        assert!(original.len() > 2 * 1024 * 1024);
+        let path = state_file(original.as_bytes());
+        preserve_local_projects_in_file(&path, "a", "b").unwrap();
+        let output = fs::read_to_string(&path).unwrap();
+        assert!(output.starts_with(&format!("{{\"z-private-history\":{history},")));
+        assert!(!output.contains('\n'));
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            parsed[ACCOUNT_STATE]["inactive"]["b"]["globals"][PROJECTS]["p"]["name"],
+            "Renamed"
+        );
+        preserve_local_projects_in_file(&path, "a", "b").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), output);
     }
 
     #[test]
@@ -1440,13 +1747,11 @@ mod tests {
         let _home = TestHome::new();
         let path = state_file(b"{truncated");
         let current = current_auth("user-a", "workspace-a");
-        assert!(
-            preserve_local_projects(Some(&current), &account("user-b", "workspace-b")).is_err()
-        );
+        preserve_local_projects(Some(&current), &account("user-b", "workspace-b")).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"{truncated");
         let original = serde_json::to_vec(&fixture()).unwrap();
         fs::write(&path, &original).unwrap();
-        assert!(preserve_local_projects(Some(&current), &account("", "workspace-b")).is_err());
+        preserve_local_projects(Some(&current), &account("", "workspace-b")).unwrap();
         assert_eq!(fs::read(path).unwrap(), original);
     }
 

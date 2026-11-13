@@ -159,8 +159,12 @@ does not delete a destination association: the baseline tracks project IDs, not
 individual chat assignments. Pending local migrations are merged and completion
 is kept conservative, including when all destination projects are shared.
 Cloud caches, remote projects, permissions, and account-specific preferences stay
-separate. Codex must be closed while this local state is updated; an unreadable or
-incompatible state file stops the switch instead of overwriting it.
+separate. Missing source snapshots skip preservation, including consecutive switches
+before opening Codex. Unreadable, malformed, or unsupported local state logs a warning
+and skips preservation without changing the desktop state or project baselines;
+account switching can continue. Codex must still be closed, and concurrent state
+changes or persistence failures stop the switch. State writes preserve object key
+order, floating-point precision, and the original compact or indented layout.
 
 If an older Codex Switcher version already saved an invalid refresh token, sign
 in to that account again or remove and re-add it once. An invalidated token
