@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { AccountResetCredits } from "../types";
-import { formatResetCreditDateTime, getAvailableResetCredits } from "../lib/resetCredits";
+import { formatResetCreditDateTime, getAvailableResetCredits, getResetCreditsDisplayCount } from "../lib/resetCredits";
 
 function getResetCreditsTone(resetCredits: AccountResetCredits | null): {
   container: string;
@@ -58,10 +58,11 @@ export function ResetCreditsMenu({
   const buttonRef = useRef<HTMLButtonElement>(null);
   const popupId = useId();
   const availableCredits = getAvailableResetCredits(resetCredits);
-  const count = availableCredits.length;
+  const count = getResetCreditsDisplayCount(resetCredits);
+  const unknownDetails = Math.max(0, count - availableCredits.length);
   const countLabel = count === 1 ? "1 reset" : `${count} resets`;
   const nextExpiry = formatResetCreditDateTime(
-    availableCredits[0]?.expires_at ?? null,
+    availableCredits[0]?.expires_at ?? resetCredits?.next_expires_at ?? null,
     { compact },
   );
   const nextExpiryLabel =
@@ -179,6 +180,11 @@ export function ResetCreditsMenu({
               </div>
             ))}
           </div>
+          {unknownDetails > 0 && (
+            <div className="px-3 py-2 text-xs text-gray-500 dark:text-gray-400">
+              {unknownDetails} {unknownDetails === 1 ? "reset has" : "resets have"} no individual expiry details from OpenAI.
+            </div>
+          )}
           <div className="border-t border-gray-100 px-3 py-2 text-[10px] text-gray-400 dark:border-gray-800 dark:text-gray-500">
             Times shown in your local time
           </div>

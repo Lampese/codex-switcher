@@ -33,6 +33,43 @@ export function getAvailableResetCredits(
     .map(({ credit }) => credit);
 }
 
+/** Show a confirmed count even if individual credit expiry rows are omitted. */
+export function getResetCreditsDisplayCount(
+  resetCredits: AccountResetCredits | null,
+  now = Date.now(),
+): number {
+  if (!resetCredits) return 0;
+  const reported = resetCredits.available_count;
+  const count = Number.isFinite(reported) ? Math.max(0, Math.floor(reported)) : 0;
+  return Math.max(count, getAvailableResetCredits(resetCredits, now).length);
+}
+
+// Account cards mount together, but OAuth refresh is serialized by the backend.
+// Queue their independent credit checks instead of causing lock contention.
+let resetCreditsQueue: Promise<void> = Promise.resolve();
+
+export function queueResetCreditsCheck<T>(request: () => Promise<T>): Promise<T> {
+  const next = resetCreditsQueue.then(async () => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await request();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/Background OAuth refresh busy/i.test(message) || attempt >= 2) {
+          throw error;
+        }
+        // A busy lock means the GET never ran; never retry a token refresh POST.
+        await new Promise<void>((resolve) => setTimeout(resolve, (attempt + 1) * 300));
+      }
+    }
+  });
+  resetCreditsQueue = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
+
 export function formatResetCreditDateTime(
   expiresAt: string | null,
   options: ResetCreditDateTimeFormatOptions = {},
