@@ -272,6 +272,14 @@ fn expand_process_targets(root_pids: &[u32], snapshot: Option<&UnixProcessSnapsh
     targets
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn recovery_process_targets() -> Result<Vec<u32>, String> {
+    let (roots, _) = find_codex_processes().map_err(|error| error.to_string())?;
+    let snapshot =
+        read_unix_process_snapshot().ok_or("Could not inspect Codex processes before recovery")?;
+    Ok(expand_process_targets(&roots, Some(&snapshot)))
+}
+
 #[cfg(windows)]
 fn expand_process_targets(root_pids: &[u32]) -> Vec<u32> {
     root_pids.to_vec()
@@ -678,6 +686,22 @@ Get-CimInstance Win32_Process |
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_windows_codex_processes(&stdout)
+}
+
+#[cfg(windows)]
+pub(super) fn running_windows_cli_paths() -> Vec<std::path::PathBuf> {
+    read_windows_codex_processes()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|process| {
+            process.name.eq_ignore_ascii_case("codex.exe")
+                && process
+                    .command_line
+                    .split_whitespace()
+                    .any(|arg| matches!(arg, "app-server" | "exec-server"))
+        })
+        .map(|process| std::path::PathBuf::from(process.executable_path))
+        .collect()
 }
 
 #[cfg(any(windows, test))]
