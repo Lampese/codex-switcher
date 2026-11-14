@@ -122,6 +122,7 @@ export function AccountCard({
   const [editName, setEditName] = useState(account.name);
   const [resetCredits, setResetCredits] = useState<AccountResetCredits | null>(null);
   const [resetCreditsError, setResetCreditsError] = useState(false);
+  const [resetCreditsFailures, setResetCreditsFailures] = useState(0);
   const [resetCreditsLoading, setResetCreditsLoading] = useState(false);
   const [statsOpen, setStatsOpen] = useState<boolean>(() => {
     if (typeof window === "undefined") return account.is_active;
@@ -240,11 +241,13 @@ export function AccountCard({
       if (requestId !== resetRequestSeq.current) return;
       setResetCredits(credits);
       setResetCreditsError(false);
+      setResetCreditsFailures(0);
     } catch (error) {
       if (requestId !== resetRequestSeq.current) return;
       console.warn("Could not check reset credits:", error);
       // Preserve the last confirmed count rather than implying zero resets.
       setResetCreditsError(true);
+      setResetCreditsFailures((failures) => Math.min(failures + 1, 4));
     } finally {
       if (requestId === resetRequestSeq.current) setResetCreditsLoading(false);
     }
@@ -253,6 +256,7 @@ export function AccountCard({
   useEffect(() => {
     setResetCredits(null);
     setResetCreditsError(false);
+    setResetCreditsFailures(0);
 
     void loadResetCredits();
     const timer = window.setInterval(() => {
@@ -266,10 +270,15 @@ export function AccountCard({
   }, [loadResetCredits]);
 
   useEffect(() => {
-    if (!resetCreditsError) return;
-    const timer = window.setInterval(() => void loadResetCredits(), 5 * 60 * 1000);
-    return () => window.clearInterval(timer);
-  }, [loadResetCredits, resetCreditsError]);
+    if (!resetCreditsError || resetCreditsFailures < 1 || resetCreditsFailures > 3) return;
+    // Bound transient retries (5m, 15m, 30m); the ordinary 6h poll still runs.
+    const delays = [5, 15, 30] as const;
+    const timer = window.setTimeout(
+      () => void loadResetCredits(),
+      delays[resetCreditsFailures - 1] * 60 * 1000,
+    );
+    return () => window.clearTimeout(timer);
+  }, [loadResetCredits, resetCreditsError, resetCreditsFailures]);
 
   return (
     <div
