@@ -275,7 +275,7 @@ export function AccountCard({
     const delays = [5, 15, 30] as const;
     const timer = window.setTimeout(
       () => void loadResetCredits(),
-      delays[resetCreditsFailures - 1] * 60 * 1000,
+      (delays[resetCreditsFailures - 1] ?? 30) * 60 * 1000,
     );
     return () => window.clearTimeout(timer);
   }, [loadResetCredits, resetCreditsError, resetCreditsFailures]);
