@@ -630,6 +630,31 @@ fn find_windows_codex_processes() -> anyhow::Result<(Vec<u32>, usize)> {
     ))
 }
 
+// The post-switch cleanup must never touch regular Codex CLI or desktop app PIDs.
+#[cfg(windows)]
+pub(super) fn find_windows_ide_codex_helper_pids() -> anyhow::Result<Vec<u32>> {
+    Ok(select_windows_ide_codex_helper_pids(&read_windows_codex_processes()?))
+}
+
+#[cfg(any(windows, test))]
+fn select_windows_ide_codex_helper_pids(processes: &[WindowsCodexProcess]) -> Vec<u32> {
+    let mut pids: Vec<u32> = processes
+        .iter()
+        .filter(|process| process.name.eq_ignore_ascii_case("codex.exe"))
+        .filter(|process| {
+            let command = normalize_windows_path(&process.command_line);
+            is_ide_plugin_process(&command)
+                && command.split_whitespace().any(|arg| {
+                    arg.trim_matches('"').eq_ignore_ascii_case("app-server")
+                })
+        })
+        .map(|process| process.process_id)
+        .collect();
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
+
 #[cfg(windows)]
 fn read_windows_codex_processes() -> anyhow::Result<Vec<WindowsCodexProcess>> {
     // tasklist counts every Electron helper (`--type=gpu-process`, crashpad, renderer, etc.),
@@ -1078,6 +1103,33 @@ mod tests {
             classify_windows_codex_processes(&processes),
             (vec![100, 200], 0)
         );
+    }
+
+    #[test]
+    fn post_switch_only_restarts_identified_windows_ide_app_servers() {
+        let processes = vec![
+            windows_process(
+                "Codex.exe", 10, 1,
+                r"C:\Users\test\codex.exe",
+                r#""C:\Users\test\codex.exe" continue"#, "",
+            ),
+            windows_process(
+                "Codex.exe", 11, 1,
+                r"C:\Users\test\.vscode\extensions\openai.chatgpt\bin\codex.exe",
+                r#""C:\Users\test\.vscode\extensions\openai.chatgpt\bin\codex.exe" app-server"#, "",
+            ),
+            windows_process(
+                "Codex.exe", 12, 1,
+                r"C:\Users\test\.antigravity\extensions\openai.chatgpt\codex.exe",
+                r#""C:\Users\test\.antigravity\extensions\openai.chatgpt\codex.exe" app-server --analytics-default-enabled"#, "",
+            ),
+            windows_process(
+                "Codex.exe", 13, 1,
+                r"C:\Users\test\codex.exe",
+                r#""C:\Users\test\codex.exe" app-server"#, "",
+            ),
+        ];
+        assert_eq!(super::select_windows_ide_codex_helper_pids(&processes), vec![11, 12]);
     }
 
     #[test]
