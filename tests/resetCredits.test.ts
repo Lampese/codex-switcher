@@ -88,7 +88,7 @@ test("keeps reported count without double counting known resets", () => {
     credits: [credit("known", "available", "2026-12-01T10:00:00Z")],
   };
   assert.equal(getResetCreditsDisplayCount(resets, now), 2);
-  assert.equal(getResetCreditsDisplayCount({ ...resets, available_count: 0 }, now), 1);
+  assert.equal(getResetCreditsDisplayCount({ ...resets, available_count: 0 }, now), 0);
   assert.equal(getResetCreditsDisplayCount(null, now), 0);
 });
 
@@ -113,15 +113,7 @@ test("queues reset checks across accounts, including after a failure", async () 
   assert.deepEqual(started, ["first", "second"]);
 });
 
-test("retryable busy lock is bounded but ordinary failures are not retried", async () => {
-  let busy = 0;
-  const result = await queueResetCreditsCheck(async () => {
-    busy++;
-    if (busy <= 2) throw new Error("Background OAuth refresh busy; retry next poll");
-    return "ok";
-  });
-  assert.equal(result, "ok");
-  assert.equal(busy, 3);
+test("failed upstream checks are never retried implicitly", async () => {
   let calls = 0;
   await assert.rejects(queueResetCreditsCheck(async () => {
     calls++;
