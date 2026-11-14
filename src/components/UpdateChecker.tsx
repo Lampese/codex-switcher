@@ -39,7 +39,8 @@ export function UpdateChecker() {
 
     try {
       const { check } = await import("@tauri-apps/plugin-updater");
-      const update = await check();
+      // Bound checks on offline or unresponsive update endpoints.
+      const update = await check({ timeout: 30000 });
       if (update) {
         setStatus({ kind: "available", update });
       } else {
@@ -77,6 +78,12 @@ export function UpdateChecker() {
       window.removeEventListener(CHECK_FOR_UPDATES_EVENT, handleManualCheck);
     };
   }, [checkForUpdate]);
+
+  useEffect(() => {
+    if (status.kind !== "up-to-date" || dismissed) return;
+    const timer = window.setTimeout(() => setDismissed(true), 6000);
+    return () => window.clearTimeout(timer);
+  }, [status.kind, dismissed]);
 
   const handleDownloadAndInstall = async () => {
     if (status.kind !== "available") return;
@@ -120,9 +127,14 @@ export function UpdateChecker() {
     <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 max-w-md w-full px-4">
       <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl shadow-xl p-4">
         {status.kind === "checking" && (
-          <p className="text-sm font-medium text-gray-900 dark:text-gray-100" role="status">
-            Checking for updates...
-          </p>
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm font-medium text-gray-900 dark:text-gray-100" role="status">
+              Checking for updates...
+            </p>
+            <button type="button" onClick={() => setDismissed(true)} className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300">
+              Dismiss
+            </button>
+          </div>
         )}
         {status.kind === "up-to-date" && (
           <div className="flex items-center justify-between gap-3">
