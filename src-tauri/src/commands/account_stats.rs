@@ -279,7 +279,10 @@ async fn parse_profile_usage_response(
 
 async fn fetch_reset_credits(account: &StoredAccount) -> anyhow::Result<AccountResetCredits> {
     let (access_token, chatgpt_account_id) = extract_chatgpt_auth(account)?;
-    let client = reqwest::Client::new();
+    // Bound the queued card requests: one stalled endpoint must not block others.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
     let response = client
         .get(CHATGPT_RESET_CREDITS_URL)
         .headers(build_reset_credits_headers(
