@@ -641,7 +641,9 @@ fn find_windows_codex_processes() -> anyhow::Result<(Vec<u32>, usize)> {
 // The post-switch cleanup must never touch regular Codex CLI or desktop app PIDs.
 #[cfg(windows)]
 pub(super) fn find_windows_ide_codex_helper_pids() -> anyhow::Result<Vec<u32>> {
-    Ok(select_windows_ide_codex_helper_pids(&read_windows_codex_processes()?))
+    Ok(select_windows_ide_codex_helper_pids(
+        &read_windows_codex_processes()?,
+    ))
 }
 
 #[cfg(any(windows, test))]
@@ -652,9 +654,9 @@ fn select_windows_ide_codex_helper_pids(processes: &[WindowsCodexProcess]) -> Ve
         .filter(|process| {
             let command = normalize_windows_path(&process.command_line);
             is_ide_plugin_process(&command)
-                && command.split_whitespace().any(|arg| {
-                    arg.trim_matches('"').eq_ignore_ascii_case("app-server")
-                })
+                && command
+                    .split_whitespace()
+                    .any(|arg| arg.trim_matches('"').eq_ignore_ascii_case("app-server"))
         })
         .map(|process| process.process_id)
         .collect();
@@ -1133,27 +1135,42 @@ mod tests {
     fn post_switch_only_restarts_identified_windows_ide_app_servers() {
         let processes = vec![
             windows_process(
-                "Codex.exe", 10, 1,
+                "Codex.exe",
+                10,
+                1,
                 r"C:\Users\test\codex.exe",
-                r#""C:\Users\test\codex.exe" continue"#, "",
+                r#""C:\Users\test\codex.exe" continue"#,
+                "",
             ),
             windows_process(
-                "Codex.exe", 11, 1,
+                "Codex.exe",
+                11,
+                1,
                 r"C:\Users\test\.vscode\extensions\openai.chatgpt\bin\codex.exe",
-                r#""C:\Users\test\.vscode\extensions\openai.chatgpt\bin\codex.exe" app-server"#, "",
+                r#""C:\Users\test\.vscode\extensions\openai.chatgpt\bin\codex.exe" app-server"#,
+                "",
             ),
             windows_process(
-                "Codex.exe", 12, 1,
+                "Codex.exe",
+                12,
+                1,
                 r"C:\Users\test\.antigravity\extensions\openai.chatgpt\codex.exe",
-                r#""C:\Users\test\.antigravity\extensions\openai.chatgpt\codex.exe" app-server --analytics-default-enabled"#, "",
+                r#""C:\Users\test\.antigravity\extensions\openai.chatgpt\codex.exe" app-server --analytics-default-enabled"#,
+                "",
             ),
             windows_process(
-                "Codex.exe", 13, 1,
+                "Codex.exe",
+                13,
+                1,
                 r"C:\Users\test\codex.exe",
-                r#""C:\Users\test\codex.exe" app-server"#, "",
+                r#""C:\Users\test\codex.exe" app-server"#,
+                "",
             ),
         ];
-        assert_eq!(super::select_windows_ide_codex_helper_pids(&processes), vec![11, 12]);
+        assert_eq!(
+            super::select_windows_ide_codex_helper_pids(&processes),
+            vec![11, 12]
+        );
     }
 
     #[test]
