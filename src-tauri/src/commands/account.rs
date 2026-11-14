@@ -169,14 +169,22 @@ pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
     // Update last_used_at
     touch_account(account_id).map_err(|e| e.to_string())?;
 
-    // Only restart helpers that we can positively identify.
-    // On Windows, tasklist matches every codex.exe, including unrelated CLI
-    // sessions, so killing those PIDs can terminate the user's work.
-    #[cfg(unix)]
+    // Restart only positively identified IDE app-server helpers after switching.
+    // Never terminate an interactive Codex CLI process, on either platform.
+    #[cfg(all(unix, not(test)))]
     if let Ok(pids) = find_antigravity_processes() {
         for pid in pids {
             let _ = std::process::Command::new("kill")
                 .arg("-9")
+                .arg(pid.to_string())
+                .output();
+        }
+    }
+    #[cfg(all(windows, not(test)))]
+    if let Ok(pids) = super::process::find_windows_ide_codex_helper_pids() {
+        for pid in pids {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/PID"])
                 .arg(pid.to_string())
                 .output();
         }
