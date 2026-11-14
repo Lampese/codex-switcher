@@ -41,7 +41,7 @@ export function getResetCreditsDisplayCount(
   if (!resetCredits) return 0;
   const reported = resetCredits.available_count;
   const count = Number.isFinite(reported) ? Math.max(0, Math.floor(reported)) : 0;
-  return Math.max(count, getAvailableResetCredits(resetCredits, now).length);
+  return count;
 }
 
 // Account cards mount together, but OAuth refresh is serialized by the backend.
@@ -49,20 +49,9 @@ export function getResetCreditsDisplayCount(
 let resetCreditsQueue: Promise<void> = Promise.resolve();
 
 export function queueResetCreditsCheck<T>(request: () => Promise<T>): Promise<T> {
-  const next = resetCreditsQueue.then(async () => {
-    for (let attempt = 0; ; attempt++) {
-      try {
-        return await request();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (!/Background OAuth refresh busy/i.test(message) || attempt >= 2) {
-          throw error;
-        }
-        // A busy lock means the GET never ran; never retry a token refresh POST.
-        await new Promise<void>((resolve) => setTimeout(resolve, (attempt + 1) * 300));
-      }
-    }
-  });
+  // The backend GET has a 20s timeout. Never retry OAuth error strings that
+  // are not emitted by upstream, and let a failed check release the queue.
+  const next = resetCreditsQueue.then(request);
   resetCreditsQueue = next.then(
     () => undefined,
     () => undefined,
