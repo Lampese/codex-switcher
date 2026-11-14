@@ -36,7 +36,7 @@ export function getAvailableResetCredits(
 /** Show a confirmed count even if individual credit expiry rows are omitted. */
 export function getResetCreditsDisplayCount(
   resetCredits: AccountResetCredits | null,
-  now = Date.now(),
+  _now = Date.now(),
 ): number {
   if (!resetCredits) return 0;
   const reported = resetCredits.available_count;
