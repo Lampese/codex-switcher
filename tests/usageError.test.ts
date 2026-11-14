@@ -1,42 +1,42 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  formatUsageError,
-  isBackgroundAuthBusy,
-  needsRelogin,
-} from "../src/lib/usageError.ts";
+import { formatUsageError, needsRelogin } from "../src/lib/usageError.ts";
 
-test("a busy background OAuth lock is not an expired login", () => {
-  const error = "Background OAuth refresh busy; retry next poll";
-  assert.equal(isBackgroundAuthBusy(error), true);
-  assert.equal(needsRelogin(error), false);
-  assert.equal(formatUsageError(error).title, "Authentication check postponed");
-});
-
-test("generic access 401 and transient failures do not prompt re-login", () => {
+test("transient access failures do not suggest an invalid saved login", () => {
   for (const error of [
     "API error: 401 Unauthorized",
-    "Could not refresh the saved Codex Switcher session (401 Unauthorized)",
-    "429 Too Many Requests",
     "Failed to send token refresh request: timed out",
   ]) {
     assert.equal(needsRelogin(error), false, error);
-    assert.equal(formatUsageError(error).title, "Authentication check unsuccessful");
+    assert.equal(formatUsageError(error).title, "Usage check unsuccessful");
   }
 });
 
-test("explicit terminal credential failures request re-login", () => {
+test("429 usage limits are not authentication failures", () => {
+  const error = "API error: 429 Too Many Requests";
+  assert.equal(needsRelogin(error), false);
+  assert.equal(formatUsageError(error).title, "Rate limited, try again later");
+});
+
+test("upstream terminal refresh failures require removing and re-adding the account", () => {
   for (const error of [
-    "refresh_token_reused",
-    "refresh_token_invalidated",
-    "invalid_grant",
-    "Codex Switcher's saved session is out of date",
+    'Token refresh failed: 401 Unauthorized - {"error":{"code":"refresh_token_reused"}}',
+    'Token refresh failed: 401 Unauthorized - {"error":{"code":"refresh_token_expired"}}',
+    'Token refresh failed: 400 Bad Request - {"error":"invalid_grant"}',
     "Missing refresh token for account",
     "Token refresh did not return a fresh id_token",
   ]) {
     assert.equal(needsRelogin(error), true, error);
-    assert.equal(formatUsageError(error).title, "Switcher sign-in needs renewal");
+    const shown = formatUsageError(error);
+    assert.equal(shown.title, "Switcher sign-in needs renewal");
+    assert.match(shown.message, /Remove this account and add it again/);
   }
+});
+
+test("unrecognized refresh rejections do not falsely claim revocation", () => {
+  const error = "Token refresh failed: 401 Unauthorized - ";
+  assert.equal(needsRelogin(error), false);
+  assert.equal(formatUsageError(error).title, "Usage check unsuccessful");
 });
 
 test("bad usage format and unrelated errors keep distinct messages", () => {
