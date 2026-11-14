@@ -67,7 +67,7 @@ export function ResetCreditsMenu({
   );
   const nextExpiryLabel =
     nextExpiry === "No expiry"
-      ? "no expiry"
+      ? "expiry unknown"
       : nextExpiry === "Expiry unavailable"
         ? "expiry unavailable"
         : `closest ${nextExpiry}`;
