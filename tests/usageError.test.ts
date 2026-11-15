@@ -5,7 +5,12 @@ import { formatUsageError, needsRelogin } from "../src/lib/usageError.ts";
 test("transient access failures do not suggest an invalid saved login", () => {
   for (const error of [
     "API error: 401 Unauthorized",
-    "Failed to send token refresh request: timed out",
+    "error sending request for url (https://auth.openai.com/oauth/token): operation timed out",
+    "connection refused",
+    "dns error",
+    "Token refresh returned an invalid or expired id_token",
+    "Refresh response did not include id_token",
+    "Failed to parse token refresh response",
   ]) {
     assert.equal(needsRelogin(error), false, error);
     assert.equal(formatUsageError(error).title, "Usage check unsuccessful");
@@ -24,7 +29,6 @@ test("upstream terminal refresh failures require removing and re-adding the acco
     'Token refresh failed: 401 Unauthorized - {"error":{"code":"refresh_token_expired"}}',
     'Token refresh failed: 400 Bad Request - {"error":"invalid_grant"}',
     "Missing refresh token for account",
-    "Token refresh did not return a fresh id_token",
   ]) {
     assert.equal(needsRelogin(error), true, error);
     const shown = formatUsageError(error);

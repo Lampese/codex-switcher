@@ -216,8 +216,10 @@ fn chatgpt_tokens_need_refresh(account: &StoredAccount) -> bool {
     }
 }
 
-fn chatgpt_tokens_need_refresh_at(id_token: &str, access_token: &str, now: i64) -> bool {
-    id_token_needs_refresh_at(id_token, now) || token_expired_or_near_expiry_at(access_token, now)
+fn chatgpt_tokens_need_refresh_at(_id_token: &str, access_token: &str, now: i64) -> bool {
+    // Codex refreshes based on access-token expiration. An older ID token
+    // does not require rotating a still-usable single-use refresh token.
+    token_expired_or_near_expiry_at(access_token, now)
 }
 
 fn id_token_needs_refresh_at(token: &str, now: i64) -> bool {
@@ -244,11 +246,8 @@ fn resolve_refreshed_id_token(
             anyhow::bail!("Token refresh returned an invalid or expired id_token")
         }
         Some(id_token) => Ok(id_token),
-        None if id_token_needs_refresh_at(&current_id_token, now) => {
-            anyhow::bail!(
-                "Token refresh did not return a fresh id_token; sign in to the account again"
-            )
-        }
+        // OAuth can return a new access token without replacing the ID token.
+        // The existing claims can still identify the selected workspace.
         None => Ok(current_id_token),
     }
 }
@@ -361,12 +360,12 @@ mod tests {
     }
 
     #[test]
-    fn refresh_required_when_id_token_expired_but_access_token_valid() {
+    fn expired_id_token_does_not_force_refresh_when_access_token_is_valid() {
         let now = 1_800_000_000;
         let id_token = jwt_with_exp(now - 3_600);
         let access_token = jwt_with_exp(now + 3_600);
 
-        assert!(chatgpt_tokens_need_refresh_at(
+        assert!(!chatgpt_tokens_need_refresh_at(
             &id_token,
             &access_token,
             now
@@ -400,15 +399,14 @@ mod tests {
     }
 
     #[test]
-    fn expired_id_token_requires_replacement_from_refresh_response() {
+    fn existing_id_token_is_usable_when_refresh_omits_it() {
         let now = 1_800_000_000;
         let current_id_token = jwt_with_exp(now - 3_600);
 
-        let error = resolve_refreshed_id_token(current_id_token, None, now).unwrap_err();
-
-        assert!(error
-            .to_string()
-            .contains("did not return a fresh id_token"));
+        assert_eq!(
+            resolve_refreshed_id_token(current_id_token.clone(), None, now).unwrap(),
+            current_id_token
+        );
     }
 
     #[test]
@@ -522,6 +520,6 @@ mod tests {
 
         assert_eq!(update.id_token, current_id_token);
         assert_eq!(update.refresh_token, "rotated-refresh");
-        assert!(update.id_token_error.is_some());
+        assert!(update.id_token_error.is_none());
     }
 }

@@ -13,7 +13,6 @@ interface AccountUsageStatsProps {
   open: boolean;
   usage?: UsageInfo;
   usageLoading?: boolean;
-  onStatsLoaded?: (stats: AccountUsageStatsInfo | null) => void;
 }
 
 function emptyStats(accountId: string, error: string): AccountUsageStatsInfo {
@@ -348,7 +347,6 @@ export function AccountUsageStats({
   open,
   usage,
   usageLoading = false,
-  onStatsLoaded,
 }: AccountUsageStatsProps) {
   const [stats, setStats] = useState<AccountUsageStatsInfo | null>(null);
   const [loading, setLoading] = useState(false);
@@ -364,7 +362,6 @@ export function AccountUsageStats({
       if (background) return;
       const next = emptyStats(accountId, "Usage stats are available for ChatGPT accounts only.");
       setStats(next);
-      onStatsLoaded?.(next);
       setLoading(false);
       return;
     }
@@ -381,12 +378,10 @@ export function AccountUsageStats({
       if (requestId !== requestSeq.current) return;
       if (background && (!next.available || next.error)) return;
       setStats(next);
-      onStatsLoaded?.(next);
     } catch (err) {
       if (background || requestId !== requestSeq.current) return;
       const next = emptyStats(accountId, err instanceof Error ? err.message : String(err));
       setStats(next);
-      onStatsLoaded?.(next);
     } finally {
       if (background) {
         backgroundInFlight.current = false;
@@ -394,14 +389,13 @@ export function AccountUsageStats({
         setLoading(false);
       }
     }
-  }, [accountId, enabled, onStatsLoaded]);
+  }, [accountId, enabled]);
 
   useEffect(() => {
     requestSeq.current += 1;
     setStats(null);
-    onStatsLoaded?.(null);
     setLoading(false);
-  }, [accountId, onStatsLoaded]);
+  }, [accountId]);
 
   useEffect(() => {
     const usageChanged = usage !== lastObservedUsage.current;
