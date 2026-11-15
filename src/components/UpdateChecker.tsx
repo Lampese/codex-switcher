@@ -42,6 +42,8 @@ export function UpdateChecker() {
       // Bound checks on offline or unresponsive update endpoints.
       const update = await check({ timeout: 30000 });
       if (update) {
+        // Dismissing progress must not hide a discovered update.
+        setDismissed(false);
         setStatus({ kind: "available", update });
       } else {
         setStatus(manualRequestedRef.current ? { kind: "up-to-date" } : { kind: "idle" });
