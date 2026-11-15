@@ -16,8 +16,8 @@ fn main() {
             }
         }
 
-        // CPU tile painting reduces Skia's GPU allocations while keeping GPU
-        // compositing and asynchronous scrolling. Preserve explicit overrides.
+        // Use CPU painting for Skia tiles and ImageBuffers while keeping GPU
+        // compositing available. Preserve explicit rendering overrides.
         if std::env::var_os("WEBKIT_SKIA_ENABLE_CPU_RENDERING").is_none() {
             unsafe { std::env::set_var("WEBKIT_SKIA_ENABLE_CPU_RENDERING", "1") };
         }
