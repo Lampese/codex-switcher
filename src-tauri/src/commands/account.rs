@@ -28,12 +28,6 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
-
 const SLIM_EXPORT_PREFIX: &str = "css1.";
 const SLIM_FORMAT_VERSION: u8 = 1;
 const SLIM_AUTH_API_KEY: u8 = 0;
@@ -236,24 +230,24 @@ pub async fn switch_account_by_id(account_id: &str) -> Result<(), String> {
     // Update last_used_at
     touch_account(account_id).map_err(|e| e.to_string())?;
 
-    // Only a real switch or auth repair should touch extension backends.
-    // Never detect/kill real IDE processes in cargo test.
-    #[cfg(not(test))]
+    // Restart only positively identified IDE app-server helpers after switching.
+    // Never terminate an interactive Codex CLI process, on either platform.
+    #[cfg(all(unix, not(test)))]
     if let Ok(pids) = find_antigravity_processes() {
         for pid in pids {
-            #[cfg(unix)]
-            {
-                let _ = std::process::Command::new("kill")
-                    .arg("-9")
-                    .arg(pid.to_string())
-                    .output();
-            }
-            #[cfg(windows)]
-            {
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/F", "/PID", &pid.to_string()])
-                    .output();
-            }
+            let _ = std::process::Command::new("kill")
+                .arg("-9")
+                .arg(pid.to_string())
+                .output();
+        }
+    }
+    #[cfg(all(windows, not(test)))]
+    if let Ok(pids) = super::process::find_windows_ide_codex_helper_pids() {
+        for pid in pids {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/PID"])
+                .arg(pid.to_string())
+                .output();
         }
     }
 
@@ -356,7 +350,8 @@ pub async fn import_accounts_full_encrypted_bytes(
     Ok(summary)
 }
 
-/// Find all running Antigravity codex assistant processes
+/// Find positively identified Antigravity codex assistant processes on Unix.
+#[cfg(unix)]
 fn find_antigravity_processes() -> anyhow::Result<Vec<u32>> {
     let mut pids = Vec::new();
 
@@ -385,31 +380,6 @@ fn find_antigravity_processes() -> anyhow::Result<Vec<u32>> {
                         || command.contains("/codex app-server"));
 
                 if is_antigravity {
-                    if let Ok(pid) = pid_str.parse::<u32>() {
-                        pids.push(pid);
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        // Use tasklist on Windows
-        // For Windows we might need a more precise WMI query to get command line args,
-        // but for now we look for codex.exe PIDs and verify they're not ours
-        let output = std::process::Command::new("tasklist")
-            .creation_flags(CREATE_NO_WINDOW)
-            .args(["/FI", "IMAGENAME eq codex.exe", "/FO", "CSV", "/NH"])
-            .output()?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let parts: Vec<&str> = line.split(',').collect();
-            if parts.len() > 1 {
-                let name = parts[0].trim_matches('"').to_lowercase();
-                if name == "codex.exe" {
-                    let pid_str = parts[1].trim_matches('"');
                     if let Ok(pid) = pid_str.parse::<u32>() {
                         pids.push(pid);
                     }
