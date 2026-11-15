@@ -290,9 +290,11 @@ export function AccountCard({
       }`}
     >
       {/* Header: only action buttons and plan badge reserve space beside the name.
-          The optional reset-credit expiry pill gets its own row. */}
+          On the narrow cards the reset-credit pill gets a row of its own; on the
+          full-width active card it sits beside the plan badge and wraps to its
+          own line when the window is too narrow for both. */}
       <div className="mb-3 min-w-0">
-        <div className="mb-1 flex min-w-0 items-center gap-2">
+        <div className="mb-1 flex min-w-0 flex-wrap items-center gap-2">
           <div className="flex min-w-0 flex-1 items-center gap-2">
             {account.is_active && (
               <span className="flex h-2 w-2 shrink-0">
@@ -360,6 +362,12 @@ export function AccountCard({
               {planDisplay}
             </span>
           </div>
+
+          {hasResetCredits && !compactResetCredits && (
+            <div className="flex basis-full justify-end md:basis-auto">
+              <ResetCreditsMenu compact={false} resetCredits={resetCredits} />
+            </div>
+          )}
         </div>
 
         {account.email && (
@@ -367,7 +375,7 @@ export function AccountCard({
             <BlurredText blur={masked}>{account.email}</BlurredText>
           </p>
         )}
-        {hasResetCredits && (
+        {hasResetCredits && compactResetCredits && (
           <div className="mt-1 flex min-w-0 justify-end">
             <ResetCreditsMenu
               compact={compactResetCredits}
