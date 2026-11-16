@@ -4,6 +4,7 @@ pub mod api;
 #[cfg(desktop)]
 pub mod app_menu;
 pub mod auth;
+pub mod capacity_export;
 pub mod commands;
 #[cfg(desktop)]
 pub mod tray;
