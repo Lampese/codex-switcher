@@ -50,6 +50,12 @@ pub fn open_main_window(app: AppHandle) {
 }
 
 pub fn hide_main_window<R: Runtime>(app: &AppHandle<R>) {
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_window_state::{AppHandleExt, StateFlags};
+        let _ =
+            app.save_window_state(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED);
+    }
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
     }
@@ -96,6 +102,12 @@ pub fn restore_main_window<R: Runtime>(app: &AppHandle<R>) {
 /// Quit the whole application from the tray.
 #[tauri::command]
 pub fn quit_app(app: AppHandle) {
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_window_state::{AppHandleExt, StateFlags};
+        let _ =
+            app.save_window_state(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED);
+    }
     app.exit(0);
 }
 
