@@ -11,6 +11,7 @@ use crate::types::{AccountInfo, OAuthLoginInfo};
 struct PendingOAuth {
     rx: oneshot::Receiver<anyhow::Result<OAuthLoginResult>>,
     cancelled: Arc<AtomicBool>,
+    overwrite_existing: bool,
 }
 
 // Global state for pending OAuth login
@@ -18,7 +19,10 @@ static PENDING_OAUTH: Mutex<Option<PendingOAuth>> = Mutex::new(None);
 
 /// Start the OAuth login flow
 #[tauri::command]
-pub async fn start_login(account_name: String) -> Result<OAuthLoginInfo, String> {
+pub async fn start_login(
+    account_name: String,
+    overwrite_existing: Option<bool>,
+) -> Result<OAuthLoginInfo, String> {
     // Cancel any previous pending flow so it does not keep the callback port occupied.
     if let Some(previous) = {
         let mut pending = PENDING_OAUTH.lock().unwrap();
@@ -34,7 +38,11 @@ pub async fn start_login(account_name: String) -> Result<OAuthLoginInfo, String>
     // Store the receiver for later
     {
         let mut pending = PENDING_OAUTH.lock().unwrap();
-        *pending = Some(PendingOAuth { rx, cancelled });
+        *pending = Some(PendingOAuth {
+            rx,
+            cancelled,
+            overwrite_existing: overwrite_existing.unwrap_or(false),
+        });
     }
 
     Ok(info)
@@ -57,7 +65,7 @@ pub async fn complete_login() -> Result<AccountInfo, String> {
     let _auth_guard = AUTH_OPERATION_LOCK.lock().await;
 
     // Add the account to storage
-    let stored = add_account(account).map_err(|e| e.to_string())?;
+    let stored = add_account(account, pending.overwrite_existing).map_err(|e| e.to_string())?;
 
     let store = load_accounts().map_err(|e| e.to_string())?;
     let active_id = store.active_account_id.as_deref();
