@@ -117,7 +117,28 @@ pub async fn warmup_account(account_id: String) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Account not found: {account_id}"))?;
 
-    send_warmup(&account).await.map_err(|e| e.to_string())
+    send_warmup(&account).await.map_err(|e| e.to_string())?;
+    record_manual_warmup(&account_id);
+    Ok(())
+}
+
+/// Keep the native auto warm-up ledger aware of manual and timed warm-ups.
+fn record_manual_warmup(account_id: &str) {
+    if let Err(error) =
+        crate::auto_warmup::record_warmup(account_id, crate::auto_warmup::now_ms(), None)
+    {
+        eprintln!("[AutoWarmup] Failed to record warm-up for {account_id}: {error}");
+    }
+}
+
+/// Mirror the UI auto warm-up toggles into the native scheduler.
+#[tauri::command]
+pub fn set_auto_warmup_config(
+    enabled_all: Option<bool>,
+    account_ids: Option<Vec<String>>,
+    ledger: Option<std::collections::HashMap<String, crate::auto_warmup::LedgerEntry>>,
+) -> Result<(), String> {
+    crate::auto_warmup::set_config(enabled_all, account_ids, ledger).map_err(|e| e.to_string())
 }
 
 /// Send minimal warm-up requests for all accounts
@@ -131,6 +152,9 @@ pub async fn warmup_all_accounts() -> Result<WarmupSummary, String> {
         .map(|account| async move {
             let account_id = account.id.clone();
             let failed = send_warmup(&account).await.is_err();
+            if !failed {
+                record_manual_warmup(&account_id);
+            }
             (account_id, failed)
         })
         .buffer_unordered(concurrency)

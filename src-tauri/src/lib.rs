@@ -4,6 +4,7 @@ pub mod api;
 #[cfg(desktop)]
 pub mod app_menu;
 pub mod auth;
+pub mod auto_warmup;
 pub mod commands;
 #[cfg(desktop)]
 pub mod tray;
@@ -19,8 +20,8 @@ use commands::{
     import_accounts_slim_text, kill_codex_processes, list_accounts,
     open_codex_recovery_conversation, open_main_window, prepare_codex_session_recovery, quit_app,
     refresh_account_metadata, refresh_all_accounts_usage, rename_account, report_usage,
-    resume_codex_session_recovery, set_dock_display_mode, set_masked_account_ids, start_login,
-    switch_account, warmup_account, warmup_all_accounts,
+    resume_codex_session_recovery, set_auto_warmup_config, set_dock_display_mode,
+    set_masked_account_ids, start_login, switch_account, warmup_account, warmup_all_accounts,
 };
 use tauri::Emitter;
 
@@ -37,6 +38,7 @@ pub fn run() {
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
                 app_menu::setup(app.handle())?;
                 tray::setup(app.handle())?;
+                auto_warmup::spawn_scheduler(app.handle().clone());
             }
             Ok(())
         })
@@ -93,6 +95,7 @@ pub fn run() {
             refresh_all_accounts_usage,
             warmup_account,
             warmup_all_accounts,
+            set_auto_warmup_config,
             // Process detection
             check_codex_processes,
             kill_codex_processes,

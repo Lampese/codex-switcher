@@ -67,6 +67,20 @@ type AutoWarmupLedger = Record<
     lastAutoWindowKind?: AutoWarmupWindowKind;
   }
 >;
+// Desktop auto warm-ups run in the native scheduler (src-tauri/src/auto_warmup.rs)
+// because macOS suspends this webview while the window is closed to the menu bar.
+const NATIVE_AUTO_WARMUP_STARTED_EVENT = "auto-warmup-started";
+const NATIVE_AUTO_WARMUP_FINISHED_EVENT = "auto-warmup-finished";
+interface NativeAutoWarmupStartedPayload {
+  accountId: string;
+}
+interface NativeAutoWarmupFinishedPayload {
+  accountId: string;
+  accountName: string;
+  kind: AutoWarmupWindowKind;
+  entry: AutoWarmupLedger[string] | null;
+  error: string | null;
+}
 const isMacOs =
   typeof navigator !== "undefined" &&
   /(Mac|iPhone|iPod|iPad)/i.test(navigator.userAgent);
@@ -374,6 +388,12 @@ function App() {
       void import("@tauri-apps/api/event")
         .then(({ emit }) => emit(AUTO_WARMUP_ALL_CHANGED_EVENT, autoWarmupAllEnabled))
         .catch((err) => console.error("Failed to sync tray auto warm-up:", err));
+      // The ledger rides along so history from older builds migrates in the
+      // same write that enables the native scheduler (newer entries win).
+      void invokeBackend("set_auto_warmup_config", {
+        enabledAll: autoWarmupAllEnabled,
+        ledger: autoWarmupLedgerRef.current,
+      }).catch((err) => console.error("Failed to sync native auto warm-up:", err));
     }
   }, [autoWarmupAllEnabled]);
 
@@ -385,6 +405,13 @@ function App() {
       );
     } catch {
       // Ignore storage errors; auto warm-up still works for the current session.
+    }
+
+    if (isTauriRuntime()) {
+      void invokeBackend("set_auto_warmup_config", {
+        accountIds: Array.from(autoWarmupAccountIds),
+        ledger: autoWarmupLedgerRef.current,
+      }).catch((err) => console.error("Failed to sync native auto warm-up:", err));
     }
   }, [autoWarmupAccountIds]);
 
@@ -1040,7 +1067,65 @@ function App() {
     ]
   );
 
+  // Mirror the native scheduler's progress (it keeps running while this
+  // webview is suspended, so these events may arrive late, after a wake-up).
   useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+
+    void (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      const unlistenStarted = await listen<NativeAutoWarmupStartedPayload>(
+        NATIVE_AUTO_WARMUP_STARTED_EVENT,
+        ({ payload }) => {
+          setAutoWarmupRunningIds((prev) => new Set(prev).add(payload.accountId));
+        }
+      );
+      const unlistenFinished = await listen<NativeAutoWarmupFinishedPayload>(
+        NATIVE_AUTO_WARMUP_FINISHED_EVENT,
+        ({ payload }) => {
+          setAutoWarmupRunningIds((prev) => {
+            const next = new Set(prev);
+            next.delete(payload.accountId);
+            return next;
+          });
+
+          if (payload.error) {
+            showWarmupToast(
+              `Auto warm-up failed for ${payload.accountName}: ${payload.error}`,
+              true
+            );
+            return;
+          }
+
+          const entry = payload.entry;
+          if (entry) {
+            setAutoWarmupLedger((prev) => ({ ...prev, [payload.accountId]: entry }));
+          }
+          const modeLabel = payload.kind === "session" ? "5h" : "weekly";
+          showWarmupToast(`Auto ${modeLabel} warm-up sent for ${payload.accountName}`);
+          void refreshSingleUsage(payload.accountId).catch(() => {});
+        }
+      );
+
+      if (disposed) {
+        unlistenStarted();
+        unlistenFinished();
+      } else {
+        unlisteners.push(unlistenStarted, unlistenFinished);
+      }
+    })();
+
+    return () => {
+      disposed = true;
+      unlisteners.forEach((unlisten) => unlisten());
+    };
+  }, [refreshSingleUsage, showWarmupToast]);
+
+  useEffect(() => {
+    // The desktop app hands auto warm-up to the native scheduler.
+    if (isTauriRuntime()) return;
     if (!autoWarmupAllEnabled && autoWarmupAccountIds.size === 0) return;
 
     const checkAutoWarmup = () => {

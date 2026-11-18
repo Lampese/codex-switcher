@@ -254,6 +254,10 @@ function TrayMenu() {
     const next = !autoWarmupAllEnabled;
     setAutoWarmupAllEnabled(next);
     try {
+      if (isTauriRuntime()) {
+        // The main window may be suspended, so tell the native scheduler directly.
+        await invokeBackend("set_auto_warmup_config", { enabledAll: next });
+      }
       writeAutoWarmupAllEnabled(next);
       if (isTauriRuntime()) {
         const { emit } = await import("@tauri-apps/api/event");
