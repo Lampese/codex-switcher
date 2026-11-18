@@ -136,12 +136,19 @@ async fn refresh_chatgpt_tokens_locked(account: &StoredAccount) -> Result<Stored
     // Re-read active state after the network request before touching auth.json.
     let is_active = load_accounts()?.active_account_id.as_deref() == Some(account.id.as_str());
     if is_active {
-        if let Err(err) = switch_to_account(&updated) {
-            println!("[Auth] Failed to sync active auth.json after token refresh: {err}");
-        }
+        sync_active_codex_auth_after_refresh(&updated)?;
     }
 
     Ok(updated)
+}
+
+/// Credentials have already been persisted in accounts.json. A failed write
+/// to Codex auth.json must still be reported, or the caller may claim the
+/// active Codex session was renewed when it is still using revoked tokens.
+fn sync_active_codex_auth_after_refresh(account: &StoredAccount) -> Result<()> {
+    switch_to_account(account).context(
+        "OAuth tokens were saved, but Codex auth.json could not be updated. Close Codex and retry the account switch.",
+    )
 }
 
 fn reconcile_active_account_from_auth(
@@ -346,6 +353,29 @@ mod tests {
     };
     use crate::types::{AccountsStore, AuthData, AuthDotJson, StoredAccount, TokenData};
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+
+    #[test]
+    fn failed_live_auth_write_is_reported_after_refresh() {
+        let _home = crate::auth::test_support::TestHome::new();
+        let path = crate::auth::get_codex_auth_file().unwrap();
+        std::fs::create_dir_all(&path).unwrap();
+        let account = StoredAccount::new_chatgpt(
+            "Test".into(),
+            None,
+            None,
+            None,
+            "id".into(),
+            "access".into(),
+            "refresh".into(),
+            Some("workspace-1".into()),
+        );
+        let result = super::sync_active_codex_auth_after_refresh(&account);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("OAuth tokens were saved, but Codex auth.json could not be updated"));
+    }
 
     fn jwt_with_exp(exp: i64) -> String {
         let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{exp}}}"#));
