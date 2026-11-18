@@ -95,6 +95,19 @@ pnpm tauri build
 
 The built application will be in `src-tauri/target/release/bundle/`.
 
+### Linux Rendering
+
+On Linux, the dashboard defaults to Skia CPU rendering to reduce GPU allocations.
+This moves tile painting and accelerated ImageBuffers, such as filters, to the
+CPU while keeping GPU compositing and asynchronous scrolling available. Memory
+savings and scrolling costs depend on the hardware and WebKit version.
+Explicit `WEBKIT_SKIA_ENABLE_CPU_RENDERING` values are preserved. To let WebKit
+use GPU rendering:
+
+```bash
+WEBKIT_SKIA_ENABLE_CPU_RENDERING=0 ./Codex.Switcher_*.AppImage
+```
+
 ### Run the Dashboard in a Browser
 
 You can also serve the built dashboard over HTTP instead of opening the Tauri shell.
