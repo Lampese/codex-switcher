@@ -60,7 +60,7 @@ async fn adding_oauth_account_preserves_active_account_and_live_auth() {
         account: account("B"),
     }));
 
-    let added = complete_login().await.unwrap();
+    let added = complete_login(None).await.unwrap();
     let store = load_accounts().unwrap();
     assert_eq!(store.active_account_id.as_deref(), Some(active.id.as_str()));
     assert_eq!(fs::read(auth_path).unwrap(), auth_before);
@@ -82,7 +82,7 @@ async fn adding_first_oauth_account_does_not_activate_or_create_auth() {
         account: account("first"),
     }));
 
-    let added = complete_login().await.unwrap();
+    let added = complete_login(None).await.unwrap();
     let store = load_accounts().unwrap();
     assert!(store.active_account_id.is_none());
     assert!(!get_codex_auth_file().unwrap().exists());
@@ -108,7 +108,7 @@ async fn adding_oauth_account_preserves_no_active_account_and_external_auth() {
         account: account("new"),
     }));
 
-    let added = complete_login().await.unwrap();
+    let added = complete_login(None).await.unwrap();
     let store = load_accounts().unwrap();
     assert!(store.active_account_id.is_none());
     assert_eq!(fs::read(auth_path).unwrap(), auth_before);
@@ -141,7 +141,7 @@ async fn duplicate_or_failed_oauth_login_leaves_storage_and_auth_unchanged() {
         Err(anyhow::anyhow!("synthetic OAuth failure")),
     ] {
         complete_with(result);
-        assert!(complete_login().await.is_err());
+        assert!(complete_login(None).await.is_err());
         assert_eq!(fs::read(&store_path).unwrap(), store_before);
         assert_eq!(fs::read(&auth_path).unwrap(), auth_before);
     }
