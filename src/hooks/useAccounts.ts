@@ -7,6 +7,7 @@ import type {
   ImportAccountsSummary,
 } from "../types";
 import { invokeBackend, isTauriRuntime, type FileSource } from "../lib/platform";
+import { retryBusyUsage } from "../lib/retryBusyUsage";
 
 export function useAccounts() {
   const [accounts, setAccounts] = useState<AccountWithUsage[]>([]);
@@ -14,7 +15,7 @@ export function useAccounts() {
   const [error, setError] = useState<string | null>(null);
   const accountsRef = useRef<AccountWithUsage[]>([]);
   const metadataRefreshInFlightRef = useRef(new Set<string>());
-  const maxConcurrentUsageRequests = 10;
+  const maxConcurrentUsageRequests = 1; // Background token refreshes share one auth lock.
 
   useEffect(() => {
     accountsRef.current = accounts;
@@ -173,9 +174,9 @@ export function useAccounts() {
           list,
           async (account) => {
             try {
-              const usage = await invokeBackend<UsageInfo>("get_usage", {
-                accountId: account.id,
-              });
+              const usage = await retryBusyUsage(() =>
+                invokeBackend<UsageInfo>("get_usage", { accountId: account.id })
+              );
               usageResults.set(account.id, usage);
             } catch (err) {
               console.error("Failed to refresh usage:", err);
@@ -232,7 +233,7 @@ export function useAccounts() {
           a.id === accountId ? { ...a, usageLoading: true } : a
         )
       );
-      const usage = await invokeBackend<UsageInfo>("get_usage", { accountId });
+      const usage = await retryBusyUsage(() => invokeBackend<UsageInfo>("get_usage", { accountId }));
       setAccounts((prev) =>
         prev.map((a) =>
           a.id === accountId ? { ...a, usage, usageLoading: false } : a
