@@ -15,6 +15,16 @@ export interface AccountInfo {
   last_used_at: string | null;
 }
 
+export interface AdditionalRateLimitInfo {
+  limit_name: string;
+  model_slug: string | null;
+  used_percent: number;
+  window_minutes: number | null;
+  resets_at: number | null;
+  allowed: boolean | null;
+  limit_reached: boolean | null;
+}
+
 export interface UsageInfo {
   account_id: string;
   plan_type: string | null;
@@ -24,6 +34,7 @@ export interface UsageInfo {
   secondary_used_percent: number | null;
   secondary_window_minutes: number | null;
   secondary_resets_at: number | null;
+  additional_rate_limits?: AdditionalRateLimitInfo[];
   has_credits: boolean | null;
   unlimited_credits: boolean | null;
   credits_balance: string | null;

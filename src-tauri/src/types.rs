@@ -378,6 +378,18 @@ impl AccountInfo {
     }
 }
 
+/// A provider-defined extra rate limit (for example a model-specific quota).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdditionalRateLimitInfo {
+    pub limit_name: String,
+    pub model_slug: Option<String>,
+    pub used_percent: f64,
+    pub window_minutes: Option<i64>,
+    pub resets_at: Option<i64>,
+    pub allowed: Option<bool>,
+    pub limit_reached: Option<bool>,
+}
+
 /// Usage information for an account
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageInfo {
@@ -397,6 +409,9 @@ pub struct UsageInfo {
     pub secondary_window_minutes: Option<i64>,
     /// Secondary window reset timestamp (unix seconds)
     pub secondary_resets_at: Option<i64>,
+    /// Optional provider-defined quota buckets. Older saved snapshots omit this.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_rate_limits: Vec<AdditionalRateLimitInfo>,
     /// Whether the account has credits
     pub has_credits: Option<bool>,
     /// Whether credits are unlimited
@@ -418,6 +433,7 @@ impl UsageInfo {
             secondary_used_percent: None,
             secondary_window_minutes: None,
             secondary_resets_at: None,
+            additional_rate_limits: Vec::new(),
             has_credits: None,
             unlimited_credits: None,
             credits_balance: None,
@@ -461,12 +477,24 @@ pub struct OAuthLoginInfo {
 // API Response types (from Codex backend)
 // ============================================================================
 
+/// The backend may return `additional_rate_limits: null` instead of an array.
+fn deserialize_optional_quota_list<'de, D>(
+    deserializer: D,
+) -> Result<Vec<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<Vec<serde_json::Value>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 /// Rate limit status from API
 #[derive(Debug, Clone, Deserialize)]
 pub struct RateLimitStatusPayload {
     pub plan_type: String,
     #[serde(default)]
     pub rate_limit: Option<RateLimitDetails>,
+    #[serde(default, deserialize_with = "deserialize_optional_quota_list")]
+    pub additional_rate_limits: Vec<serde_json::Value>,
     #[serde(default)]
     pub credits: Option<CreditStatusDetails>,
 }

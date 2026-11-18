@@ -13,8 +13,8 @@ use std::collections::HashMap;
 
 use crate::auth::{ensure_chatgpt_tokens_fresh, refresh_chatgpt_tokens};
 use crate::types::{
-    AuthData, CreditStatusDetails, RateLimitDetails, RateLimitStatusPayload, RateLimitWindow,
-    StoredAccount, UsageInfo,
+    AdditionalRateLimitInfo, AuthData, CreditStatusDetails, RateLimitDetails,
+    RateLimitStatusPayload, RateLimitWindow, StoredAccount, UsageInfo,
 };
 
 const CHATGPT_BACKEND_API: &str = "https://chatgpt.com/backend-api";
@@ -76,6 +76,7 @@ pub async fn get_account_usage(account: &StoredAccount) -> Result<UsageInfo> {
             secondary_used_percent: None,
             secondary_window_minutes: None,
             secondary_resets_at: None,
+            additional_rate_limits: Vec::new(),
             has_credits: None,
             unlimited_credits: None,
             credits_balance: None,
@@ -478,6 +479,7 @@ fn collect_last_text(value: &Value, last: &mut Option<String>) {
 
 /// Convert API response to UsageInfo
 fn convert_payload_to_usage_info(account_id: &str, payload: RateLimitStatusPayload) -> UsageInfo {
+    let additional_rate_limits = extract_additional_rate_limits(&payload.additional_rate_limits);
     let (primary, secondary) = extract_rate_limits(payload.rate_limit);
     let credits = extract_credits(payload.credits);
 
@@ -496,11 +498,66 @@ fn convert_payload_to_usage_info(account_id: &str, payload: RateLimitStatusPaylo
             .and_then(|w| w.limit_window_seconds)
             .map(|s| (i64::from(s) + 59) / 60),
         secondary_resets_at: secondary.as_ref().and_then(|w| w.reset_at),
+        additional_rate_limits,
         has_credits: credits.as_ref().map(|c| c.has_credits),
         unlimited_credits: credits.as_ref().map(|c| c.unlimited),
         credits_balance: credits.and_then(|c| c.balance),
         error: None,
     }
+}
+
+fn quota_number(value: Option<&Value>) -> Option<f64> {
+    value
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.parse::<f64>().ok())
+        })
+        .filter(|value| value.is_finite())
+}
+
+fn quota_timestamp(value: Option<&Value>) -> Option<i64> {
+    value.and_then(|value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_str()?.parse::<i64>().ok())
+    })
+}
+
+/// Extra quotas are optional provider data. Malformed entries are skipped
+/// individually rather than hiding otherwise valid usage information.
+fn extract_additional_rate_limits(entries: &[Value]) -> Vec<AdditionalRateLimitInfo> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let limit_name = entry.get("limit_name")?.as_str()?.trim();
+            if limit_name.is_empty() {
+                return None;
+            }
+            let rate_limit = entry.get("rate_limit")?;
+            let window = rate_limit.get("primary_window")?;
+            let used_percent = quota_number(window.get("used_percent"))?.clamp(0.0, 100.0);
+            let window_minutes = quota_timestamp(window.get("limit_window_seconds"))
+                .filter(|seconds| *seconds > 0)
+                .map(|seconds| (seconds + 59) / 60);
+            let resets_at = quota_timestamp(window.get("reset_at")).filter(|time| *time > 0);
+            let model_slug = entry
+                .get("normal_model_slug")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string);
+
+            Some(AdditionalRateLimitInfo {
+                limit_name: limit_name.to_string(),
+                model_slug,
+                used_percent,
+                window_minutes,
+                resets_at,
+                allowed: rate_limit.get("allowed").and_then(Value::as_bool),
+                limit_reached: rate_limit.get("limit_reached").and_then(Value::as_bool),
+            })
+        })
+        .collect()
 }
 
 fn extract_rate_limits(
@@ -567,6 +624,79 @@ mod tests {
             limit_window_seconds: Some(window_seconds),
             reset_at: Some(1_800_000_000),
         }
+    }
+
+    #[test]
+    fn accepts_null_and_missing_additional_quotas() {
+        for payload in [
+            r#"{"plan_type":"plus","additional_rate_limits":null}"#,
+            r#"{"plan_type":"plus"}"#,
+        ] {
+            let parsed: RateLimitStatusPayload = serde_json::from_str(payload).unwrap();
+            assert!(convert_payload_to_usage_info("test", parsed)
+                .additional_rate_limits
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn parses_multiple_named_quotas_and_skips_invalid_entries() {
+        let payload: RateLimitStatusPayload = serde_json::from_value(json!({
+            "plan_type": "plus",
+            "additional_rate_limits": [
+                {
+                    "limit_name": "gpt-reserve",
+                    "normal_model_slug": "gpt-luna",
+                    "rate_limit": {
+                        "allowed": true,
+                        "limit_reached": false,
+                        "primary_window": {
+                            "used_percent": 37.5,
+                            "limit_window_seconds": 604800,
+                            "reset_at": 1800000000
+                        }
+                    }
+                },
+                {
+                    "limit_name": "model-special",
+                    "rate_limit": {
+                        "allowed": false,
+                        "limit_reached": true,
+                        "primary_window": {
+                            "used_percent": "100",
+                            "limit_window_seconds": 3600
+                        }
+                    }
+                },
+                {"limit_name":"broken","rate_limit":{"primary_window":{}}},
+                {"limit_name":null}
+            ]
+        }))
+        .unwrap();
+        let usage = convert_payload_to_usage_info("test", payload);
+        assert_eq!(usage.additional_rate_limits.len(), 2);
+        let reserve = &usage.additional_rate_limits[0];
+        assert_eq!(reserve.limit_name, "gpt-reserve");
+        assert_eq!(reserve.model_slug.as_deref(), Some("gpt-luna"));
+        assert_eq!(reserve.used_percent, 37.5);
+        assert_eq!(reserve.window_minutes, Some(10080));
+        assert_eq!(reserve.resets_at, Some(1800000000));
+        assert_eq!(reserve.allowed, Some(true));
+        assert_eq!(usage.additional_rate_limits[1].limit_name, "model-special");
+        assert_eq!(usage.additional_rate_limits[1].used_percent, 100.0);
+        assert_eq!(usage.additional_rate_limits[1].limit_reached, Some(true));
+    }
+
+    #[test]
+    fn clamps_out_of_range_additional_quota_percentages() {
+        let entries = vec![
+            json!({"limit_name":"low","rate_limit":{"primary_window":{"used_percent":-5}}}),
+            json!({"limit_name":"high","rate_limit":{"primary_window":{"used_percent":150}}}),
+        ];
+        let parsed = extract_additional_rate_limits(&entries);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].used_percent, 0.0);
+        assert_eq!(parsed[1].used_percent, 100.0);
     }
 
     #[test]
