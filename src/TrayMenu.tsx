@@ -294,41 +294,59 @@ function TrayMenu() {
     let unlistenTheme: (() => void) | undefined;
     let unlistenAutoWarmup: (() => void) | undefined;
     let refreshedDuringMount = false;
+    let disposed = false;
+
+    // Destroying the popup can unmount React before listen() has resolved.
+    // Release late subscriptions instead of leaving orphaned event handlers.
+    const keepSubscription = (unlisten: () => void) => {
+      if (disposed) {
+        unlisten();
+        return undefined;
+      }
+      return unlisten;
+    };
 
     void (async () => {
       const { listen } = await import("@tauri-apps/api/event");
-      unlistenRefresh = await listen(TRAY_REFRESH_EVENT, () => {
+      unlistenRefresh = keepSubscription(await listen(TRAY_REFRESH_EVENT, () => {
+        if (disposed) return;
         refreshedDuringMount = true;
         syncThemeFromStorage();
         setAutoWarmupAllEnabled(readAutoWarmupAllEnabled());
         void load();
-      });
-      unlistenChanged = await listen(ACCOUNTS_CHANGED_EVENT, () => void load());
-      unlistenTheme = await listen<ThemeMode>(THEME_CHANGED_EVENT, ({ payload }) => {
+      }));
+      unlistenChanged = keepSubscription(await listen(ACCOUNTS_CHANGED_EVENT, () => {
+        if (!disposed) void load();
+      }));
+      unlistenTheme = keepSubscription(await listen<ThemeMode>(THEME_CHANGED_EVENT, ({ payload }) => {
+        if (disposed) return;
         if (payload === "light" || payload === "dark") {
           applyTheme(payload);
         }
-      });
-      unlistenAutoWarmup = await listen<boolean>(
+      }));
+      unlistenAutoWarmup = keepSubscription(await listen<boolean>(
         AUTO_WARMUP_ALL_CHANGED_EVENT,
         ({ payload }) => {
-          if (typeof payload === "boolean") {
+          if (!disposed && typeof payload === "boolean") {
             setAutoWarmupAllEnabled(payload);
           }
         }
-      );
+      ));
 
       // A Windows popup is created on the first tray click. Its initial
       // tray-refresh event may fire before React attaches the listener.
       // Prime the first mount exactly once if that event was missed.
-      if (/Windows/i.test(navigator.userAgent) && !refreshedDuringMount) {
+      if (!disposed && /Windows/i.test(navigator.userAgent) && !refreshedDuringMount) {
         syncThemeFromStorage();
         setAutoWarmupAllEnabled(readAutoWarmupAllEnabled());
         void load();
       }
-    })();
+    })().catch((error) => {
+      if (!disposed) console.warn("Could not subscribe to tray events:", error);
+    });
 
     return () => {
+      disposed = true;
       unlistenRefresh?.();
       unlistenChanged?.();
       unlistenTheme?.();
