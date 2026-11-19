@@ -27,6 +27,15 @@ static TRAY_USAGE: LazyLock<Mutex<HashMap<String, UsageInfo>>> =
 static TRAY_SWITCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static TRAY_SWITCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+// The Windows tray popup is an optional WebView2, not a permanent background
+// service. Native tray actions and quota polling work without this window.
+#[cfg(target_os = "windows")]
+static TRAY_POPUP_EPOCH: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_os = "windows")]
+static TRAY_POPUP_INSTANCE: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_os = "windows")]
+const TRAY_POPUP_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+
 const TRAY_ID: &str = "codex-switcher-tray";
 const TRAY_ICON: tauri::image::Image<'static> = tauri::include_image!("./icons/tray.png");
 const TRAY_REFRESH_EVENT: &str = "tray-refresh";
@@ -47,7 +56,9 @@ struct SwitchAccountBlockedPayload {
 }
 
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
-    #[cfg(not(target_os = "linux"))]
+    // macOS keeps its existing warm popup. Creating an invisible WebView2 at
+    // Windows startup costs memory even when the popup is never opened.
+    #[cfg(target_os = "macos")]
     create_tray_window(app)?;
 
     let menu = build_menu(app, &load_accounts().unwrap_or_default())?;
@@ -247,17 +258,62 @@ fn create_tray_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .visible(false)
         .build()?;
 
-    // Hide the popup as soon as it loses focus so it behaves like a native menu.
+    // Ignore late focus callbacks from an evicted popup when a replacement
+    // window with the same label is already alive.
+    #[cfg(target_os = "windows")]
+    let instance = TRAY_POPUP_INSTANCE.fetch_add(1, Ordering::AcqRel) + 1;
+
     let app_handle = app.clone();
     window.on_window_event(move |event| {
         if let WindowEvent::Focused(false) = event {
+            #[cfg(target_os = "windows")]
+            if TRAY_POPUP_INSTANCE.load(Ordering::Acquire) != instance {
+                return;
+            }
+
             if let Some(window) = app_handle.get_webview_window(TRAY_WINDOW) {
-                let _ = window.hide();
+                if window.is_visible().unwrap_or(false) && window.hide().is_ok() {
+                    #[cfg(target_os = "windows")]
+                    popup_hidden(&app_handle);
+                }
             }
         }
     });
 
     Ok(())
+}
+
+// Only the Windows popup gets an eviction timer. UI-thread destruction avoids
+// duplicate WebView labels and races with the next click.
+#[cfg(target_os = "windows")]
+pub fn popup_hidden<R: Runtime>(app: &AppHandle<R>) {
+    let epoch = TRAY_POPUP_EPOCH.fetch_add(1, Ordering::AcqRel) + 1;
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(TRAY_POPUP_IDLE_TIMEOUT).await;
+        let ui_app = app.clone();
+        if let Err(error) = app.run_on_main_thread(move || {
+            let Some(window) = ui_app.get_webview_window(TRAY_WINDOW) else {
+                return;
+            };
+            if should_evict_popup(
+                epoch,
+                TRAY_POPUP_EPOCH.load(Ordering::Acquire),
+                window.is_visible().ok(),
+            ) {
+                if let Err(error) = window.destroy() {
+                    eprintln!("Failed to release idle tray popup: {error}");
+                }
+            }
+        }) {
+            eprintln!("Failed to schedule tray popup release: {error}");
+        }
+    });
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn should_evict_popup(scheduled_epoch: u64, current_epoch: u64, visible: Option<bool>) -> bool {
+    scheduled_epoch == current_epoch && visible == Some(false)
 }
 
 #[cfg_attr(target_os = "linux", allow(dead_code))]
@@ -275,17 +331,37 @@ fn handle_tray_icon_event<R: Runtime>(tray: &tauri::tray::TrayIcon<R>, event: Tr
 
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 fn toggle_tray_window<R: Runtime>(app: &AppHandle<R>, cursor: PhysicalPosition<f64>) {
+    #[cfg(target_os = "windows")]
+    if app.get_webview_window(TRAY_WINDOW).is_none() {
+        if let Err(error) = create_tray_window(app) {
+            // The native menu remains usable if WebView2 initialization fails.
+            eprintln!("Failed to create Windows tray popup: {error}");
+            restore_main_window(app);
+            return;
+        }
+    }
+
     let Some(window) = app.get_webview_window(TRAY_WINDOW) else {
         return;
     };
 
     if window.is_visible().unwrap_or(false) {
-        let _ = window.hide();
+        if window.hide().is_ok() {
+            #[cfg(target_os = "windows")]
+            popup_hidden(app);
+        }
         return;
     }
 
+    #[cfg(target_os = "windows")]
+    TRAY_POPUP_EPOCH.fetch_add(1, Ordering::AcqRel);
+
     position_near_cursor(&window, cursor);
-    let _ = window.show();
+    if let Err(error) = window.show() {
+        eprintln!("Failed to show tray popup: {error}");
+        restore_main_window(app);
+        return;
+    }
     let _ = window.set_focus();
     let _ = app.emit_to(TRAY_WINDOW, TRAY_REFRESH_EVENT, ());
 }
@@ -780,6 +856,14 @@ mod tests {
         );
         assert!(alphas.contains(&0));
         assert!(alphas.contains(&255));
+    }
+
+    #[test]
+    fn tray_popup_eviction_requires_unchanged_epoch_and_hidden_window() {
+        assert!(super::should_evict_popup(4, 4, Some(false)));
+        assert!(!super::should_evict_popup(4, 5, Some(false)));
+        assert!(!super::should_evict_popup(4, 4, Some(true)));
+        assert!(!super::should_evict_popup(4, 4, None));
     }
 
     #[test]

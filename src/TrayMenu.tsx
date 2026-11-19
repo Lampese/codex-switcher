@@ -293,10 +293,12 @@ function TrayMenu() {
     let unlistenChanged: (() => void) | undefined;
     let unlistenTheme: (() => void) | undefined;
     let unlistenAutoWarmup: (() => void) | undefined;
+    let refreshedDuringMount = false;
 
     void (async () => {
       const { listen } = await import("@tauri-apps/api/event");
       unlistenRefresh = await listen(TRAY_REFRESH_EVENT, () => {
+        refreshedDuringMount = true;
         syncThemeFromStorage();
         setAutoWarmupAllEnabled(readAutoWarmupAllEnabled());
         void load();
@@ -315,6 +317,15 @@ function TrayMenu() {
           }
         }
       );
+
+      // A Windows popup is created on the first tray click. Its initial
+      // tray-refresh event may fire before React attaches the listener.
+      // Prime the first mount exactly once if that event was missed.
+      if (/Windows/i.test(navigator.userAgent) && !refreshedDuringMount) {
+        syncThemeFromStorage();
+        setAutoWarmupAllEnabled(readAutoWarmupAllEnabled());
+        void load();
+      }
     })();
 
     return () => {
