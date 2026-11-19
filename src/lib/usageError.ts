@@ -9,7 +9,7 @@ export function formatUsageError(error: string): { title: string; message: strin
   if (needsRelogin(error)) {
     return {
       title: "Switcher sign-in needs renewal",
-      message: "Switcher cannot renew this saved login. Remove this account and add it again in Switcher; other apps may still be signed in.",
+      message: "Use Re-login on this card to renew the saved login in place; other apps may still be signed in.",
     };
   }
   if (/\b429\b|too many requests/i.test(error)) {

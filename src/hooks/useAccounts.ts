@@ -336,11 +336,11 @@ export function useAccounts() {
     [loadAccounts, refreshUsage]
   );
 
-  const startOAuthLogin = useCallback(async (accountName: string) => {
+  const startOAuthLogin = useCallback(async (accountName: string, reauthAccountId?: string) => {
     try {
       const info = await invokeBackend<{ auth_url: string; callback_port: number }>(
         "start_login",
-        { accountName }
+        { accountName, reauthAccountId }
       );
       return info;
     } catch (err) {
@@ -416,6 +416,7 @@ export function useAccounts() {
       await invokeBackend("cancel_login");
     } catch (err) {
       console.error("Failed to cancel login:", err);
+      throw err;
     }
   }, []);
 
