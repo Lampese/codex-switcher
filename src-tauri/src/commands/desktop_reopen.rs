@@ -23,6 +23,27 @@ pub(super) fn desktop_pids(desktops: &[CapturedDesktop]) -> Vec<u32> {
     desktops.iter().map(|desktop| desktop.pid).collect()
 }
 
+pub(super) fn ensure_all_roots_supported(
+    pids: &[u32],
+    desktops: &[CapturedDesktop],
+) -> Result<(), String> {
+    let supported: std::collections::HashSet<u32> =
+        desktops.iter().map(|desktop| desktop.pid).collect();
+    if pids.iter().all(|pid| supported.contains(pid)) {
+        Ok(())
+    } else {
+        Err("Running Codex processes include sessions that cannot be reopened automatically".into())
+    }
+}
+
+#[cfg(test)]
+pub(super) fn test_captured_desktop(pid: u32) -> CapturedDesktop {
+    CapturedDesktop {
+        pid,
+        target: DesktopTarget::MacBundle(format!("/Applications/Codex-{pid}.app")),
+    }
+}
+
 struct ReopenTicket {
     token: String,
     created_at: Instant,
@@ -35,6 +56,7 @@ static PENDING_REOPEN: Mutex<Option<ReopenTicket>> = Mutex::new(None);
 pub struct CodexReopenInfo {
     supported: bool,
     desktop_count: usize,
+    active_count: usize,
 }
 
 #[tauri::command]
@@ -45,6 +67,7 @@ pub async fn get_codex_reopen_info() -> Result<CodexReopenInfo, String> {
         Ok(CodexReopenInfo {
             supported: cfg!(any(target_os = "macos", windows)),
             desktop_count: desktops.len(),
+            active_count: pids.len(),
         })
     })
     .await

@@ -108,11 +108,13 @@ pub(crate) fn is_codex_running_switch_block(error: &str) -> bool {
 pub async fn kill_codex_processes(
     reopen_desktop: Option<bool>,
     force_close: Option<bool>,
+    require_all_desktops: Option<bool>,
 ) -> Result<KillCodexProcessesResult, String> {
     tokio::task::spawn_blocking(move || {
         close_codex_processes_blocking(
             reopen_desktop.unwrap_or(false),
             force_close.unwrap_or(false),
+            require_all_desktops.unwrap_or(false),
         )
     })
     .await
@@ -122,15 +124,58 @@ pub async fn kill_codex_processes(
 fn close_codex_processes_blocking(
     reopen_desktop: bool,
     force_close: bool,
+    require_all_desktops: bool,
 ) -> Result<KillCodexProcessesResult, String> {
-    let (pids, _) = find_codex_processes().map_err(|e| e.to_string())?;
-    // Capture exact desktop identities before termination. Detection failure must
-    // never prevent the existing close-only flow.
-    let desktops = if reopen_desktop || (cfg!(target_os = "macos") && !force_close) {
-        desktop_reopen::capture_desktops(&pids).unwrap_or_default()
+    close_codex_processes_with(
+        reopen_desktop,
+        force_close,
+        require_all_desktops,
+        || {
+            find_codex_processes()
+                .map(|(pids, _)| pids)
+                .map_err(|e| e.to_string())
+        },
+        desktop_reopen::capture_desktops,
+        terminate_codex_processes,
+    )
+}
+
+fn close_codex_processes_with(
+    reopen_desktop: bool,
+    force_close: bool,
+    require_all_desktops: bool,
+    find_roots: impl FnOnce() -> Result<Vec<u32>, String>,
+    capture_desktops: impl FnOnce(&[u32]) -> Result<Vec<desktop_reopen::CapturedDesktop>, String>,
+    terminate: impl FnOnce(
+        &[u32],
+        Vec<desktop_reopen::CapturedDesktop>,
+        bool,
+    ) -> KillCodexProcessesResult,
+) -> Result<KillCodexProcessesResult, String> {
+    let pids = find_roots()?;
+    let desktops = if require_all_desktops {
+        if pids.is_empty() {
+            Vec::new()
+        } else {
+            let captured = capture_desktops(&pids)?;
+            desktop_reopen::ensure_all_roots_supported(&pids, &captured)?;
+            captured
+        }
+    } else if reopen_desktop || (cfg!(target_os = "macos") && !force_close) {
+        // Capture exact desktop identities before termination. Detection failure must
+        // never prevent the existing manual close-only flow.
+        capture_desktops(&pids).unwrap_or_default()
     } else {
         Vec::new()
     };
+    Ok(terminate(&pids, desktops, force_close))
+}
+
+fn terminate_codex_processes(
+    pids: &[u32],
+    desktops: Vec<desktop_reopen::CapturedDesktop>,
+    force_close: bool,
+) -> KillCodexProcessesResult {
     let targeted_count = pids.len();
     let mut killed_pids = Vec::new();
     let mut failed_pids = Vec::new();
@@ -142,10 +187,10 @@ fn close_codex_processes_blocking(
     let snapshot = read_unix_process_snapshot();
 
     #[cfg(unix)]
-    let targets = expand_process_targets(&pids, snapshot.as_ref());
+    let targets = expand_process_targets(pids, snapshot.as_ref());
 
     #[cfg(windows)]
-    let targets = expand_process_targets(&pids);
+    let targets = expand_process_targets(pids);
 
     #[cfg(target_os = "macos")]
     let current_uid = current_unix_uid();
@@ -230,12 +275,12 @@ fn close_codex_processes_blocking(
     }
 
     let reopen_token = desktop_reopen::remember_closed_desktops(desktops, &killed_pids);
-    Ok(KillCodexProcessesResult {
+    KillCodexProcessesResult {
         targeted_count,
         killed_pids,
         failed_pids,
         reopen_token,
-    })
+    }
 }
 
 #[cfg(unix)]
@@ -1204,6 +1249,75 @@ mod tests {
         assert!(!super::is_windows_codex_shortcut_name("Codex Switcher.lnk"));
         assert!(!super::is_windows_codex_shortcut_name("codex-switcher.lnk"));
         assert!(!super::is_windows_codex_shortcut_name("Codex.txt"));
+    }
+
+    #[test]
+    fn automatic_close_rejects_mixed_desktop_and_terminal_sessions_before_termination() {
+        let mut terminated = false;
+        let err = super::close_codex_processes_with(
+            true,
+            false,
+            true,
+            || Ok(vec![101, 202]),
+            |_| Ok(vec![super::desktop_reopen::test_captured_desktop(101)]),
+            |_, _, _| {
+                terminated = true;
+                panic!("mixed sessions must not terminate any process")
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("cannot be reopened automatically"));
+        assert!(!terminated);
+
+        let err = super::close_codex_processes_with(
+            true,
+            false,
+            true,
+            || Ok(vec![101]),
+            |_| Err("desktop inspection failed".into()),
+            |_, _, _| panic!("capture failure must abort automatic close"),
+        )
+        .unwrap_err();
+        assert_eq!(err, "desktop inspection failed");
+
+        let closed = super::close_codex_processes_with(
+            true,
+            false,
+            true,
+            || Ok(vec![101, 102]),
+            |_| {
+                Ok(vec![
+                    super::desktop_reopen::test_captured_desktop(101),
+                    super::desktop_reopen::test_captured_desktop(102),
+                ])
+            },
+            |pids, desktops, force| super::KillCodexProcessesResult {
+                targeted_count: pids.len(),
+                killed_pids: pids.to_vec(),
+                failed_pids: if force { vec![1] } else { vec![] },
+                reopen_token: (desktops.len() == 2).then(|| "token".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(closed.killed_pids, vec![101, 102]);
+        assert_eq!(closed.reopen_token.as_deref(), Some("token"));
+
+        let manual = super::close_codex_processes_with(
+            true,
+            false,
+            false,
+            || Ok(vec![101, 202]),
+            |_| Ok(vec![super::desktop_reopen::test_captured_desktop(101)]),
+            |pids, desktops, _| super::KillCodexProcessesResult {
+                targeted_count: pids.len(),
+                killed_pids: pids.to_vec(),
+                failed_pids: vec![],
+                reopen_token: (desktops.len() == 1).then(|| "manual-token".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(manual.killed_pids, vec![101, 202]);
+        assert_eq!(manual.reopen_token.as_deref(), Some("manual-token"));
     }
 }
 

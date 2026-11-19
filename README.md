@@ -175,6 +175,38 @@ Recovery receipts retain safe CLI exit-status or 10-second timeout details acros
 This flow applies to switches through the main window that close and reopen Codex;
 tray-only switches and switches made while Codex is already closed do not run it.
 
+## Automatic account switching
+
+Enable **Auto-switch when the active account runs out of quota** in Settings.
+It is off by default. While the desktop Switcher is running, it checks once a
+minute and confirms exhaustion at 100% of either reported usage window. Accounts
+with credits available are still usable. Unknown quota and failed usage requests
+never trigger switching.
+
+Switcher checks other saved ChatGPT accounts in order, starting after the current
+account and wrapping around. It verifies available quota before switching, skips
+API-key accounts, and leaves the current account alone when none is available.
+It rechecks the active account before acting so a manual switch or quota reset
+cancels the automatic decision.
+
+When every active Codex session is a supported desktop app, enabling this setting
+permits automatically closing, switching, and reopening without the manual
+confirmation dialog, even when manual reopening is disabled, and preserves
+conversation recovery when **Auto-resume interrupted conversations after switching**
+is enabled. Closing is graceful unless **Force close** was explicitly selected in
+Settings. Unsaved work may be lost. If Codex is already closed, only the account
+changes. If any non-desktop session (such as a terminal CLI session) is also
+running, automatic switching pauses and leaves all running processes alone.
+
+The main window shows monitoring, no-capacity, success, and failure status, with a
+**Turn off auto-switch** button. A five-minute cooldown follows each switch or
+error; overlapping checks and manual main-window switches are suppressed. Turning
+off cancels checks before closing starts; an already-started close/switch/reopen
+sequence finishes. Quota requests time out after 15 seconds. Keep Switcher running;
+quitting stops monitoring. On macOS 14+, background suspension is disabled for the
+main window so tray mode can keep monitoring. Hidden-window timing on older macOS
+and Windows is platform-dependent and has not been runtime-verified.
+
 ## macOS Dock and Menu Bar Mode
 
 On macOS, Codex Switcher can either stay visible in the Dock or live only in the

@@ -25,13 +25,17 @@ export function useForceCloseCodexProcesses({
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [isForceClosing, setIsForceClosing] = useState(false);
 
-  const closeCodexProcesses = useCallback(async (reopenDesktop = false, forceClose = false) => {
+  const closeCodexProcesses = useCallback(async (
+    reopenDesktop = false,
+    forceClose = false,
+    requireAllDesktops = false,
+  ) => {
     try {
       setIsForceClosing(true);
 
       const result = await invokeBackend<KillCodexProcessesResult>(
         "kill_codex_processes",
-        { reopenDesktop, forceClose }
+        { reopenDesktop, forceClose, ...(requireAllDesktops ? { requireAllDesktops: true } : {}) }
       );
       const latestProcessInfo = await checkProcesses();
       const remainingCount = latestProcessInfo?.count ?? processCount;
@@ -64,6 +68,7 @@ export function useForceCloseCodexProcesses({
       return { processInfo: latestProcessInfo, reopenToken: result.reopen_token ?? null };
     } catch (err) {
       console.error("Failed to close Codex processes:", err);
+      if (requireAllDesktops) throw err;
       showToast(`Close failed: ${formatError(err)}`, true);
       return null;
     } finally {
