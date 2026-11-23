@@ -126,6 +126,9 @@ pub fn run() {
             set_dock_display_mode,
             complete_close_behavior,
             ack_close_behavior_prompt,
+            // WSL
+            wsl::get_wsl_config,
+            wsl::set_wsl_config,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
