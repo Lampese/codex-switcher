@@ -4,6 +4,7 @@ pub mod api;
 #[cfg(desktop)]
 pub mod app_menu;
 pub mod auth;
+pub mod auto_warmup;
 pub mod commands;
 #[cfg(desktop)]
 pub mod tray;
@@ -11,13 +12,15 @@ pub mod types;
 pub mod web;
 
 use commands::{
-    ack_close_behavior_prompt, add_account_from_file, cancel_login, check_codex_processes,
-    complete_close_behavior, complete_login, delete_account, export_accounts_full_encrypted_file,
-    export_accounts_slim_text, get_account_usage_stats, get_active_account_info,
-    get_dock_display_mode, get_masked_account_ids, get_usage, hide_tray_window,
-    import_accounts_full_encrypted_file, import_accounts_slim_text, kill_codex_processes,
-    list_accounts, open_main_window, quit_app, refresh_account_metadata,
-    refresh_all_accounts_usage, rename_account, report_usage, set_dock_display_mode,
+    ack_close_behavior_prompt, add_account_from_file, cancel_codex_session_recovery, cancel_login,
+    check_codex_processes, complete_close_behavior, complete_login, delete_account,
+    export_accounts_full_encrypted_file, export_accounts_slim_text, get_account_reset_credits,
+    get_account_usage_stats, get_active_account_info, get_dock_display_mode,
+    get_masked_account_ids, get_usage, hide_tray_window, import_accounts_full_encrypted_file,
+    import_accounts_slim_text, kill_codex_processes, list_accounts,
+    open_codex_recovery_conversation, open_main_window, prepare_codex_session_recovery, quit_app,
+    refresh_account_metadata, refresh_all_accounts_usage, rename_account, report_usage,
+    resume_codex_session_recovery, set_auto_warmup_config, set_dock_display_mode,
     set_masked_account_ids, start_login, switch_account, warmup_account, warmup_all_accounts,
 };
 use tauri::Emitter;
@@ -35,6 +38,7 @@ pub fn run() {
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
                 app_menu::setup(app.handle())?;
                 tray::setup(app.handle())?;
+                auto_warmup::spawn_scheduler(app.handle().clone());
             }
             Ok(())
         })
@@ -86,13 +90,19 @@ pub fn run() {
             // Usage
             get_usage,
             get_account_usage_stats,
+            get_account_reset_credits,
             refresh_account_metadata,
             refresh_all_accounts_usage,
             warmup_account,
             warmup_all_accounts,
+            set_auto_warmup_config,
             // Process detection
             check_codex_processes,
             kill_codex_processes,
+            prepare_codex_session_recovery,
+            cancel_codex_session_recovery,
+            resume_codex_session_recovery,
+            open_codex_recovery_conversation,
             // Tray window
             hide_tray_window,
             open_main_window,

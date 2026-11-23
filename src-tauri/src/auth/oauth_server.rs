@@ -105,6 +105,10 @@ async fn exchange_code_for_tokens(
 
     let resp = client
         .post(format!("{issuer}/oauth/token"))
+        // An unresponsive token endpoint must not leave the login dialog
+        // waiting indefinitely. OAuth authorization codes are single-use:
+        // don't automatically retry the exchange after a timeout.
+        .timeout(Duration::from_secs(25))
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
         .send()

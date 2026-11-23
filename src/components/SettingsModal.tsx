@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DesktopReopenPreference } from "../lib/desktopReopen";
 import type { CodexClosePreference } from "../lib/codexClosePreference";
+import { CHECK_FOR_UPDATES_EVENT } from "./UpdateChecker";
 import { invokeBackend, isTauriRuntime } from "../lib/platform";
 import type { DockDisplayMode } from "../types";
 
@@ -15,6 +16,8 @@ interface SettingsModalProps {
   onReopenPreferenceChange: (value: DesktopReopenPreference) => void;
   closePreference: CodexClosePreference;
   onClosePreferenceChange: (value: CodexClosePreference) => void;
+  autoResumeSessions: boolean;
+  onAutoResumeSessionsChange: (value: boolean) => void;
   onClose: () => void;
 }
 
@@ -23,13 +26,32 @@ export function SettingsModal({
   onReopenPreferenceChange,
   closePreference,
   onClosePreferenceChange,
+  autoResumeSessions,
+  onAutoResumeSessionsChange,
   onClose,
 }: SettingsModalProps) {
   const [displaySettings, setDisplaySettings] = useState<DisplaySettings | null>(null);
   const [saving, setSaving] = useState(false);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const requestId = useRef(0);
   const desktop = isTauriRuntime();
+
+  useEffect(() => {
+    if (!desktop) return;
+    let active = true;
+    void import("@tauri-apps/api/app")
+      .then(({ getVersion }) => getVersion())
+      .then((version) => { if (active) setAppVersion(version); })
+      .catch((err) => console.error("Failed to read app version:", err));
+    return () => { active = false; };
+  }, [desktop]);
+
+  const handleCheckForUpdates = () => {
+    window.dispatchEvent(new Event(CHECK_FOR_UPDATES_EVENT));
+    onClose();
+  };
+
   const loadDisplaySettings = useCallback(async () => {
     const currentRequest = ++requestId.current;
     try {
@@ -128,6 +150,23 @@ export function SettingsModal({
               <div className="border-t border-gray-100 dark:border-gray-800" />
             </>
           )}
+          {desktop && (
+            <>
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-gray-900 dark:text-gray-100">App updates</p>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    {appVersion ? `Version v${appVersion}. ` : ""}Checks automatically on launch and every 6 hours.
+                  </p>
+                </div>
+                <button type="button" onClick={handleCheckForUpdates}
+                  className="shrink-0 rounded-lg border border-gray-300 dark:border-gray-700 px-3 py-2 text-xs font-medium text-gray-900 dark:text-gray-100 hover:bg-gray-100 dark:hover:bg-gray-800">
+                  Check for Updates
+                </button>
+              </div>
+              <div className="border-t border-gray-100 dark:border-gray-800" />
+            </>
+          )}
           <label htmlFor="codex-close-preference" className="block text-sm font-medium text-gray-900 dark:text-gray-100">
             Codex close method
           </label>
@@ -149,6 +188,18 @@ export function SettingsModal({
           </select>
           <p className="text-sm text-gray-500 dark:text-gray-400">
             Applies to detected Codex desktop apps on macOS and Windows. When switching accounts, the app reopens after the switch succeeds.
+          </p>
+          <label className="flex items-center gap-2 text-sm font-medium text-gray-900 dark:text-gray-100">
+            <input
+              type="checkbox"
+              checked={autoResumeSessions}
+              onChange={(event) => onAutoResumeSessionsChange(event.target.checked)}
+              className="h-4 w-4 accent-orange-600"
+            />
+            Auto-resume interrupted conversations after switching
+          </label>
+          <p className="text-sm text-gray-500 dark:text-gray-400">
+            With desktop reopening enabled, continue recent quota-stopped conversations after switching. On macOS, also continue running chats interrupted by the restart. Finished chats and chats waiting for input are left alone. Switcher checks that each continuation starts.
           </p>
         </div>
         <div className="flex justify-end p-5 border-t border-gray-100 dark:border-gray-800">

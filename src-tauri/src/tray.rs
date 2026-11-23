@@ -219,6 +219,7 @@ fn watch_system_theme<R: Runtime>(app: AppHandle<R>) {
 pub fn ingest_usage<R: Runtime>(app: &AppHandle<R>, usages: Vec<UsageInfo>) {
     if let Ok(mut cache) = TRAY_USAGE.lock() {
         for usage in usages {
+            crate::auto_warmup::observe_usage(&usage);
             cache.insert(usage.account_id.clone(), usage);
         }
     }

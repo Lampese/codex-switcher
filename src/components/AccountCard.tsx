@@ -1,8 +1,9 @@
 import { useCallback, useState, useRef, useEffect } from "react";
-import type { AccountResetCredits, AccountUsageStats as AccountUsageStatsInfo, AccountWithUsage } from "../types";
+import type { AccountResetCredits, AccountWithUsage } from "../types";
 import { invokeBackend } from "../lib/platform";
 import { AccountUsageStats } from "./AccountUsageStats";
 import { ResetCreditsMenu } from "./ResetCreditsMenu";
+import { getResetCreditsDisplayCount, queueResetCreditsCheck } from "../lib/resetCredits";
 import { UsageBar } from "./UsageBar";
 
 const RESET_CREDITS_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -120,6 +121,9 @@ export function AccountCard({
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState(account.name);
   const [resetCredits, setResetCredits] = useState<AccountResetCredits | null>(null);
+  const [resetCreditsError, setResetCreditsError] = useState(false);
+  const [resetCreditsFailures, setResetCreditsFailures] = useState(0);
+  const [resetCreditsLoading, setResetCreditsLoading] = useState(false);
   const [statsOpen, setStatsOpen] = useState<boolean>(() => {
     if (typeof window === "undefined") return account.is_active;
     try {
@@ -167,6 +171,7 @@ export function AccountCard({
     setIsRefreshing(true);
     try {
       await onRefresh();
+      void loadResetCredits();
     } finally {
       setIsRefreshing(false);
     }
@@ -216,36 +221,43 @@ export function AccountCard({
     account.auth_mode === "chat_g_p_t" && account.plan_type?.toLowerCase() !== "free";
   const subscriptionStatus = getSubscriptionStatus(account.subscription_expires_at);
   const compactResetCredits = !account.is_active;
+  const hasResetCredits = getResetCreditsDisplayCount(resetCredits) > 0;
 
   const loadResetCredits = useCallback(async () => {
     const requestId = ++resetRequestSeq.current;
 
     if (account.auth_mode !== "chat_g_p_t") {
       setResetCredits(null);
+      setResetCreditsError(false);
       return;
     }
 
+    setResetCreditsLoading(true);
     try {
-      const stats = await invokeBackend<AccountUsageStatsInfo>("get_account_usage_stats", {
-        accountId: account.id,
-      });
+      const credits = await queueResetCreditsCheck(() =>
+        invokeBackend<AccountResetCredits>("get_account_reset_credits", {
+          accountId: account.id,
+        })
+      );
       if (requestId !== resetRequestSeq.current) return;
-      setResetCredits(stats.account_id === account.id ? stats.reset_credits : null);
-    } catch {
+      setResetCredits(credits);
+      setResetCreditsError(false);
+      setResetCreditsFailures(0);
+    } catch (error) {
       if (requestId !== resetRequestSeq.current) return;
-      setResetCredits(null);
+      console.warn("Could not check reset credits:", error);
+      // Preserve the last confirmed count rather than implying zero resets.
+      setResetCreditsError(true);
+      setResetCreditsFailures((failures) => Math.min(failures + 1, 4));
+    } finally {
+      if (requestId === resetRequestSeq.current) setResetCreditsLoading(false);
     }
   }, [account.auth_mode, account.id]);
 
-  const handleStatsLoaded = useCallback(
-    (stats: AccountUsageStatsInfo | null) => {
-      setResetCredits(stats?.account_id === account.id ? stats.reset_credits : null);
-    },
-    [account.id]
-  );
-
   useEffect(() => {
     setResetCredits(null);
+    setResetCreditsError(false);
+    setResetCreditsFailures(0);
 
     void loadResetCredits();
     const timer = window.setInterval(() => {
@@ -258,6 +270,16 @@ export function AccountCard({
     };
   }, [loadResetCredits]);
 
+  useEffect(() => {
+    if (!resetCreditsError || resetCreditsFailures < 1 || resetCreditsFailures > 3) return;
+    // Bound transient retries (5m, 15m, 30m); the ordinary 6h poll still runs.
+    const delays = [5, 15, 30] as const;
+    const timer = window.setTimeout(
+      () => void loadResetCredits(),
+      (delays[resetCreditsFailures - 1] ?? 30) * 60 * 1000,
+    );
+    return () => window.clearTimeout(timer);
+  }, [loadResetCredits, resetCreditsError, resetCreditsFailures]);
 
   return (
     <div
@@ -267,13 +289,16 @@ export function AccountCard({
           : "bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600"
       }`}
     >
-      {/* Header */}
-      <div className="flex items-start justify-between mb-3">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1">
+      {/* Header: only action buttons and plan badge reserve space beside the name.
+          On the narrow cards the reset-credit pill gets a row of its own; on the
+          full-width active card it sits beside the plan badge and wraps to its
+          own line when the window is too narrow for both. */}
+      <div className="mb-3 min-w-0">
+        <div className="mb-1 flex min-w-0 flex-wrap items-center gap-2">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
             {account.is_active && (
-              <span className="flex h-2 w-2">
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+              <span className="flex h-2 w-2 shrink-0">
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-green-500"></span>
               </span>
             )}
             {isEditing ? (
@@ -284,69 +309,91 @@ export function AccountCard({
                 onChange={(e) => setEditName(e.target.value)}
                 onBlur={handleRename}
                 onKeyDown={handleKeyDown}
-                className="font-semibold text-gray-900 dark:text-gray-100 bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded border border-gray-300 dark:border-gray-700 focus:outline-none focus:border-gray-500 dark:focus:border-gray-500 w-full"
+                className="min-w-0 w-full rounded border border-gray-300 bg-gray-100 px-2 py-0.5 font-semibold text-gray-900 focus:border-gray-500 focus:outline-none dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:focus:border-gray-500"
               />
             ) : (
               <h3
-                className="font-semibold text-gray-900 dark:text-gray-100 truncate cursor-pointer hover:text-gray-600 dark:hover:text-gray-300"
+                className="min-w-0 flex-1 truncate cursor-pointer font-semibold text-gray-900 hover:text-gray-600 dark:text-gray-100 dark:hover:text-gray-300"
                 onClick={() => {
                   if (masked) return;
                   setEditName(account.name);
                   setIsEditing(true);
                 }}
-                title={masked ? undefined : "Click to rename"}
+                title={masked ? undefined : `${account.name} — click to rename`}
               >
                 <BlurredText blur={masked}>{account.name}</BlurredText>
               </h3>
             )}
           </div>
-          {account.email && (
-            <p className="text-sm text-gray-500 dark:text-gray-400 truncate">
-              <BlurredText blur={masked}>{account.email}</BlurredText>
-            </p>
+
+          <div className="flex shrink-0 items-center justify-end gap-2">
+            {/* Refresh */}
+            <button
+              onClick={handleRefresh}
+              disabled={isRefreshing}
+              className="p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition-colors disabled:opacity-50"
+              title="Refresh usage"
+            >
+              <span className={`inline-block h-4 w-4 text-base leading-none ${isRefreshing ? "animate-spin" : ""}`}>↻</span>
+            </button>
+            {/* Eye toggle */}
+            {onToggleMask && (
+              <button
+                onClick={onToggleMask}
+                className="p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+                title={masked ? "Show info" : "Hide info"}
+              >
+                {masked ? (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
+                  </svg>
+                ) : (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                  </svg>
+                )}
+              </button>
+            )}
+            {/* Plan badge */}
+            <span
+              className={`px-2.5 py-1 text-xs font-medium rounded-full border ${planColorClass}`}
+            >
+              {planDisplay}
+            </span>
+          </div>
+
+          {hasResetCredits && !compactResetCredits && (
+            <div className="flex basis-full justify-end md:basis-auto">
+              <ResetCreditsMenu compact={false} resetCredits={resetCredits} />
+            </div>
           )}
         </div>
 
-        <div className="flex max-w-[60%] flex-wrap items-center justify-end gap-2">
-          {/* Refresh */}
+        {account.email && (
+          <p className="min-w-0 truncate text-sm text-gray-500 dark:text-gray-400">
+            <BlurredText blur={masked}>{account.email}</BlurredText>
+          </p>
+        )}
+        {hasResetCredits && compactResetCredits && (
+          <div className="mt-1 flex min-w-0 justify-end">
+            <ResetCreditsMenu
+              compact={compactResetCredits}
+              resetCredits={resetCredits}
+            />
+          </div>
+        )}
+        {resetCreditsError && (
           <button
-            onClick={handleRefresh}
-            disabled={isRefreshing}
-            className="p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition-colors disabled:opacity-50"
-            title="Refresh usage"
+            type="button"
+            onClick={() => void loadResetCredits()}
+            disabled={resetCreditsLoading}
+            title="Reset credits could not be checked. Your reset count may be out of date."
+            className="mt-1 text-[11px] text-amber-700 underline decoration-dotted disabled:opacity-50 dark:text-amber-300"
           >
-            <span className={`inline-block h-4 w-4 text-base leading-none ${isRefreshing ? "animate-spin" : ""}`}>↻</span>
+            {resetCreditsLoading ? "Checking resets…" : "Resets not verified · Retry"}
           </button>
-          {/* Eye toggle */}
-          {onToggleMask && (
-            <button
-              onClick={onToggleMask}
-              className="p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
-              title={masked ? "Show info" : "Hide info"}
-            >
-              {masked ? (
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
-                </svg>
-              ) : (
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                </svg>
-              )}
-            </button>
-          )}
-          {/* Plan badge */}
-          <span
-            className={`px-2.5 py-1 text-xs font-medium rounded-full border ${planColorClass}`}
-          >
-            {planDisplay}
-          </span>
-          <ResetCreditsMenu
-            compact={compactResetCredits}
-            resetCredits={resetCredits}
-          />
-        </div>
+        )}
       </div>
 
       {/* Usage */}
@@ -467,7 +514,6 @@ export function AccountCard({
         open={statsOpen}
         usage={account.usage}
         usageLoading={account.usageLoading}
-        onStatsLoaded={handleStatsLoaded}
       />
     </div>
   );
