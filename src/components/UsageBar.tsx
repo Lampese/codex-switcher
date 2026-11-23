@@ -1,4 +1,5 @@
 import type { UsageInfo } from "../types";
+import { formatDateTime } from "../lib/dateTimeFormat";
 import { formatUsageError } from "../lib/usageError";
 
 interface UsageBarProps {
@@ -19,14 +20,12 @@ function formatResetTime(resetAt: number | null | undefined): string {
 function formatExactResetTime(resetAt: number | null | undefined): string {
   if (!resetAt) return "";
 
-  const date = new Date(resetAt * 1000);
-  const month = new Intl.DateTimeFormat(undefined, { month: "long" }).format(date);
-  const day = date.getDate();
-  const minutes = String(date.getMinutes()).padStart(2, "0");
-  const period = date.getHours() >= 12 ? "PM" : "AM";
-  const hour12 = date.getHours() % 12 || 12;
-
-  return `${month} ${day}, ${hour12}:${minutes} ${period}`;
+  return formatDateTime(new Date(resetAt * 1000), {
+    month: "long",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 function formatWindowDuration(minutes: number | null | undefined): string {

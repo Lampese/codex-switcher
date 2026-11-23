@@ -12,6 +12,7 @@ import {
   readAutoWarmupAllEnabled,
   writeAutoWarmupAllEnabled,
 } from "./lib/autoWarmup";
+import { formatDate, formatTime } from "./lib/dateTimeFormat";
 
 const TRAY_REFRESH_EVENT = "tray-refresh";
 const ACCOUNTS_CHANGED_EVENT = "accounts-changed";
@@ -80,14 +81,10 @@ function formatExactResetTime(
   const diff = resetAt - Math.floor(Date.now() / 1000);
 
   if (isWeekly && diff > 86_400) {
-    return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(date);
+    return formatDate(date, { month: "short", day: "numeric" });
   }
 
-  const minutes = String(date.getMinutes()).padStart(2, "0");
-  const period = date.getHours() >= 12 ? "PM" : "AM";
-  const hour12 = date.getHours() % 12 || 12;
-
-  return `${hour12}:${minutes} ${period}`;
+  return formatTime(date);
 }
 
 function formatTokens(tokens: number | null | undefined): string {

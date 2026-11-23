@@ -47,6 +47,11 @@ pub struct AppSettings {
     pub dock_display_mode: DockDisplayMode,
     #[serde(default = "default_close_behavior_prompt_enabled")]
     pub close_behavior_prompt_enabled: bool,
+    /// Windows only: read/write the Codex home inside WSL instead of the
+    /// Windows user profile (#55). Ignored on other platforms.
+    pub use_wsl_codex: bool,
+    /// Optional WSL distro name; `None` uses the default distro.
+    pub wsl_distro: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -55,6 +60,8 @@ impl Default for AppSettings {
             tray_display_mode: TrayDisplayMode::default(),
             dock_display_mode: DockDisplayMode::default(),
             close_behavior_prompt_enabled: true,
+            use_wsl_codex: false,
+            wsl_distro: None,
         }
     }
 }
@@ -475,6 +482,10 @@ pub struct RateLimitStatusPayload {
 pub struct RateLimitDetails {
     pub primary_window: Option<RateLimitWindow>,
     pub secondary_window: Option<RateLimitWindow>,
+    /// Monthly quota window reported by some plans instead of/in addition to
+    /// the usual session and weekly windows (#156).
+    #[serde(default)]
+    pub monthly_window: Option<RateLimitWindow>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -3,6 +3,14 @@ import type { DesktopReopenPreference } from "../lib/desktopReopen";
 import type { CodexClosePreference } from "../lib/codexClosePreference";
 import { CHECK_FOR_UPDATES_EVENT } from "./UpdateChecker";
 import { invokeBackend, isTauriRuntime } from "../lib/platform";
+import {
+  DEFAULT_DATE_TIME_PREFERENCES,
+  readDateTimePreferences,
+  writeDateTimePreferences,
+  type DateFormatPreference,
+  type DateTimePreferences,
+  type HourFormatPreference,
+} from "../lib/dateTimeFormat";
 import type { DockDisplayMode } from "../types";
 
 type TrayDisplayMode = "icon_and_session" | "active_usage_text" | "hidden";
@@ -31,6 +39,16 @@ export function SettingsModal({
   onClose,
 }: SettingsModalProps) {
   const [displaySettings, setDisplaySettings] = useState<DisplaySettings | null>(null);
+  const [dateTimePrefs, setDateTimePrefs] = useState<DateTimePreferences>(
+    DEFAULT_DATE_TIME_PREFERENCES
+  );
+  const [autoRedeem, setAutoRedeem] = useState(false);
+  const [wslConfig, setWslConfig] = useState<{
+    supported: boolean;
+    enabled: boolean;
+    distro: string | null;
+    distros: string[];
+  } | null>(null);
   const [saving, setSaving] = useState(false);
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -64,6 +82,30 @@ export function SettingsModal({
       if (currentRequest === requestId.current) setError(String(err));
     }
   }, []);
+
+  useEffect(() => {
+    setDateTimePrefs(readDateTimePreferences());
+    if (!desktop) return;
+    void invokeBackend<boolean>("get_auto_redeem_enabled")
+      .then(setAutoRedeem)
+      .catch((err) => console.error("Failed to read auto-redeem setting:", err));
+    void invokeBackend<{
+      supported: boolean;
+      enabled: boolean;
+      distro: string | null;
+      distros: string[];
+    }>("get_wsl_config")
+      .then(setWslConfig)
+      .catch((err) => console.error("Failed to read WSL setting:", err));
+  }, [desktop]);
+
+  const updateDateTimePrefs = (patch: Partial<DateTimePreferences>) => {
+    setDateTimePrefs((current) => {
+      const next = { ...current, ...patch };
+      writeDateTimePreferences(next);
+      return next;
+    });
+  };
 
   useEffect(() => {
     if (!desktop) return;
@@ -167,6 +209,164 @@ export function SettingsModal({
               <div className="border-t border-gray-100 dark:border-gray-800" />
             </>
           )}
+          <label htmlFor="date-format" className="block text-sm font-medium text-gray-900 dark:text-gray-100">
+            Date format
+          </label>
+          <select
+            id="date-format"
+            value={dateTimePrefs.dateFormat}
+            onChange={(event) =>
+              updateDateTimePrefs({ dateFormat: event.target.value as DateFormatPreference })
+            }
+            className={selectClassName}
+          >
+            <option value="system">System default</option>
+            <option value="dmy">Day Month Year (23 Nov 2026)</option>
+            <option value="mdy">Month Day, Year (Nov 23, 2026)</option>
+            <option value="ymd">Year-Month-Day (2026-11-23)</option>
+          </select>
+          <label htmlFor="hour-format" className="block text-sm font-medium text-gray-900 dark:text-gray-100">
+            Time format
+          </label>
+          <select
+            id="hour-format"
+            value={dateTimePrefs.hourFormat}
+            onChange={(event) =>
+              updateDateTimePrefs({ hourFormat: event.target.value as HourFormatPreference })
+            }
+            className={selectClassName}
+          >
+            <option value="system">System default</option>
+            <option value="h12">12-hour</option>
+            <option value="h24">24-hour</option>
+          </select>
+          <label htmlFor="timezone-override" className="block text-sm font-medium text-gray-900 dark:text-gray-100">
+            Timezone
+          </label>
+          <input
+            id="timezone-override"
+            type="text"
+            list="timezone-override-options"
+            value={dateTimePrefs.timeZone === "system" ? "" : dateTimePrefs.timeZone}
+            placeholder="System timezone"
+            onChange={(event) => {
+              const value = event.target.value.trim();
+              if (!value) {
+                updateDateTimePrefs({ timeZone: "system" });
+                return;
+              }
+              try {
+                new Intl.DateTimeFormat("en-US", { timeZone: value });
+                updateDateTimePrefs({ timeZone: value });
+              } catch {
+                // Invalid IANA name; keep it in the field but don't persist.
+                setDateTimePrefs((current) => ({ ...current, timeZone: value }));
+              }
+            }}
+            className={selectClassName}
+          />
+          <datalist id="timezone-override-options">
+            {(Intl as unknown as { supportedValuesOf?: (key: string) => string[] })
+              .supportedValuesOf?.("timeZone")
+              .map((zone) => <option key={zone} value={zone} />)}
+          </datalist>
+          <p className="text-sm text-gray-500 dark:text-gray-400">
+            Applies to dates and times shown in the app, e.g. credit expiries and reset times.
+          </p>
+          <div className="border-t border-gray-100 dark:border-gray-800" />
+          {desktop ? (
+            <>
+              <label htmlFor="auto-redeem-credits" className="flex items-start gap-2">
+                <input
+                  id="auto-redeem-credits"
+                  type="checkbox"
+                  checked={autoRedeem}
+                  onChange={async (event) => {
+                    const value = event.target.checked;
+                    setAutoRedeem(value);
+                    try {
+                      await invokeBackend("set_auto_redeem_enabled", { enabled: value });
+                    } catch (err) {
+                      setAutoRedeem(!value);
+                      setError(String(err));
+                    }
+                  }}
+                  className="mt-1"
+                />
+                <span>
+                  <span className="block text-sm font-medium text-gray-900 dark:text-gray-100">
+                    Auto-redeem reset credits
+                  </span>
+                  <span className="block text-sm text-gray-500 dark:text-gray-400">
+                    Consume available rate-limit reset credits shortly before they expire.
+                  </span>
+                </span>
+              </label>
+              <div className="border-t border-gray-100 dark:border-gray-800" />
+            </>
+          ) : null}
+          {wslConfig?.supported ? (
+            <>
+              <label htmlFor="use-wsl-codex" className="flex items-start gap-2">
+                <input
+                  id="use-wsl-codex"
+                  type="checkbox"
+                  checked={wslConfig.enabled}
+                  onChange={async (event) => {
+                    const value = event.target.checked;
+                    const previous = wslConfig;
+                    setWslConfig({ ...wslConfig, enabled: value });
+                    try {
+                      await invokeBackend("set_wsl_config", {
+                        enabled: value,
+                        distro: wslConfig.distro,
+                      });
+                    } catch (err) {
+                      setWslConfig(previous);
+                      setError(String(err));
+                    }
+                  }}
+                  className="mt-1"
+                />
+                <span>
+                  <span className="block text-sm font-medium text-gray-900 dark:text-gray-100">
+                    Use WSL Codex
+                  </span>
+                  <span className="block text-sm text-gray-500 dark:text-gray-400">
+                    Manage the Codex installation inside Windows Subsystem for Linux.
+                  </span>
+                </span>
+              </label>
+              {wslConfig.enabled && wslConfig.distros.length > 0 ? (
+                <select
+                  aria-label="WSL distribution"
+                  value={wslConfig.distro ?? wslConfig.distros[0]}
+                  onChange={async (event) => {
+                    const distro = event.target.value;
+                    const previous = wslConfig;
+                    setWslConfig({ ...wslConfig, distro });
+                    try {
+                      await invokeBackend("set_wsl_config", {
+                        enabled: wslConfig.enabled,
+                        distro,
+                      });
+                    } catch (err) {
+                      setWslConfig(previous);
+                      setError(String(err));
+                    }
+                  }}
+                  className={selectClassName}
+                >
+                  {wslConfig.distros.map((distro) => (
+                    <option key={distro} value={distro}>
+                      {distro}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
+              <div className="border-t border-gray-100 dark:border-gray-800" />
+            </>
+          ) : null}
           <label htmlFor="codex-close-preference" className="block text-sm font-medium text-gray-900 dark:text-gray-100">
             Codex close method
           </label>

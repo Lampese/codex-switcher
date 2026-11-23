@@ -4,23 +4,28 @@ pub mod api;
 #[cfg(desktop)]
 pub mod app_menu;
 pub mod auth;
+pub mod auto_redeem;
 pub mod auto_warmup;
 pub mod commands;
 #[cfg(desktop)]
 pub mod tray;
 pub mod types;
 pub mod web;
+pub mod wsl;
 
 use commands::{
-    ack_close_behavior_prompt, add_account_from_file, cancel_codex_session_recovery, cancel_login,
+    ack_close_behavior_prompt, add_account_from_file, add_accounts_from_files,
+    cancel_codex_session_recovery, cancel_login,
     check_codex_processes, complete_close_behavior, complete_login, delete_account,
     export_accounts_full_encrypted_file, export_accounts_slim_text, get_account_reset_credits,
-    get_account_usage_stats, get_active_account_info, get_dock_display_mode,
+    get_account_usage_stats, get_active_account_info, get_auto_redeem_enabled,
+    get_dock_display_mode,
     get_masked_account_ids, get_usage, hide_tray_window, import_accounts_full_encrypted_file,
     import_accounts_slim_text, kill_codex_processes, list_accounts,
     open_codex_recovery_conversation, open_main_window, prepare_codex_session_recovery, quit_app,
     refresh_account_metadata, refresh_all_accounts_usage, rename_account, report_usage,
-    resume_codex_session_recovery, set_auto_warmup_config, set_dock_display_mode,
+    resume_codex_session_recovery, set_auto_redeem_enabled, set_auto_warmup_config,
+    set_dock_display_mode,
     set_masked_account_ids, start_login, switch_account, warmup_account, warmup_all_accounts,
 };
 use tauri::Emitter;
@@ -28,6 +33,11 @@ use tauri::Emitter;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Keep a single app instance: a second launch restores the existing
+        // window instead of spawning a duplicate process (#204).
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            commands::restore_main_window(app);
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
@@ -39,6 +49,7 @@ pub fn run() {
                 app_menu::setup(app.handle())?;
                 tray::setup(app.handle())?;
                 auto_warmup::spawn_scheduler(app.handle().clone());
+                auto_redeem::spawn_scheduler(app.handle().clone());
             }
             Ok(())
         })
@@ -73,6 +84,7 @@ pub fn run() {
             list_accounts,
             get_active_account_info,
             add_account_from_file,
+            add_accounts_from_files,
             switch_account,
             delete_account,
             rename_account,
@@ -91,6 +103,8 @@ pub fn run() {
             get_usage,
             get_account_usage_stats,
             get_account_reset_credits,
+            get_auto_redeem_enabled,
+            set_auto_redeem_enabled,
             refresh_account_metadata,
             refresh_all_accounts_usage,
             warmup_account,
@@ -112,6 +126,9 @@ pub fn run() {
             set_dock_display_mode,
             complete_close_behavior,
             ack_close_behavior_prompt,
+            // WSL
+            wsl::get_wsl_config,
+            wsl::set_wsl_config,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

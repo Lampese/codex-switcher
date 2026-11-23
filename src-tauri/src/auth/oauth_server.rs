@@ -16,7 +16,15 @@ use crate::types::{parse_chatgpt_id_token_claims, OAuthLoginInfo, StoredAccount}
 
 const DEFAULT_ISSUER: &str = "https://auth.openai.com";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-const DEFAULT_PORT: u16 = 1455; // Same as official Codex
+/// Ports registered with OpenAI as OAuth redirect targets for this client id.
+/// Only these ports produce a valid authorize request; a random local port
+/// would always fail provider-side validation.
+const REGISTERED_PORTS: [u16; 2] = [1455, 1457];
+const DEFAULT_PORT: u16 = REGISTERED_PORTS[0]; // Same as official Codex
+/// Env var overriding the host interface the callback server binds to.
+/// Defaults to loopback; set e.g. `0.0.0.0` when the app runs in a container
+/// and the browser callback is published on host loopback.
+const BIND_HOST_ENV: &str = "CODEX_SWITCHER_OAUTH_HOST";
 
 /// PKCE codes for OAuth
 #[derive(Debug, Clone)]
@@ -59,7 +67,10 @@ fn build_authorize_url(
         ("response_type", "code"),
         ("client_id", client_id),
         ("redirect_uri", redirect_uri),
-        ("scope", "openid profile email offline_access"),
+        (
+            "scope",
+            "openid profile email offline_access api.connectors.read api.connectors.invoke",
+        ),
         ("code_challenge", &pkce.code_challenge),
         ("code_challenge_method", "S256"),
         ("id_token_add_organizations", "true"),
@@ -147,27 +158,14 @@ pub async fn start_oauth_login(
     println!("[OAuth] Starting login for account: {account_name}");
     println!("[OAuth] PKCE challenge: {}", &pkce.code_challenge[..20]);
 
-    // Try official default port first; fall back to a random free port if it is busy.
-    let server = match Server::http(format!("127.0.0.1:{DEFAULT_PORT}")) {
-        Ok(server) => server,
-        Err(default_err) => {
-            println!(
-                "[OAuth] Default callback port {DEFAULT_PORT} unavailable ({default_err}), using a random local port"
-            );
-            Server::http("127.0.0.1:0").map_err(|fallback_err| {
-                anyhow::anyhow!(
-                    "Failed to start OAuth server: default port {DEFAULT_PORT} error: {default_err}; fallback error: {fallback_err}"
-                )
-            })?
-        }
-    };
+    let server = start_callback_server()?;
 
     let actual_port = match server.server_addr().to_ip() {
         Some(addr) => addr.port(),
         None => anyhow::bail!("Failed to determine server port"),
     };
 
-    let redirect_uri = format!("http://localhost:{actual_port}/auth/callback");
+    let redirect_uri = format!("http://127.0.0.1:{actual_port}/auth/callback");
     let auth_url = build_authorize_url(DEFAULT_ISSUER, CLIENT_ID, &redirect_uri, &pkce, &state);
 
     println!("[OAuth] Server started on port {actual_port}");
@@ -205,6 +203,46 @@ pub async fn start_oauth_login(
     Ok((login_info, rx, cancelled))
 }
 
+/// Bind the OAuth callback listener on the first registered port that is free.
+///
+/// OpenAI only accepts redirects to the registered callback ports (1455, then
+/// 1457 as the official fallback), so binding a random port would guarantee a
+/// provider-side `invalid_authorize_request`. If neither port is available we
+/// surface a clear error instead.
+fn start_callback_server() -> Result<Server> {
+    let bind_host = std::env::var(BIND_HOST_ENV)
+        .map(|host| host.trim().to_string())
+        .unwrap_or_else(|_| "127.0.0.1".to_string());
+
+    let mut last_err: Option<anyhow::Error> = None;
+    for port in REGISTERED_PORTS {
+        match Server::http(format!("{bind_host}:{port}")) {
+            Ok(server) => {
+                if port != DEFAULT_PORT {
+                    println!("[OAuth] Falling back to registered callback port {port}");
+                }
+                return Ok(server);
+            }
+            Err(error) => {
+                println!("[OAuth] Callback port {port} on {bind_host} unavailable: {error}");
+                last_err = Some(anyhow::anyhow!(error.to_string()));
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no ports attempted"))).context(format!(
+        "Failed to start OAuth callback server on {bind_host} (tried ports {}). \
+         Another application may be holding the port — on Windows, VS Code or the Codex extension \
+         commonly occupies {DEFAULT_PORT}, and WinNAT port reservations can also cover it. \
+         Free the port or restart the app and try again.",
+        REGISTERED_PORTS
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
 /// Run the OAuth callback server
 async fn run_oauth_server(
     server: Arc<Server>,
@@ -214,7 +252,7 @@ async fn run_oauth_server(
     account_name: String,
     cancelled: Arc<AtomicBool>,
 ) -> Result<OAuthLoginResult> {
-    let timeout = Duration::from_secs(300); // 5 minute timeout
+    let timeout = Duration::from_secs(600); // 10 minute timeout
     let start = std::time::Instant::now();
 
     loop {

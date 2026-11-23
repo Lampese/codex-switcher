@@ -262,14 +262,25 @@ fn create_tray_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 fn handle_tray_icon_event<R: Runtime>(tray: &tauri::tray::TrayIcon<R>, event: TrayIconEvent) {
-    if let TrayIconEvent::Click {
-        button: MouseButton::Left,
-        button_state: MouseButtonState::Up,
-        position,
-        ..
-    } = event
-    {
-        toggle_tray_window(tray.app_handle(), position);
+    match event {
+        TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            position,
+            ..
+        } => {
+            toggle_tray_window(tray.app_handle(), position);
+        }
+        // Double-click restores the main window (#204). On macOS 27 a left-click
+        // may be swallowed while a native menu is attached, so double-click is
+        // the reliable way to reopen the app from the tray.
+        TrayIconEvent::DoubleClick {
+            button: MouseButton::Left,
+            ..
+        } => {
+            crate::commands::restore_main_window(tray.app_handle());
+        }
+        _ => {}
     }
 }
 

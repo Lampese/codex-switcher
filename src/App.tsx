@@ -193,7 +193,7 @@ function App() {
     switchAccount,
     deleteAccount,
     renameAccount,
-    importFromFile,
+    importFromFiles,
     exportAccountsSlimText,
     importAccountsSlimText,
     startOAuthLogin,
@@ -2316,7 +2316,7 @@ function App() {
       <AddAccountModal
         isOpen={isAddModalOpen}
         onClose={() => setIsAddModalOpen(false)}
-        onImportFile={importFromFile}
+        onImportFiles={importFromFiles}
         onStartOAuth={startOAuthLogin}
         onCompleteOAuth={completeOAuthLogin}
         onCancelOAuth={cancelOAuthLogin}

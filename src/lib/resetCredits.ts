@@ -1,4 +1,5 @@
 import type { AccountResetCredit, AccountResetCredits } from "../types";
+import { formatDateTime } from "./dateTimeFormat.ts";
 
 interface ResetCreditDateTimeFormatOptions {
   compact?: boolean;
@@ -68,12 +69,13 @@ export function formatResetCreditDateTime(
   const expiry = new Date(expiresAt);
   if (Number.isNaN(expiry.getTime())) return "Expiry unavailable";
 
-  return new Intl.DateTimeFormat(options.locale, {
+  return formatDateTime(expiry, {
     month: "short",
     day: "numeric",
     ...(options.compact ? {} : { year: "numeric" }),
     hour: "numeric",
     minute: "2-digit",
+    ...(options.locale ? { locale: options.locale } : {}),
     ...(options.timeZone ? { timeZone: options.timeZone } : {}),
-  }).format(expiry);
+  });
 }

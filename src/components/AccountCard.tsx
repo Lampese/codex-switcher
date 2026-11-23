@@ -4,6 +4,7 @@ import { invokeBackend } from "../lib/platform";
 import { AccountUsageStats } from "./AccountUsageStats";
 import { ResetCreditsMenu } from "./ResetCreditsMenu";
 import { getResetCreditsDisplayCount, queueResetCreditsCheck } from "../lib/resetCredits";
+import { formatDate } from "../lib/dateTimeFormat";
 import { UsageBar } from "./UsageBar";
 
 const RESET_CREDITS_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -36,7 +37,7 @@ function formatLastRefresh(date: Date | null): string {
   if (diff < 60) return `${diff}s ago`;
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return date.toLocaleDateString();
+  return formatDate(date);
 }
 
 function getSubscriptionStatus(timestamp: string | null | undefined): {
@@ -51,11 +52,7 @@ function getSubscriptionStatus(timestamp: string | null | undefined): {
   }
 
   const expiryDate = new Date(timestamp);
-  const formattedDate = new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  }).format(expiryDate);
+  const formattedDate = formatDate(expiryDate);
 
   const remainingMs = expiryDate.getTime() - Date.now();
   if (remainingMs <= 0) {

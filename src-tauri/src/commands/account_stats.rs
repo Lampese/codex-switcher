@@ -277,7 +277,7 @@ async fn parse_profile_usage_response(
     Ok(map_profile_usage(account_id, payload))
 }
 
-async fn fetch_reset_credits(account: &StoredAccount) -> anyhow::Result<AccountResetCredits> {
+pub(crate) async fn fetch_reset_credits(account: &StoredAccount) -> anyhow::Result<AccountResetCredits> {
     let (access_token, chatgpt_account_id) = extract_chatgpt_auth(account)?;
     // Bound the queued card requests: one stalled endpoint must not block others.
     let client = reqwest::Client::builder()
@@ -299,6 +299,68 @@ async fn fetch_reset_credits(account: &StoredAccount) -> anyhow::Result<AccountR
 
     let payload: ResetCreditsResponse = response.json().await?;
     Ok(map_reset_credits(payload, Utc::now()))
+}
+
+#[tauri::command]
+pub async fn get_auto_redeem_enabled() -> Result<bool, String> {
+    crate::auto_redeem::load_state()
+        .map(|state| state.enabled)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_auto_redeem_enabled(enabled: bool) -> Result<(), String> {
+    crate::auto_redeem::set_enabled(enabled).map_err(|e| e.to_string())
+}
+
+const CHATGPT_RESET_CREDITS_CONSUME_URL: &str =
+    "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
+
+/// Consume an available rate-limit reset credit for an account. Retries once
+/// with refreshed tokens on a 401.
+pub async fn redeem_reset_credit(
+    account: &StoredAccount,
+    credit_id: &str,
+) -> anyhow::Result<()> {
+    let fresh_account = ensure_chatgpt_tokens_fresh(account).await?;
+    let (access_token, chatgpt_account_id) = extract_chatgpt_auth(&fresh_account)?;
+    let client = reqwest::Client::new();
+    let redeem_request_id = uuid::Uuid::new_v4().to_string();
+
+    let mut response = client
+        .post(CHATGPT_RESET_CREDITS_CONSUME_URL)
+        .headers(build_reset_credits_headers(
+            access_token,
+            chatgpt_account_id,
+        )?)
+        .json(&serde_json::json!({
+            "credit_id": credit_id,
+            "redeem_request_id": redeem_request_id,
+        }))
+        .send()
+        .await?;
+
+    if response.status() == StatusCode::UNAUTHORIZED {
+        let refreshed_account = refresh_chatgpt_tokens(&fresh_account).await?;
+        let (retry_token, retry_account_id) = extract_chatgpt_auth(&refreshed_account)?;
+        response = client
+            .post(CHATGPT_RESET_CREDITS_CONSUME_URL)
+            .headers(build_reset_credits_headers(retry_token, retry_account_id)?)
+            .json(&serde_json::json!({
+                "credit_id": credit_id,
+                "redeem_request_id": redeem_request_id,
+            }))
+            .send()
+            .await?;
+    }
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("Failed to consume reset credit: {status} - {body}");
+    }
+
+    Ok(())
 }
 
 fn map_profile_usage(account_id: &str, payload: ProfileUsageResponse) -> AccountUsageStats {

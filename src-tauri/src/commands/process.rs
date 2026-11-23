@@ -451,6 +451,13 @@ fn process_exists(pid: u32) -> bool {
 
 /// Find all running codex processes. Returns (active_pids, background_count)
 fn find_codex_processes() -> anyhow::Result<(Vec<u32>, usize)> {
+    // When the user pointed the Windows build at their WSL Codex install,
+    // detect Codex processes inside WSL instead of on the Windows side (#55).
+    #[cfg(windows)]
+    if let Some(wsl_pids) = crate::wsl::codex_processes() {
+        return Ok((wsl_pids, 0));
+    }
+
     #[cfg(unix)]
     {
         let mut pids = Vec::new();

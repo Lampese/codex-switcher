@@ -129,6 +129,125 @@ pub async fn add_account_from_auth_json_text(
     Ok(AccountInfo::from_stored(&stored, active_id))
 }
 
+/// One entry in a bulk auth.json import: raw file contents plus an optional
+/// display name (falls back to the account's email when blank).
+#[derive(Debug, serde::Deserialize)]
+pub struct AuthJsonImportEntry {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    pub contents: String,
+}
+
+/// Per-file outcome of a bulk auth.json import (#17). A failure in one file
+/// never aborts the rest of the batch.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkImportItemResult {
+    /// Path or file name the user picked.
+    pub source: String,
+    /// The imported account when the file imported cleanly.
+    pub account: Option<AccountInfo>,
+    /// The error when the file could not be imported.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkImportSummary {
+    pub results: Vec<BulkImportItemResult>,
+    pub imported_count: usize,
+    pub failed_count: usize,
+}
+
+fn bulk_import_one(
+    source: String,
+    imported: anyhow::Result<StoredAccount>,
+) -> BulkImportItemResult {
+    match imported.and_then(|account| add_account(account)) {
+        Ok(stored) => {
+            let store = load_accounts();
+            let active_id = store
+                .as_ref()
+                .ok()
+                .and_then(|store| store.active_account_id.clone());
+            BulkImportItemResult {
+                source,
+                account: Some(AccountInfo::from_stored(&stored, active_id.as_deref())),
+                error: None,
+            }
+        }
+        Err(error) => BulkImportItemResult {
+            source,
+            account: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+/// Import several auth.json files at once (#17). The optional `name` only
+/// applies when exactly one file is being imported; bulk imports derive each
+/// account's name from its credentials.
+#[tauri::command]
+pub async fn add_accounts_from_files(
+    paths: Vec<String>,
+    name: Option<String>,
+) -> Result<BulkImportSummary, String> {
+    if paths.is_empty() {
+        return Err("No auth.json files selected".to_string());
+    }
+
+    let single_name = if paths.len() == 1 {
+        name.unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let mut results = Vec::with_capacity(paths.len());
+    for path in paths {
+        let source = std::path::Path::new(&path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| path.clone());
+        let imported = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read file: {path}"))
+            .and_then(|contents| import_from_auth_json_contents(&contents, single_name.clone()));
+        results.push(bulk_import_one(source, imported));
+    }
+
+    let imported_count = results.iter().filter(|r| r.account.is_some()).count();
+    Ok(BulkImportSummary {
+        failed_count: results.len() - imported_count,
+        results,
+        imported_count,
+    })
+}
+
+/// Import several auth.json payloads at once (browser runtime variant, #17).
+pub async fn add_accounts_from_auth_json_texts(
+    entries: Vec<AuthJsonImportEntry>,
+) -> Result<BulkImportSummary, String> {
+    if entries.is_empty() {
+        return Err("No auth.json files selected".to_string());
+    }
+
+    let mut results = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let source = entry.source.unwrap_or_else(|| "auth.json".to_string());
+        let imported =
+            import_from_auth_json_contents(&entry.contents, entry.name.unwrap_or_default());
+        results.push(bulk_import_one(source, imported));
+    }
+
+    let imported_count = results.iter().filter(|r| r.account.is_some()).count();
+    Ok(BulkImportSummary {
+        failed_count: results.len() - imported_count,
+        results,
+        imported_count,
+    })
+}
+
 /// Switch to a different account
 #[tauri::command]
 pub async fn switch_account(account_id: String) -> Result<(), String> {
@@ -954,5 +1073,76 @@ mod active_account_repair_tests {
 
         let live = read_current_auth().unwrap().unwrap();
         assert_eq!(live.openai_api_key.as_deref(), Some("sk-current"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bulk_import_collects_per_item_results_without_aborting() {
+        let _home = crate::auth::test_support::TestHome::new();
+
+        let summary = super::add_accounts_from_auth_json_texts(vec![
+            super::AuthJsonImportEntry {
+                name: Some("Alice".into()),
+                source: Some("alice.json".into()),
+                contents: r#"{"OPENAI_API_KEY":"sk-alice"}"#.into(),
+            },
+            super::AuthJsonImportEntry {
+                name: Some("Bob".into()),
+                source: Some("bob.json".into()),
+                contents: "this is not json".into(),
+            },
+            super::AuthJsonImportEntry {
+                name: Some("Carol".into()),
+                source: Some("carol.json".into()),
+                contents: r#"{"OPENAI_API_KEY":"sk-carol"}"#.into(),
+            },
+        ])
+        .await
+        .unwrap();
+
+        assert_eq!(summary.imported_count, 2);
+        assert_eq!(summary.failed_count, 1);
+        assert_eq!(summary.results.len(), 3);
+        assert_eq!(summary.results[0].source, "alice.json");
+        assert!(summary.results[0].account.is_some());
+        assert_eq!(summary.results[1].source, "bob.json");
+        assert!(summary.results[1].account.is_none());
+        assert!(summary.results[1].error.is_some());
+        assert_eq!(summary.results[2].source, "carol.json");
+        assert!(summary.results[2].account.is_some());
+
+        let stored = load_accounts().unwrap();
+        assert_eq!(stored.accounts.len(), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bulk_import_flags_duplicate_credentials_as_item_failure() {
+        let _home = crate::auth::test_support::TestHome::new();
+        let entry = || super::AuthJsonImportEntry {
+            name: None,
+            source: Some("dup.json".into()),
+            contents: r#"{"OPENAI_API_KEY":"sk-same"}"#.into(),
+        };
+
+        let summary = super::add_accounts_from_auth_json_texts(vec![entry(), entry()])
+            .await
+            .unwrap();
+
+        assert_eq!(summary.imported_count, 1);
+        assert_eq!(summary.failed_count, 1);
+        assert!(summary.results[0].account.is_some());
+        assert!(summary.results[1].account.is_none());
+        assert!(summary.results[1].error.is_some());
+        assert_eq!(load_accounts().unwrap().accounts.len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bulk_import_rejects_empty_selection() {
+        let _home = crate::auth::test_support::TestHome::new();
+        assert!(super::add_accounts_from_auth_json_texts(vec![])
+            .await
+            .is_err());
+        assert!(super::add_accounts_from_files(vec![], None)
+            .await
+            .is_err());
     }
 }
