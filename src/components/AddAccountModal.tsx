@@ -1,16 +1,18 @@
 import { useState } from "react";
 import {
-  describeFileSource,
+  describeFileSources,
+  fileSourceName,
   isTauriRuntime,
   openExternalUrl,
-  pickAuthJsonFile,
+  pickAuthJsonFiles,
   type FileSource,
 } from "../lib/platform";
+import type { BulkImportSummary } from "../types";
 
 interface AddAccountModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onImportFile: (source: FileSource, name: string) => Promise<void>;
+  onImportFiles: (sources: FileSource[], name: string) => Promise<BulkImportSummary>;
   onStartOAuth: (name: string) => Promise<{ auth_url: string }>;
   onCompleteOAuth: () => Promise<unknown>;
   onCancelOAuth: () => Promise<void>;
@@ -21,14 +23,14 @@ type Tab = "oauth" | "import";
 export function AddAccountModal({
   isOpen,
   onClose,
-  onImportFile,
+  onImportFiles,
   onStartOAuth,
   onCompleteOAuth,
   onCancelOAuth,
 }: AddAccountModalProps) {
   const [activeTab, setActiveTab] = useState<Tab>("oauth");
   const [name, setName] = useState("");
-  const [fileSource, setFileSource] = useState<FileSource | null>(null);
+  const [fileSources, setFileSources] = useState<FileSource[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [oauthPending, setOauthPending] = useState(false);
@@ -39,7 +41,7 @@ export function AddAccountModal({
 
   const resetForm = () => {
     setName("");
-    setFileSource(null);
+    setFileSources([]);
     setError(null);
     setLoading(false);
     setOauthPending(false);
@@ -75,24 +77,37 @@ export function AddAccountModal({
 
   const handleSelectFile = async () => {
     try {
-      const selected = await pickAuthJsonFile();
-      if (selected) setFileSource(selected);
+      const selected = await pickAuthJsonFiles();
+      if (selected.length > 0) setFileSources(selected);
     } catch (err) {
       console.error("Failed to open file dialog:", err);
     }
   };
 
   const handleImportFile = async () => {
-    if (!fileSource) {
-      setError("Please select an auth.json file");
+    if (fileSources.length === 0) {
+      setError("Please select at least one auth.json file");
       return;
     }
 
     try {
       setLoading(true);
       setError(null);
-      await onImportFile(fileSource, name.trim());
-      handleClose();
+      const summary = await onImportFiles(fileSources, name.trim());
+      if (summary.failedCount === 0) {
+        handleClose();
+        return;
+      }
+      // Some files failed: keep the modal open and report per-file outcomes.
+      const failures = summary.results
+        .filter((item) => item.error)
+        .map((item) => `${item.source}: ${item.error}`);
+      setError(
+        `${summary.importedCount} imported, ${summary.failedCount} failed. ` +
+          failures.join("; ")
+      );
+      setFileSources([]);
+      setLoading(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setLoading(false);
@@ -222,11 +237,11 @@ export function AddAccountModal({
           {activeTab === "import" && (
             <div>
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Select auth.json file
+                Select auth.json file(s)
               </label>
               <div className="flex gap-2">
                 <div className="flex-1 px-4 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-sm text-gray-600 dark:text-gray-300 truncate">
-                  {describeFileSource(fileSource)}
+                  {describeFileSources(fileSources)}
                 </div>
                 <button
                   onClick={handleSelectFile}
@@ -235,8 +250,17 @@ export function AddAccountModal({
                   Browse...
                 </button>
               </div>
+              {fileSources.length > 1 && (
+                <ul className="mt-2 max-h-24 overflow-y-auto text-xs text-gray-500 dark:text-gray-400 space-y-0.5">
+                  {fileSources.map((source, index) => (
+                    <li key={index} className="truncate">
+                      {fileSourceName(source)}
+                    </li>
+                  ))}
+                </ul>
+              )}
               <p className="text-xs text-gray-400 dark:text-gray-500 mt-2">
-                Import credentials from an existing Codex auth.json file
+                Import credentials from one or more Codex auth.json files
               </p>
             </div>
           )}

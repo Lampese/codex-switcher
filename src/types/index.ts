@@ -122,3 +122,15 @@ export interface ImportAccountsSummary {
   imported_count: number;
   skipped_count: number;
 }
+
+export interface BulkImportItemResult {
+  source: string;
+  account: AccountInfo | null;
+  error: string | null;
+}
+
+export interface BulkImportSummary {
+  results: BulkImportItemResult[];
+  importedCount: number;
+  failedCount: number;
+}

@@ -510,27 +510,33 @@ fn extract_rate_limits(
         return (None, None);
     };
 
-    match (details.primary_window, details.secondary_window) {
-        // The backend can temporarily omit the 5-hour window and promote the
-        // weekly window into primary_window. Keep UsageInfo semantic so every
-        // consumer still treats primary as session and secondary as weekly.
-        (Some(primary), None) if is_weekly_window(&primary) => (None, Some(primary)),
+    let (primary, mut secondary) = match (details.primary_window, details.secondary_window) {
+        // The backend can temporarily omit the 5-hour window and promote a
+        // longer window (weekly, monthly, ...) into primary_window. Keep
+        // UsageInfo semantic so every consumer still treats primary as
+        // session and secondary as the longer window.
+        (Some(primary), None) if !is_session_window(&primary) => (None, Some(primary)),
         (None, Some(secondary)) if is_session_window(&secondary) => (Some(secondary), None),
         (Some(primary), Some(secondary))
-            if is_weekly_window(&primary) && is_session_window(&secondary) =>
+            if !is_session_window(&primary) && is_session_window(&secondary) =>
         {
             (Some(secondary), Some(primary))
         }
         (primary, secondary) => (primary, secondary),
+    };
+
+    // Some plans report a dedicated monthly window (#156). Surface it in the
+    // secondary slot when that slot is free so the tray shows e.g. "30d:82%"
+    // instead of "H:-- W:--" on monthly-only plans.
+    if secondary.is_none() {
+        secondary = details.monthly_window;
     }
+
+    (primary, secondary)
 }
 
 fn is_session_window(window: &RateLimitWindow) -> bool {
     window.limit_window_seconds == Some(SESSION_WINDOW_SECONDS)
-}
-
-fn is_weekly_window(window: &RateLimitWindow) -> bool {
-    window.limit_window_seconds == Some(WEEKLY_WINDOW_SECONDS)
 }
 
 fn extract_credits(credits: Option<CreditStatusDetails>) -> Option<CreditStatusDetails> {
@@ -574,6 +580,7 @@ mod tests {
         let (session, weekly) = extract_rate_limits(Some(RateLimitDetails {
             primary_window: Some(rate_limit_window(27.0, SESSION_WINDOW_SECONDS)),
             secondary_window: Some(rate_limit_window(82.0, WEEKLY_WINDOW_SECONDS)),
+            monthly_window: None,
         }));
 
         assert_eq!(
@@ -591,6 +598,7 @@ mod tests {
         let (session, weekly) = extract_rate_limits(Some(RateLimitDetails {
             primary_window: Some(rate_limit_window(35.0, WEEKLY_WINDOW_SECONDS)),
             secondary_window: None,
+            monthly_window: None,
         }));
 
         assert!(session.is_none());
@@ -602,6 +610,7 @@ mod tests {
         let (session, weekly) = extract_rate_limits(Some(RateLimitDetails {
             primary_window: Some(rate_limit_window(82.0, WEEKLY_WINDOW_SECONDS)),
             secondary_window: Some(rate_limit_window(27.0, SESSION_WINDOW_SECONDS)),
+            monthly_window: None,
         }));
 
         assert_eq!(session.map(|window| window.used_percent), Some(27.0));
@@ -613,9 +622,53 @@ mod tests {
         let (primary, secondary) = extract_rate_limits(Some(RateLimitDetails {
             primary_window: Some(rate_limit_window(11.0, 60 * 60)),
             secondary_window: Some(rate_limit_window(22.0, 30 * 24 * 60 * 60)),
+            monthly_window: None,
         }));
 
         assert_eq!(primary.map(|window| window.used_percent), Some(11.0));
         assert_eq!(secondary.map(|window| window.used_percent), Some(22.0));
+    }
+
+    #[test]
+    fn surfaces_monthly_window_in_secondary_slot() {
+        let (session, monthly) = extract_rate_limits(Some(RateLimitDetails {
+            primary_window: None,
+            secondary_window: None,
+            monthly_window: Some(rate_limit_window(64.0, 30 * 24 * 60 * 60)),
+        }));
+
+        assert!(session.is_none());
+        assert_eq!(
+            monthly.and_then(|window| window.limit_window_seconds),
+            Some(30 * 24 * 60 * 60)
+        );
+    }
+
+    #[test]
+    fn monthly_window_promoted_into_primary_slot_is_normalized() {
+        // Some backends promote the monthly window into primary_window when
+        // there is no session window; it must land in the long-window slot.
+        let (session, monthly) = extract_rate_limits(Some(RateLimitDetails {
+            primary_window: Some(rate_limit_window(64.0, 30 * 24 * 60 * 60)),
+            secondary_window: None,
+            monthly_window: None,
+        }));
+
+        assert!(session.is_none());
+        assert_eq!(monthly.map(|window| window.used_percent), Some(64.0));
+    }
+
+    #[test]
+    fn weekly_window_wins_secondary_slot_over_monthly() {
+        let (_, secondary) = extract_rate_limits(Some(RateLimitDetails {
+            primary_window: Some(rate_limit_window(27.0, SESSION_WINDOW_SECONDS)),
+            secondary_window: Some(rate_limit_window(82.0, WEEKLY_WINDOW_SECONDS)),
+            monthly_window: Some(rate_limit_window(64.0, 30 * 24 * 60 * 60)),
+        }));
+
+        assert_eq!(
+            secondary.and_then(|window| window.limit_window_seconds),
+            Some(WEEKLY_WINDOW_SECONDS)
+        );
     }
 }

@@ -44,19 +44,24 @@ export async function openExternalUrl(url: string): Promise<void> {
 }
 
 export async function pickAuthJsonFile(): Promise<FileSource | null> {
+  const selected = await pickAuthJsonFiles();
+  return selected.length > 0 ? selected[0] : null;
+}
+
+export async function pickAuthJsonFiles(): Promise<FileSource[]> {
   if (isTauriRuntime()) {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
-      multiple: false,
+      multiple: true,
       filters: [{ name: "JSON", extensions: ["json"] }],
-      title: "Select auth.json file",
+      title: "Select auth.json files",
     });
 
-    if (!selected || Array.isArray(selected)) return null;
-    return selected;
+    if (!selected) return [];
+    return Array.isArray(selected) ? selected : [selected];
   }
 
-  return pickBrowserFile(".json,application/json");
+  return pickBrowserFiles(".json,application/json");
 }
 
 export async function exportFullBackupFile(): Promise<boolean> {
@@ -111,6 +116,16 @@ export function describeFileSource(source: FileSource | null): string {
   return typeof source === "string" ? source : source.name;
 }
 
+export function describeFileSources(sources: FileSource[]): string {
+  if (sources.length === 0) return "No files selected";
+  if (sources.length === 1) return describeFileSource(sources[0]);
+  return `${sources.length} files selected`;
+}
+
+export function fileSourceName(source: FileSource): string {
+  return typeof source === "string" ? source : source.name;
+}
+
 async function fileToBase64(file: File): Promise<string> {
   const bytes = new Uint8Array(await file.arrayBuffer());
   let binary = "";
@@ -148,31 +163,37 @@ function downloadBase64File(
 }
 
 async function pickBrowserFile(accept: string): Promise<File | null> {
+  const files = await pickBrowserFiles(accept);
+  return files.length > 0 ? files[0] : null;
+}
+
+async function pickBrowserFiles(accept: string): Promise<File[]> {
   return new Promise((resolve) => {
     const input = document.createElement("input");
     input.type = "file";
     input.accept = accept;
+    input.multiple = true;
     input.style.display = "none";
     let settled = false;
 
-    const finish = (file: File | null) => {
+    const finish = (files: File[]) => {
       if (settled) return;
       settled = true;
       window.removeEventListener("focus", handleWindowFocus);
       input.remove();
-      resolve(file);
+      resolve(files);
     };
 
     const handleWindowFocus = () => {
       window.setTimeout(() => {
-        finish(input.files?.[0] ?? null);
+        finish(Array.from(input.files ?? []));
       }, 0);
     };
 
     input.addEventListener(
       "change",
       () => {
-        finish(input.files?.[0] ?? null);
+        finish(Array.from(input.files ?? []));
       },
       { once: true }
     );

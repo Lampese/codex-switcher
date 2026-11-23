@@ -6,6 +6,9 @@ mod linux_gtk;
 
 fn main() {
     #[cfg(target_os = "linux")]
+    linux_gtk::sanitize_appimage_env();
+
+    #[cfg(target_os = "linux")]
     for variable in ["GTK_MODULES", "GTK3_MODULES"] {
         if let Some(filtered) = std::env::var_os(variable)
             .as_deref()

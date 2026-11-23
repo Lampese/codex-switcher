@@ -5,8 +5,14 @@ import type {
   AccountWithUsage,
   WarmupSummary,
   ImportAccountsSummary,
+  BulkImportSummary,
 } from "../types";
-import { invokeBackend, isTauriRuntime, type FileSource } from "../lib/platform";
+import {
+  invokeBackend,
+  isTauriRuntime,
+  fileSourceName,
+  type FileSource,
+} from "../lib/platform";
 
 export function useAccounts() {
   const [accounts, setAccounts] = useState<AccountWithUsage[]>([]);
@@ -336,6 +342,50 @@ export function useAccounts() {
     [loadAccounts, refreshUsage]
   );
 
+  // Bulk import of several auth.json files at once (#17). The optional name is
+  // only applied when a single file is imported; otherwise the backend derives
+  // a name per file from its credentials.
+  const importFromFiles = useCallback(
+    async (sources: FileSource[], name: string): Promise<BulkImportSummary> => {
+      if (sources.length === 0) {
+        throw new Error("Please select at least one auth.json file");
+      }
+
+      const singleName = sources.length === 1 ? name : "";
+      let summary: BulkImportSummary;
+      if (sources.every((source) => typeof source === "string")) {
+        summary = await invokeBackend<BulkImportSummary>("add_accounts_from_files", {
+          paths: sources as string[],
+          name: singleName,
+        });
+      } else {
+        const entries = await Promise.all(
+          sources.map(async (source) => {
+            if (typeof source === "string") {
+              // A path can only reach here in a mixed selection, which the
+              // file picker never produces, but keep the fallback sane.
+              throw new Error("Cannot read file path contents in this runtime");
+            }
+            return {
+              name: singleName || undefined,
+              source: fileSourceName(source),
+              contents: await source.text(),
+            };
+          })
+        );
+        summary = await invokeBackend<BulkImportSummary>(
+          "add_accounts_from_auth_json_texts",
+          { entries }
+        );
+      }
+
+      const accountList = await loadAccounts();
+      await refreshUsage(accountList);
+      return summary;
+    },
+    [loadAccounts, refreshUsage]
+  );
+
   const startOAuthLogin = useCallback(async (accountName: string) => {
     try {
       const info = await invokeBackend<{ auth_url: string; callback_port: number }>(
@@ -488,6 +538,7 @@ export function useAccounts() {
     deleteAccount,
     renameAccount,
     importFromFile,
+    importFromFiles,
     exportAccountsSlimText,
     importAccountsSlimText,
     exportAccountsFullEncryptedFile,
